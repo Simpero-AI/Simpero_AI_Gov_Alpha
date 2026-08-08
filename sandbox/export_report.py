@@ -45,9 +45,21 @@ def _psql(sql: str) -> str:
     """Run one SQL statement in the sandbox Postgres container, return stdout."""
     proc = subprocess.run(
         [
-            "docker", "compose", "-f", str(SANDBOX_DIR / "docker-compose.yml"),
-            "exec", "-T", "postgres",
-            "psql", "-U", "doadmin", "-d", "simpero", "-tA", "-c", sql,
+            "docker",
+            "compose",
+            "-f",
+            str(SANDBOX_DIR / "docker-compose.yml"),
+            "exec",
+            "-T",
+            "postgres",
+            "psql",
+            "-U",
+            "doadmin",
+            "-d",
+            "simpero",
+            "-tA",
+            "-c",
+            sql,
         ],
         capture_output=True,
         text=True,
@@ -178,8 +190,14 @@ def main() -> None:
     pages = render_pages(pdf_path, cited_pages)
 
     out = SANDBOX_DIR / "cim" / "report_data.js"
-    data = {"pdf": pdf_path.name, "org": args.org, "claims": claims,
-            "edges": edges, "audit": audit, "pages": pages}
+    data = {
+        "pdf": pdf_path.name,
+        "org": args.org,
+        "claims": claims,
+        "edges": edges,
+        "audit": audit,
+        "pages": pages,
+    }
     out.write_text("window.REPORT = " + json.dumps(data) + ";\n")
     print(f"      wrote {out}  ({out.stat().st_size / 1e6:.1f} MB; gitignored)")
     print(f"      open  {SANDBOX_DIR / 'report.html'}  in a browser")
