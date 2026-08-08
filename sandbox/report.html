@@ -141,6 +141,8 @@
   .fbadge.mismatch { background: #f6e0dd; color: #9b3327; border: 1px solid #d8a49c; }
   .fbadge.other    { background: #edebe5; color: #6e6e73; }
   tr.flagged td:first-child { border-left: 3px solid var(--gold); }
+  .fbadge.corrob { background: #dceee0; color: #1c6b3a; border: 1px solid #9bcbab; }
+  tr.corroborated td:first-child { border-left: 3px solid #2a8f52; }
   .edgesec td, .auditsec td { white-space: normal; vertical-align: top; }
   .etype { font-size: .66rem; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
            border-radius: 99px; padding: .1rem .55rem; white-space: nowrap; }
@@ -304,10 +306,35 @@
 
   // ---------- verification summary ----------
   const edges = R.edges || [], audit = R.audit || [];
+  // Corroboration is NOT "verified" -- that cross-source disposition is a later,
+  // gated pass (see the design). It is the DERIVED signal: the surviving claim of
+  // a same_fact corroboration, or the reconstructed claim of a derived_from chain,
+  // that no contradicts edge and no INTEGRITY flag undercuts. Integrity flags put
+  // the value's own grounding in doubt (binding_unsupported, formula_mismatch,
+  // quote_unresolved); the far more common hygiene flags (ambiguous_unit,
+  // attribute_unmapped, scale_assumed, magnitude_unparseable) describe
+  // normalization confidence -- a different axis -- and do NOT disqualify. The
+  // superseded twin keeps its own badge; we mark the canonical survivor, so the
+  // count maps one-to-one onto the corroboration relationships, not two-to-one.
+  const INTEGRITY_FLAGS = new Set(["binding_unsupported", "formula_mismatch", "quote_unresolved"]);
+  const corrob = new Set(), conflict = new Set();
+  edges.forEach(e => {
+    if (e.type === "contradicts") { conflict.add(e.from); conflict.add(e.to); }
+    else if (e.type === "same_fact") { corrob.add(e.from); corrob.add(e.to); }
+    else if (e.type === "derived_from") { corrob.add(e.from); }  // the reconstructed claim
+  });
+  function isCorroborated(c) {
+    const flags = c.flags || [];
+    return corrob.has(c.id) && !conflict.has(c.id)
+      && !flags.includes("superseded_by_same_fact")   // mark the survivor, not its twin
+      && !flags.some(f => INTEGRITY_FLAGS.has(f));     // hygiene flags don't disqualify
+  }
+  const nCorrob = R.claims.filter(isCorroborated).length;
   const nFlagged = R.claims.filter(c => (c.flags || []).length).length;
   const edgeCount = ty => edges.filter(e => e.type === ty).length;
   const vcards = $("vcards");
-  [[nFlagged, "Flagged claims", "var(--gold)"],
+  [[nCorrob, "Corroborated", "#2a8f52"],
+   [nFlagged, "Flagged claims", "var(--gold)"],
    [edgeCount("same_fact"), "Same-fact", "#0e7c7b"],
    [edgeCount("contradicts"), "Contradicts", "#b3382c"],
    [edgeCount("derived_from"), "Derived-from", "#8a5a00"]]
@@ -397,6 +424,15 @@
     badge.className = "badge";
     badge.textContent = c.status;
     cell.appendChild(badge);
+    if (isCorroborated(c)) {
+      const cb = document.createElement("span");
+      cb.className = "fbadge corrob";
+      cb.textContent = "corroborated \u2713";
+      cb.title = "the surviving claim of a same_fact corroboration or a derived_from "
+        + "reconstruction, with no contradicts edge and no integrity flag -- a signal, "
+        + "not a 'verified' promotion (that cross-source disposition is a later gated pass)";
+      cell.appendChild(cb);
+    }
     if (c.flags && c.flags.length) cell.appendChild(flagBadges(c.flags));
     return cell;
   }
@@ -415,7 +451,10 @@
     const span = c.char_start == null ? "" : c.char_start + "–" + c.char_end;
     const tr = document.createElement("tr");
     tr.className = c.status;
-    if (c.flags && c.flags.length) tr.classList.add("flagged");
+    // corroboration wins the row border over a hygiene flag: a cross-source-agreed
+    // claim that merely has a fuzzy unit reads green, not gold.
+    if (isCorroborated(c)) tr.classList.add("corroborated");
+    else if (c.flags && c.flags.length) tr.classList.add("flagged");
     tr.dataset.search = haystack(c);
 
     if (c.claim_kind === "qualitative") {
