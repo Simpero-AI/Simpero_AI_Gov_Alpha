@@ -57,6 +57,9 @@
           font: 600 .82rem/1 inherit; font-family: inherit; padding: .5rem .95rem;
           border-radius: 99px; cursor: pointer; }
   .pill.on { background: #2d2c28; border-color: #2d2c28; color: #fff; }
+  .pill.corrob.on   { background: #2a8f52; border-color: #2a8f52; }
+  .pill.flag.on     { background: var(--gold); border-color: var(--gold); }
+  .pill.conflict.on { background: #b3382c; border-color: #b3382c; }
   /* Qualitative claims: an assertion, not a figure. Tagged, not squeezed into
      the numeric columns that are meaningless for them. */
   .qtag { display: inline-block; margin-left: .5rem; font-size: .62rem; font-weight: 700;
@@ -503,13 +506,24 @@
   const fmt = n => n.toLocaleString("en-US");
   const statuses = [...new Set(R.claims.map(c => c.status))];
   const pills = $("pills");
-  let activeStatus = "all";
-  ["all", ...statuses].forEach(s => {
+  let activeFilter = () => true;
+  // Status pills (All + each status present), then verification-dimension pills.
+  // The verification pills matter here precisely because status does NOT vary on a
+  // PDF -- every figure is emitted "proposed" -- so "Corroborated" is the only way
+  // to surface the few cross-source-agreed claims without hunting page by page.
+  const pillSpecs = [
+    { label: "All", pred: () => true },
+    ...statuses.map(s => ({ label: s[0].toUpperCase() + s.slice(1), pred: c => c.status === s })),
+    { label: "Corroborated", pred: isCorroborated, show: nCorrob > 0, cls: "corrob" },
+    { label: "Flagged", pred: c => (c.flags || []).length > 0, show: nFlagged > 0, cls: "flag" },
+    { label: "Contradicts", pred: c => conflict.has(c.id), show: conflict.size > 0, cls: "conflict" },
+  ].filter(spec => spec.show !== false);
+  pillSpecs.forEach((spec, i) => {
     const b = document.createElement("button");
-    b.className = "pill" + (s === "all" ? " on" : "");
-    b.textContent = s[0].toUpperCase() + s.slice(1);
+    b.className = "pill" + (i === 0 ? " on" : "") + (spec.cls ? " " + spec.cls : "");
+    b.textContent = spec.label;
     b.addEventListener("click", () => {
-      activeStatus = s;
+      activeFilter = spec.pred;
       figPage = 0;
       pills.querySelectorAll(".pill").forEach(p => p.classList.toggle("on", p === b));
       applyFilter();
@@ -522,7 +536,7 @@
   function matches(entry) {
     const c = R.claims[entry.i];
     const needle = q.value.trim().toLowerCase();
-    return (activeStatus === "all" || c.status === activeStatus)
+    return activeFilter(c)
       && (!needle || entry.tr.dataset.search.includes(needle));
   }
   function applyFilter() {
