@@ -28,6 +28,24 @@ def test_recall_edge_cases() -> None:
     assert recall_at_k(["a"], {"a"}, 10) == 1.0
 
 
+def test_k_zero_retrieves_nothing() -> None:
+    # k=0 is accepted (only k<0 raises), so it must mean "the top 0" -- an empty
+    # retrieval that finds none of the relevant set. Getting this wrong reports a
+    # perfect score for a lane that returned nothing, which is the one direction
+    # a no-regression floor can never catch.
+    assert recall_at_k(["a", "b"], {"a"}, 0) == 0.0
+    assert ndcg_at_k(["a", "b"], {"a"}, 0) == 0.0
+    # An unlabelled query stays vacuously satisfied, k notwithstanding.
+    assert recall_at_k(["a"], set(), 0) == 1.0
+
+
+def test_negative_k_is_rejected() -> None:
+    with pytest.raises(ValueError):
+        recall_at_k(["a"], {"a"}, -1)
+    with pytest.raises(ValueError):
+        ndcg_at_k(["a"], {"a"}, -1)
+
+
 def test_ndcg_perfect_ordering_is_one() -> None:
     assert ndcg_at_k(["a", "b", "c"], {"a", "b"}, 3) == pytest.approx(1.0)
 

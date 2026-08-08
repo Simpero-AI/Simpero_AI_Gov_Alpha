@@ -34,6 +34,12 @@ def _top_k_distinct(ranked: Sequence[K], k: int) -> list[K]:
     but it routes through here too so the two metrics always see the same top k.
     """
     out: list[K] = []
+    if k <= 0:
+        # The truncation below only fires after a key is appended, so k=0 would
+        # otherwise fall through and return the whole deduped ranking -- making
+        # recall@0 report 1.0 for a top-0 that retrieved nothing. k=0 is a legal
+        # input (the callers reject only k<0), so it must return the empty top.
+        return out
     seen: set[K] = set()
     for key in ranked:
         if key in seen:

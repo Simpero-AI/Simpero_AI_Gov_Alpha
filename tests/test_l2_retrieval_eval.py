@@ -209,7 +209,16 @@ async def test_retrieval_meets_the_no_regression_floor() -> None:
         relevant_by_query: dict[str, set[int]] = {}
         for q in gold["queries"]:
             hits = await _search(ORG, q["query_text"])
-            ranked_by_query[q["id"]] = [key_of[h.content] for h in hits if h.content in key_of]
+            ranked = [key_of[h.content] for h in hits if h.content in key_of]
+            # Only golden chunks live under this org, so every hit must join back.
+            # A dropped hit would shorten the ranking silently, promoting the hits
+            # behind it and inflating both metrics -- the gate would read greener
+            # the more the join broke. Fail loudly instead.
+            assert len(ranked) == len(hits), (
+                f"query {q['id']!r}: {len(hits) - len(ranked)} retrieved chunk(s) did not "
+                "join back to the golden corpus"
+            )
+            ranked_by_query[q["id"]] = ranked
             relevant_by_query[q["id"]] = set(q["relevant"])
         report = evaluate_retrieval(ranked_by_query, relevant_by_query, ks=KS)
     finally:
