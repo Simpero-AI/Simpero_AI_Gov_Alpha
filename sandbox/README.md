@@ -6,8 +6,9 @@ Run the whole pipeline on your own machine — with **no cloud database**. No Di
 - **Retrieval** — upload a CIM, ask a question, and see the **chunks** the hybrid search returns (dense + sparse), live in a small web app.
 
 ```
-./sandbox/run.sh path/to/cim.pdf    # PARSING → parse → extract → ingest → opens the claims report
+./sandbox/run.sh path/to/cim.pdf    # PARSING → parse → extract → ingest → reconcile → opens the claims report
                                     #   (auto-brings the sandbox up on the first run — one command)
+./sandbox/run.sh path/to/cim.pdf --audit   # …and re-check each figure against its cited span
 ./sandbox/retrieve.sh               # RETRIEVAL → serve the upload / ask / chunks UI
 ./sandbox/down.sh                   # stop  (--wipe also deletes the data)
 # ./sandbox/up.sh                   # optional: bring the DB up on its own (run.sh does this for you)
@@ -106,10 +107,14 @@ export ANTHROPIC_API_KEY=sk-ant-...
 
 # or a fully offline, key-free run:
 ./sandbox/run.sh /path/to/your-cim.pdf --entity "Target Co" --tables-only
+
+# add --audit to re-check each figure against its own cited span (needs a key):
+./sandbox/run.sh /path/to/your-cim.pdf --entity "Target Co" --audit
 ```
 
 - `--entity` names the company the claims are about (optional; defaults to "Target Co").
 - `--org` sets the demo tenant key (optional; defaults to `sandbox_demo`).
+- `--audit` runs the binding auditor after extraction (opt-in; see below).
 
 **Extraction tiers** — each a strict superset of the one above it:
 
@@ -121,33 +126,57 @@ export ANTHROPIC_API_KEY=sk-ant-...
 
 The prose tiers call the Anthropic API and require **`ANTHROPIC_API_KEY`** (or `ANTHROPIC_AUTH_TOKEN`) exported in your shell. `run.sh` checks for it up front and stops before touching your CIM if it is absent. The key is **never** read from `sandbox/.env.sandbox` — that file is committed, and an API key does not belong in it; it comes from your environment only. Your parse-service checkout must be recent enough to have the prose tiers (the `--prose`/`--qualitative` flags on `emit_claims.py`); `git pull` it if `--tables-only` works but the prose tiers report an unknown flag.
 
+**Binding audit (`--audit`, optional).** Pass `--audit` to run the binding auditor after extraction: it re-reads each figure that carries a page-header scale against its *own* cited span and flags `binding_unsupported` — with a mode (`attribute_mismatch`, `basket_collapse`, `scale_absurd`, …) — when the span does not actually support the value. It is **flag-only**: it never changes a claim's status or value. It makes one model call per audited figure, so it needs the API key just like the prose tiers. Off by default; when on, it fills the report's **Binding-audit panel** ([§4](#4-the-html-report)).
+
 **Confidentiality:** the CIM you pass is copied into `sandbox/cim/`, which is **gitignored and never committed**. Real deal documents are confidential — don't commit them. The prose tiers additionally **send each prose page's text to the Anthropic API**, so a real deal document leaves your machine on those tiers; `--tables-only` makes no network call at all. No sample document ships in this repo; bring your own (any financial-statement PDF with a table under a scale header works well — income statements are ideal).
 
-`run.sh` narrates the five steps demo-style — a live spinner with elapsed time during the parse (the slow step on long documents), then a summary of what landed instead of a raw table dump — and finishes by opening the HTML report in your browser:
+`run.sh` narrates the six steps demo-style — a live spinner with elapsed time during the parse (the slow step on long documents), then a summary of what landed instead of a raw table dump — and finishes by opening the HTML report in your browser (counts below are illustrative; yours will differ):
 
 ```
-[1/5] Copying the CIM into sandbox/cim/  (gitignored, never committed)   ✓
-[2/5] Parse → extract → emit   (docling layout analysis)
+[1/6] Copying the CIM into sandbox/cim/  (gitignored, never committed)   ✓
+[2/6] Parse → extract → emit   (tables + prose + qualitative; docling layout analysis)
       ⠹ analyzing the document… 23s          ← spinner, replaced on completion by:
-      ✓ emitted 576 claims (573 cited, 3 missing), 0 flags
-[3/5] Ingest into the local claims spine   (backend, as the dd_app app role)
+      ✓ emitted 576 claims (573 resolved, 3 missing), 41 flags
+[3/6] Ingest into the local claims spine   (backend, as the dd_app app role)
       576 claims validated against the contract.
       dd_app, tenant 'sandbox_demo': sees 576 claims (inserted 576).
       dd_app, a DIFFERENT tenant: sees 0 claims (RLS isolation).
-[4/5] Verifying what landed   (reading THIS run's claims back from Postgres)
+[4/6] Reconcile + check consistency   (3a same-fact, 3b formula reconstruction → edges)
+      runs the verification passes on THIS tenant's claims; writes claim edges + flags.
+      3a reconciliation (same fact across pages/tiers):
+            same_fact edges .......... 18   (same figure on >1 page, agreeing)
+            contradicts edges ........ 4    (same fact, two different numbers)
+            claims flagged ........... 18
+      3b consistency (formula reconstruction):
+            derived_from edges ....... 2    (a total rebuilt from its own operands)
+            skipped (missing operands) 7    (--tables-only writes no computational claims)
+[5/6] Reading the claims back   (this run's claims, from Postgres)
       Claims stored ............ 576
       With exact citation ...... 573   (page + character span + word-level boxes)
       Missing citation ......... 3     (nothing resolved — recorded honestly, no fabrication)
-      Distinct attributes ...... 533
+      Distinct attributes ...... 41
       Pages with claims ........ 37    (pages 5-49 of the document)
-[5/5] Building the interactive report   (rendered pages + click-through citations)
+[6/6] Building the interactive report   (rendered pages + click-through citations)
 ```
 
 Read it top to bottom:
 
 - The `dd_app sees 576 / a different tenant sees 0` pair is the **tenant isolation proof** — enforced by Postgres row-level security, exercised as the `dd_app` app role.
-- The step-4 summary is scoped to **this run's `session_id`** — earlier runs for the same tenant stay in the table but don't inflate the numbers. (The "tenant sees N" line in step 3 is the tenant's all-runs total; wipe first if you want it to match.)
-- Every claim carries the raw printed value, the scaled `normalized` number, an exact character span, and `status = proposed` (cited, pending verification). None is fabricated.
+- **Step 4 is the verification layer.** It runs on *this tenant's* claims and writes claim-to-claim **edges** (and flags), never mutating a claim's status: `same_fact` corroborates a figure across pages, `contradicts` marks two numbers for one fact, `derived_from` records a total the parser rebuilt from its own operands. 3b (`derived_from`) needs *computational* claims, which only the prose/qualitative tiers emit — `--tables-only` writes none.
+- **Step 5** reads back only **this run**, scoped by `session_id` — earlier runs stay in the table but don't inflate its counts. **Step 4 is not run-scoped:** its reconciliation passes match every claim with a `NULL data_source_id` — *all* of the tenant's demo runs — so on a second run without a wipe, earlier runs' claims form cross-run `same_fact` / `contradicts` edges and inflate the step-4 numbers. (The step-3 "tenant sees N" line is likewise an all-runs total.) Start clean to make every count match this run — see below.
+- Every claim carries the raw printed value, the scaled `normalized` number, and an exact character span. **None is fabricated** — see the status note below for what `proposed` / `cited` / `missing` mean.
+
+### What `status` means
+
+The status column is **not** a verification verdict — it records how the value was *read*, and the parser never promotes it:
+
+| status | meaning |
+|---|---|
+| `proposed` | a figure read from a **PDF** span (or an unresolved spreadsheet formula). The model *proposes* it from the page; the parser will not self-certify a PDF reading, so **every PDF figure is `proposed`** — even with a perfect citation. |
+| `cited` | a **directly-read spreadsheet cell** (an `.xlsx` literal). Reading the bytes *is* the verification, so nothing is left to check. PDFs never reach this. |
+| `missing` | nothing resolved — no span. Recorded honestly rather than guessed. |
+
+So on a PDF CIM you see a wall of `proposed` and a few `missing`, and **that is correct**. "With exact citation … N" in step 5 counts claims that *resolved to a span* — those are `proposed` claims that carry a citation, which is a different axis from the status word. Promoting a claim to a `verified` status would assert a cross-source check the pipeline deliberately leaves to a later gated pass; here, verification surfaces as the **edges and flags** from step 4 (and the corroborated cue in the report), never as a status change.
 
 For a pristine client demo where every count matches the run, start clean: `./sandbox/down.sh --wipe && ./sandbox/up.sh`.
 
@@ -156,32 +185,55 @@ For a pristine client demo where every count matches the run, start clean: `./sa
 ## 4. The HTML report
 
 `run.sh` finishes by rebuilding `sandbox/report.html`'s data and opening it
-in your browser (re-open it any time — no server needed). It shows:
+in your browser (re-open it any time — no server needed). It has two layers:
+what was **extracted**, and what **verification** made of it.
+
+**Extraction**
 
 - **Header + stat cards** — entity, source file, tenant, page range, and
-  counts for total claims, proposed, missing citation, distinct attributes.
+  counts for total claims, figures, assertions, missing citation, and distinct
+  attributes.
 - **Search across every column** — attribute, raw, normalized, unit, scale
-  source, page, span, status, flags — combined with status filter pills
-  (All / Proposed / Missing / …, built from the statuses actually present)
-  and a live "Showing X of Y" count.
-- **A paginated table** — 50 rows per page with Prev/Next; the pager hides
-  itself when everything fits on one page. Long attribute names wrap so the
-  other columns stay visible.
-- **Click-through citations** — any cited row has a clickable page number:
-  a modal opens with the actual rendered PDF page, the clicked claim's
-  word-boxes highlighted in gold and every other cited claim on that page
-  outlined in teal (Esc / click outside / × closes). `missing` rows stay
-  plain text — they have no span/bbox to show.
+  source, page, span, status, flags — with a live "Showing X of Y" count and a
+  paginated table (50 rows per page with Prev/Next; the pager hides when
+  everything fits). Long attribute names wrap so the other columns stay visible.
+- **Click-through citations** — any resolved row has a clickable page number: a
+  modal opens the actual rendered PDF page with the clicked claim's word-boxes
+  highlighted in gold and every other cited claim on the page outlined in teal
+  (Esc / click outside / × closes). `missing` rows stay plain text.
+
+**Verification** (from step 4, plus the binding audit if you passed `--audit`)
+
+- **Verification summary cards** — Corroborated, Flagged claims, Same-fact,
+  Contradicts, Derived-from: a quick read on how much of the parse the
+  verification layer touched.
+- **Filter chips** — alongside the status chips (All / Proposed / Missing) sit
+  **Corroborated / Flagged / Contradicts** chips, each shown only when
+  non-empty. On a PDF, where every row is `proposed`, these are how you find the
+  handful of claims that matter — one click isolates them.
+- **Flag + corroborated badges** — the status cell carries any flags (e.g.
+  `ambiguous_unit`, `binding?`) and a green **`corroborated ✓`** badge on the
+  surviving claim of a `same_fact` pair (or the reconstructed claim of a
+  `derived_from` chain) when no contradicts edge and no *integrity* flag
+  undercuts it. Rows are bordered to match — green for corroborated, gold for
+  flagged. Corroborated is a **signal derived from the edges and flags, not a
+  `verified` status** — the parser never stamps one (see the status note in §3).
+- **Relationships table** — every claim-to-claim edge the step-4 passes wrote:
+  type (`same_fact` / `contradicts` / `derived_from`), the two claims, and the
+  basis.
+- **Binding-audit panel** — one row per binding-auditor verdict, with its mode
+  (`attribute_mismatch`, `basket_collapse`, `scale_absurd`, …) and the evidence.
+  **Empty unless you ran with `--audit`** (see §3).
 
 The report always reflects the **latest run** for the tenant (scoped by
 `session_id`), not the accumulation of every run before it.
 
 **Confidentiality by construction:** `report.html` is a data-free template,
-committed to git. Everything confidential — the claims and the page images,
-rendered at 144 DPI with pypdfium2 from the parser repo's venv — is written
-to `sandbox/cim/report_data.js`, which the template loads via a `<script>`
-tag (works from `file://`, no server needed). `cim/` is gitignored, so no
-CIM content can leak onto git. Only pages carrying at least one bbox-cited
+committed to git. Everything confidential — the claims, the edges, and the page
+images, rendered at 144 DPI with pypdfium2 from the parser repo's venv — is
+written to `sandbox/cim/report_data.js`, which the template loads via a
+`<script>` tag (works from `file://`, no server needed). `cim/` is gitignored,
+so no CIM content can leak onto git. Only pages carrying at least one bbox-cited
 claim are rendered.
 
 The data file is a static snapshot — re-run `run.sh` to refresh it, or
