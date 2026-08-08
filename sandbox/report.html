@@ -125,6 +125,39 @@
               vertical-align: -.05em; }
   .legend .g i { background: rgba(212,160,23,.30); border: 2px solid var(--gold); }
   .legend .t i { border: 2px solid var(--teal); }
+  /* ---- verification: flags, edges, binding audit ---- */
+  .vcards { display: grid; grid-template-columns: repeat(auto-fit, minmax(155px, 1fr));
+            gap: .8rem; margin: -.4rem 0 1.8rem; }
+  .vcard { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+           padding: .7rem 1rem; display: flex; align-items: center; gap: .55rem; }
+  .vcard b { font: 400 1.5rem/1 var(--serif); font-variant-numeric: tabular-nums; }
+  .vcard span { font-size: .68rem; font-weight: 600; letter-spacing: .06em;
+                text-transform: uppercase; color: var(--mut); }
+  .vcard i { width: .7em; height: .7em; border-radius: 3px; display: inline-block; flex: none; }
+  .flags { display: inline-flex; gap: .25rem; flex-wrap: wrap; vertical-align: middle; }
+  .fbadge { font-size: .6rem; font-weight: 700; letter-spacing: .03em; text-transform: uppercase;
+            border-radius: 99px; padding: .06rem .42rem; white-space: nowrap; margin-left: .3rem; }
+  .fbadge.binding  { background: #fbeecb; color: #8a5a00; border: 1px solid #e6c766; }
+  .fbadge.mismatch { background: #f6e0dd; color: #9b3327; border: 1px solid #d8a49c; }
+  .fbadge.other    { background: #edebe5; color: #6e6e73; }
+  tr.flagged td:first-child { border-left: 3px solid var(--gold); }
+  .edgesec td, .auditsec td { white-space: normal; vertical-align: top; }
+  .etype { font-size: .66rem; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
+           border-radius: 99px; padding: .1rem .55rem; white-space: nowrap; }
+  .etype.contradicts  { background: #f6e0dd; color: #9b3327; }
+  .etype.same_fact    { background: #d9efee; color: #0e7c7b; }
+  .etype.derived_from { background: #fbeecb; color: #8a5a00; }
+  .etype.supersedes   { background: #edebe5; color: #6e6e73; }
+  .eclaim .a { color: var(--mut); }
+  .eclaim .v { font-variant-numeric: tabular-nums; color: var(--num); font-weight: 600; }
+  .edgesec table { min-width: 820px; }
+  .ebasis { color: var(--mut); font-size: .8rem; min-width: 240px; overflow-wrap: anywhere;
+            display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+            overflow: hidden; }
+  .amode { font-size: .66rem; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
+           background: #f6e0dd; color: #9b3327; border-radius: 99px; padding: .1rem .55rem;
+           white-space: nowrap; }
+  .aev { color: var(--ink); font-size: .84rem; overflow-wrap: anywhere; }
 </style>
 </head>
 <body>
@@ -140,6 +173,8 @@
   </div>
 
   <div class="cards" id="cards" hidden></div>
+
+  <div class="vcards" id="vcards" hidden></div>
 
   <div class="controls" id="controls" hidden>
     <div class="search">
@@ -179,6 +214,30 @@
     <thead><tr><th>attribute</th><th>class</th><th>quote</th>
     <th class="num">page&nbsp;↑</th><th class="num">span</th><th>status</th></tr></thead>
     <tbody id="asrtbody"></tbody>
+    </table></div>
+  </section>
+
+  <!-- RELATIONSHIPS: the claim-to-claim edges the verification passes wrote. -->
+  <section class="tsec edgesec" id="edgesec" hidden>
+    <div class="sechead">
+      <h2 class="secttl">Relationships<span class="cnt" id="edgecount"></span></h2>
+      <span class="showing muted">3a reconciliation &amp; 3b consistency — same_fact, contradicts, derived_from</span>
+    </div>
+    <div class="tablewrap"><table>
+    <thead><tr><th>type</th><th>claim</th><th>related claim</th><th>by</th><th>basis</th></tr></thead>
+    <tbody id="edgebody"></tbody>
+    </table></div>
+  </section>
+
+  <!-- BINDING AUDIT: the independent reader's verdicts (SIM-359). -->
+  <section class="tsec auditsec" id="auditsec" hidden>
+    <div class="sechead">
+      <h2 class="secttl">Binding audit<span class="cnt" id="auditcount"></span></h2>
+      <span class="showing muted">an independent reader flagged these bindings — the span quote is the evidence</span>
+    </div>
+    <div class="tablewrap"><table>
+    <thead><tr><th>verdict</th><th>evidence (span quote)</th></tr></thead>
+    <tbody id="auditbody"></tbody>
     </table></div>
   </section>
 </div>
@@ -243,6 +302,24 @@
     });
   cards.hidden = false;
 
+  // ---------- verification summary ----------
+  const edges = R.edges || [], audit = R.audit || [];
+  const nFlagged = R.claims.filter(c => (c.flags || []).length).length;
+  const edgeCount = ty => edges.filter(e => e.type === ty).length;
+  const vcards = $("vcards");
+  [[nFlagged, "Flagged claims", "var(--gold)"],
+   [edgeCount("same_fact"), "Same-fact", "#0e7c7b"],
+   [edgeCount("contradicts"), "Contradicts", "#b3382c"],
+   [edgeCount("derived_from"), "Derived-from", "#8a5a00"]]
+    .forEach(([n, label, color]) => {
+      const d = document.createElement("div"); d.className = "vcard";
+      const dot = document.createElement("i"); dot.style.background = color;
+      const b = document.createElement("b"); b.textContent = n.toLocaleString("en-US");
+      const s = document.createElement("span"); s.textContent = label;
+      d.append(dot, b, s); vcards.appendChild(d);
+    });
+  if (edges.length || nFlagged || audit.length) vcards.hidden = false;
+
   // ---------- modal ----------
   const modal = $("modal"), wrap = $("pagewrap");
   function boxDiv(b, cls, w, h) {
@@ -277,6 +354,23 @@
   // Two separate tables, because the two claim kinds answer different questions.
   // A figure has a magnitude (normalized/unit/scale); an assertion has none, so
   // those columns would be dead weight -- it carries a class and a quote instead.
+  const FLAG_META = {
+    binding_unsupported: { cls: "binding",  label: "binding?" },
+    formula_mismatch:    { cls: "mismatch", label: "formula \u2717" },
+  };
+  function flagBadges(flags) {
+    const span = document.createElement("span");
+    span.className = "flags";
+    (flags || []).forEach(f => {
+      const meta = FLAG_META[f] || { cls: "other", label: f.replace(/_/g, " ") };
+      const b = document.createElement("span");
+      b.className = "fbadge " + meta.cls;
+      b.textContent = meta.label;
+      b.title = f;
+      span.appendChild(b);
+    });
+    return span;
+  }
   function td(text, cls) {
     const el = document.createElement("td");
     if (cls) el.className = cls;
@@ -303,6 +397,7 @@
     badge.className = "badge";
     badge.textContent = c.status;
     cell.appendChild(badge);
+    if (c.flags && c.flags.length) cell.appendChild(flagBadges(c.flags));
     return cell;
   }
   function haystack(c) {
@@ -320,6 +415,7 @@
     const span = c.char_start == null ? "" : c.char_start + "–" + c.char_end;
     const tr = document.createElement("tr");
     tr.className = c.status;
+    if (c.flags && c.flags.length) tr.classList.add("flagged");
     tr.dataset.search = haystack(c);
 
     if (c.claim_kind === "qualitative") {
@@ -419,6 +515,58 @@
   q.addEventListener("input", () => { figPage = 0; applyFilter(); });
   applyFilter();
   $("controls").hidden = false;
+
+  // ---------- relationships (edges) ----------
+  const byId = new Map(R.claims.map(c => [c.id, c]));
+  function claimCell(id) {
+    const cell = document.createElement("td");
+    const c = byId.get(id);
+    if (!c) { cell.textContent = "\u2014"; return cell; }
+    const box = document.createElement("span"); box.className = "eclaim";
+    const a = document.createElement("span"); a.className = "a"; a.textContent = c.attribute + "  ";
+    const v = document.createElement("span"); v.className = "v";
+    v.textContent = (c.value && c.value.raw != null) ? String(c.value.raw) : "";
+    box.append(a, v);
+    if (c.page != null) {
+      const pg = document.createElement("span"); pg.className = "a";
+      pg.textContent = "  · p." + c.page; box.append(pg);
+    }
+    cell.appendChild(box);
+    return cell;
+  }
+  const edgeBody = $("edgebody");
+  edges.forEach(e => {
+    const tr = document.createElement("tr");
+    const tcell = document.createElement("td");
+    const tb = document.createElement("span"); tb.className = "etype " + e.type;
+    tb.textContent = e.type.replace(/_/g, " ");
+    tcell.appendChild(tb); tr.appendChild(tcell);
+    tr.appendChild(claimCell(e.from));
+    tr.appendChild(claimCell(e.to));
+    tr.appendChild(td(e.created_by, "mut"));
+    const basis = document.createElement("td"); basis.className = "ebasis";
+    basis.textContent = e.basis || "";
+    tr.appendChild(basis);
+    edgeBody.appendChild(tr);
+  });
+  $("edgecount").textContent = "\u00b7 " + fmt(edges.length);
+  $("edgesec").hidden = edges.length === 0;
+
+  // ---------- binding audit verdicts ----------
+  const auditBody = $("auditbody");
+  audit.forEach(a => {
+    const tr = document.createElement("tr");
+    const m = document.createElement("td");
+    const mb = document.createElement("span"); mb.className = "amode";
+    mb.textContent = (a.mode || "").replace(/_/g, " ");
+    m.appendChild(mb); tr.appendChild(m);
+    const ev = document.createElement("td"); ev.className = "aev";
+    ev.textContent = a.evidence || "";
+    tr.appendChild(ev);
+    auditBody.appendChild(tr);
+  });
+  $("auditcount").textContent = "\u00b7 " + fmt(audit.length);
+  $("auditsec").hidden = audit.length === 0;
 })();
 </script>
 </body>
