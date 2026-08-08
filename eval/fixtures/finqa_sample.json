@@ -1,0 +1,272 @@
+[
+  {
+    "id": "RE/2016/page_40.pdf-2",
+    "question": "what was the change in the amount of pre-tax catastrophe losses from 2015 to 2016 in millions",
+    "program": "subtract(301.2, 53.8)",
+    "exe_ans": 247.4
+  },
+  {
+    "id": "AES/2002/page_60.pdf-4",
+    "question": "for 2002 what is the range between the largest and smallest segments , based on % (  % ) of total revenue?",
+    "program": "subtract(36%, 14%)",
+    "exe_ans": 0.22
+  },
+  {
+    "id": "AON/2015/page_62.pdf-3",
+    "question": "what is the net cash outflow reported for purchases of shares from noncontrolling interests and for dividends paid to noncontrolling interests?",
+    "program": "add(3, -24)",
+    "exe_ans": -21.0
+  },
+  {
+    "id": "MMM/2015/page_50.pdf-2",
+    "question": "what was the ratio of the floating rate notes included in the long-term debt payments due in 2016 to 2017",
+    "program": "divide(126, 96)",
+    "exe_ans": 1.3125
+  },
+  {
+    "id": "PNC/2012/page_58.pdf-2",
+    "question": "dodd-frank was responsible for what time negative impact , in millions , on revenue in 2011 and 2012?",
+    "program": "add(314, 75)",
+    "exe_ans": 389.0
+  },
+  {
+    "id": "GS/2012/page_154.pdf-3",
+    "question": "what was the change in millions of securities purchased under agreements to resell between 2011 and 2012?",
+    "program": "subtract(141334, 187789)",
+    "exe_ans": -46455.0
+  },
+  {
+    "id": "GS/2017/page_68.pdf-1",
+    "question": "what was the change in percentage points in the effective income tax rate for 2017 from 2016?",
+    "program": "subtract(28.2, 22.0)",
+    "exe_ans": 6.2
+  },
+  {
+    "id": "MSI/2008/page_110.pdf-3",
+    "question": "what is the percent change in total balance of stockholder equity between january 2006 and 2007?",
+    "program": "subtract(16, 2), divide(#0, 2)",
+    "exe_ans": 7.0
+  },
+  {
+    "id": "ETR/2002/page_38.pdf-2",
+    "question": "what is the percent change in average daily earnings at risk for the period from 2001 to 2002?",
+    "program": "subtract(10.8, 6.4), divide(#0, 6.4)",
+    "exe_ans": 0.6875
+  },
+  {
+    "id": "UPS/2009/page_33.pdf-3",
+    "question": "what is the roi of an investment in s&p500 in 2004 and sold in 2006?",
+    "program": "subtract(121.48, const_100), divide(#0, const_100)",
+    "exe_ans": 0.2148
+  },
+  {
+    "id": "AMT/2005/page_84.pdf-4",
+    "question": "assuming that intangible asset will be sold , what will be the accumulated deprecation at the end of 2007 , in millions?",
+    "program": "divide(646560, const_1000), add(#0, 183.6), add(#1, 178.3)",
+    "exe_ans": 1008.46
+  },
+  {
+    "id": "ETR/2016/page_18.pdf-3",
+    "question": "what would net revenue have been in 2016 if there wasn't a gain from the fitzpatrick reimbursement agreement?",
+    "program": "subtract(1542, 41)",
+    "exe_ans": 1501.0
+  },
+  {
+    "id": "DISCA/2013/page_60.pdf-3",
+    "question": "what was the five year average uncompounded annual return for the s&p 500?",
+    "program": "subtract(2013, 2008), subtract(204.63, const_100), divide(#1, #0)",
+    "exe_ans": 20.926
+  },
+  {
+    "id": "AWK/2018/page_103.pdf-1",
+    "question": "by how much did the long-term debt and redeemable preferred stock at redemption value portion of the capital structure increase since 2016?",
+    "program": "subtract(52.4%, 46.4%)",
+    "exe_ans": 0.06
+  },
+  {
+    "id": "AWK/2017/page_172.pdf-4",
+    "question": "what was the change in the rental amount from 2017 to 2018 in millions",
+    "program": "subtract(29, 15)",
+    "exe_ans": 14.0
+  },
+  {
+    "id": "UNP/2012/page_34.pdf-4",
+    "question": "what was the change in millions of cash provided by operating activities from 2010 to 2011?",
+    "program": "subtract(5873, 4105)",
+    "exe_ans": 1768.0
+  },
+  {
+    "id": "HWM/2015/page_72.pdf-2",
+    "question": "considering the fourth quarter , what is the variation between the low trading stock prices during 2014 and 2015?",
+    "program": "subtract(13.71, 7.81)",
+    "exe_ans": 5.9
+  },
+  {
+    "id": "HII/2013/page_127.pdf-1",
+    "question": "as of december 31 , 2013 , what is the value of securities remaining available for future issuance",
+    "program": "multiply(2786760, 35.01)",
+    "exe_ans": 97564467.6
+  },
+  {
+    "id": "BLK/2010/page_126.pdf-1",
+    "question": "what are the level 2 significant other observable inputs for the fair value of plan assets as a percentage of quoted prices significant in active other markets for observable identical assets inputs as of december 31 , 2010?",
+    "program": "divide(3, 16)",
+    "exe_ans": 0.1875
+  },
+  {
+    "id": "IPG/2014/page_37.pdf-4",
+    "question": "what is the net change in cash , cash equivalents and marketable securities in 2014?",
+    "program": "subtract(1667.2, 1642.1)",
+    "exe_ans": 25.1
+  },
+  {
+    "id": "MA/2010/page_107.pdf-1",
+    "question": "what was the percent of the change in the significant unobservable inputs from 2008 to 2009",
+    "program": "subtract(180, 192), divide(#0, 192)",
+    "exe_ans": -0.0625
+  },
+  {
+    "id": "CME/2017/page_57.pdf-3",
+    "question": "what was the loss on datacenter and related legal fees in 2015 in millions dollars?",
+    "program": "divide(28.6, 2%)",
+    "exe_ans": 1430.0
+  },
+  {
+    "id": "UA/2011/page_71.pdf-1",
+    "question": "what was the percentage increase the contingent rent expense from 2010 to 2011",
+    "program": "subtract(3.6, 2.0), divide(#0, 2.0)",
+    "exe_ans": 0.8
+  },
+  {
+    "id": "UNP/2011/page_40.pdf-1",
+    "question": "assuming 4 inventory turns per year , what would q12012 cash flow be from the receivables balance on december 31 , 2011 , in billions?",
+    "program": "divide(18.8, 4)",
+    "exe_ans": 4.7
+  },
+  {
+    "id": "MSI/2018/page_32.pdf-1",
+    "question": "without contributing favorable currency rates , what might the percentage increase of net sales be from 2017 to 2018?",
+    "program": "subtract(7343, 32), subtract(#0, 6380)",
+    "exe_ans": 931.0
+  },
+  {
+    "id": "LMT/2006/page_54.pdf-4",
+    "question": "what was the ratio of the increase in the operating profit for m&fc to pt&ts",
+    "program": "divide(80, 10)",
+    "exe_ans": 8.0
+  },
+  {
+    "id": "AWK/2012/page_118.pdf-1",
+    "question": "what was the net change in tax positions in 2010",
+    "program": "add(907, -2740)",
+    "exe_ans": -1833.0
+  },
+  {
+    "id": "SLG/2013/page_133.pdf-3",
+    "question": "what was the increase in the shares granted from 2012 to 2013",
+    "program": "subtract(192563, 92729)",
+    "exe_ans": 99834.0
+  },
+  {
+    "id": "ADI/2015/page_72.pdf-3",
+    "question": "what was the total amount of money set aside from the market cap for restricted stock in 2014?",
+    "program": "multiply(3188, 43.46)",
+    "exe_ans": 138550.48
+  },
+  {
+    "id": "PPG/2006/page_21.pdf-2",
+    "question": "what would net income have been for 2006 without the environmental remediation costs?",
+    "program": "add(711, 106), multiply(#0, const_1000000)",
+    "exe_ans": 817000000.0
+  },
+  {
+    "id": "UPS/2009/page_84.pdf-1",
+    "question": "what is the current total of service cost and interest cost?",
+    "program": "divide(10, 1%)",
+    "exe_ans": 1000.0
+  },
+  {
+    "id": "MSI/2009/page_69.pdf-1",
+    "question": "in 2007 what was the company 2019s consolidated net sales in millions",
+    "program": "divide(7729, 21%)",
+    "exe_ans": 36804.7619
+  },
+  {
+    "id": "MRO/2011/page_39.pdf-2",
+    "question": "what was the total revenues for 2011 and 2010 , in millions?",
+    "program": "add(14663, 11690)",
+    "exe_ans": 26353.0
+  },
+  {
+    "id": "FITB/2013/page_163.pdf-2",
+    "question": "during 2013 , what were total losses in millions for charge-offs on new oreo properties and negative fair value adjustments on existing oreo properties?",
+    "program": "add(19, 26)",
+    "exe_ans": 45.0
+  },
+  {
+    "id": "VNO/2003/page_97.pdf-2",
+    "question": "what was the change in principal payments due in 2006 versus 2007 in thousands?",
+    "program": "subtract(551539, 807784)",
+    "exe_ans": -256245.0
+  },
+  {
+    "id": "HII/2012/page_47.pdf-1",
+    "question": "what was the net increase in total assets during the 5 year period ?",
+    "program": "subtract(6392, 4821), multiply(#0, const_1000000)",
+    "exe_ans": 1571000000.0
+  },
+  {
+    "id": "AAL/2014/page_18.pdf-3",
+    "question": "what were total mainline operating expenses in 2014?",
+    "program": "divide(10592, 33.2%)",
+    "exe_ans": 31903.61446
+  },
+  {
+    "id": "HST/2018/page_160.pdf-1",
+    "question": "what was the net change in millions in the accumulated depreciation and amortization of real estate assets from 2015 to 2016?",
+    "program": "subtract(5949, 5666)",
+    "exe_ans": 283.0
+  },
+  {
+    "id": "L/2009/page_41.pdf-1",
+    "question": "what is diamond offshore's total rig count?",
+    "program": "add(47, 32)",
+    "exe_ans": 79.0
+  },
+  {
+    "id": "UPS/2016/page_34.pdf-2",
+    "question": "what was the percentage cumulative total shareowners return for united parcel service inc . for the five years ended 12/31/2016?",
+    "program": "subtract(189.72, const_100), divide(#0, const_100)",
+    "exe_ans": 0.8972
+  },
+  {
+    "id": "PNC/2014/page_203.pdf-1",
+    "question": "what was the approximate average , in millions , for the tax benefit realized from option exercises under all incentive plans for 2014 , 2013 and 2012?",
+    "program": "add(33, 31), add(#0, 14), divide(#1, const_3)",
+    "exe_ans": 26.0
+  },
+  {
+    "id": "MRO/2008/page_146.pdf-3",
+    "question": "what was the change in millions for receivables for recoverable costs from certain states , under programs to assist companies in clean-up efforts related to underground storage tanks at retail marketing outlets , between december 31 , 2008 and 2007?",
+    "program": "subtract(60, 66)",
+    "exe_ans": -6.0
+  },
+  {
+    "id": "RCL/2016/page_7.pdf-3",
+    "question": "what was the percentage increase of the weighted-average supply of berths marketed globally fom 2012 to 2016",
+    "program": "subtract(493000, 425000), divide(#0, 425000)",
+    "exe_ans": 0.16
+  },
+  {
+    "id": "MAA/2015/page_57.pdf-2",
+    "question": "what was the net income attributable to noncontrolling interests net income attributable to noncontrolling interests for the year ended december 31 , 2014 in million",
+    "program": "subtract(18.5, 10.2)",
+    "exe_ans": 8.3
+  },
+  {
+    "id": "PNC/2011/page_206.pdf-2",
+    "question": "for the standby letters of credit , risk participations in standby letters of credit , and bankers 2019 acceptances outstanding on december 31 , 2011 , what was the difference between the minimum and maximum term in years?",
+    "program": "subtract(7, 1)",
+    "exe_ans": 6.0
+  }
+]

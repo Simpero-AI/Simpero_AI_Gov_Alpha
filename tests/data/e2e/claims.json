@@ -25,7 +25,9 @@
       },
       "status": "proposed",
       "verification_method": null,
-      "flags": []
+      "flags": [],
+      "claim_ref": "1:12-19[#0]",
+      "claim_type": "numerical"
     }
   ]
 }

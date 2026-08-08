@@ -123,10 +123,15 @@ async def _run(payload: dict, org_key: str, commit: bool) -> None:
             await session.flush()  # assigns org.id
         org_id = org.id
 
-        session.add_all(
-            _row_from_chunk(c, org_id, embedding=emb, embedding_version=embedding_version)
-            for c, emb in zip(chunks, embeddings, strict=True)
-        )
+        for c, emb in zip(chunks, embeddings, strict=True):
+            row = _row_from_chunk(c, org_id, embedding=emb, embedding_version=embedding_version)
+            # SIM-218 (migration 77be2ddc60a0) added the FK
+            # chunks.document_id -> data_source(id). This direct-ingest demo has no
+            # real data_source row, so leave document_id NULL: the FK only binds
+            # when non-null, and the sandbox retrieve path scopes by org, not
+            # document_id. Seeding a real data_source row is the proper follow-up.
+            row.document_id = None
+            session.add(row)
         await session.flush()
 
         seen = await session.scalar(select(func.count()).select_from(Chunk))

@@ -24,7 +24,7 @@ WHY THE RRF WEIGHTING IS A CALLER PARAMETER, NOT A CONSTANT
 The consumers have structurally different query shapes and the sparse/dense
 balance that is right for one is wrong for the other:
   - Verify builds a literal, table-shaped query from a claim's own fields
-    ("PTL Group revenue $15,295"). BM25 scored 0.576 P@1 on tables -- sparse-weighted.
+    ("Acme Corp revenue $15,295"). BM25 scored 0.576 P@1 on tables -- sparse-weighted.
   - Ask Me takes a natural-language question whose words often miss the document's
     ("profitability" vs "margin"). BM25 collapses to 0.129 P@1 -- dense-weighted.
 A layer tuned once for Ask Me and reused for Verify is tuned for the wrong

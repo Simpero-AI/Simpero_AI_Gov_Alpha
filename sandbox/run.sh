@@ -64,9 +64,13 @@ if [[ -n "$TIER_FLAG" && -z "${ANTHROPIC_API_KEY:-}" && -z "${ANTHROPIC_AUTH_TOK
   exit 1
 fi
 
-# grep without -q: under pipefail, -q's early exit SIGPIPEs docker compose
-# and randomly fails this check even when the sandbox is up.
-"${COMPOSE[@]}" ps --status running 2>/dev/null | grep postgres >/dev/null || { echo "error: the sandbox is not running -- run ./sandbox/up.sh first"; exit 1; }
+# One command: if the sandbox is not already running, bring it up automatically
+# (up.sh is idempotent) so a first run is a single step. grep without -q: under
+# pipefail, -q's early exit SIGPIPEs docker compose and can falsely fail this check.
+if ! "${COMPOSE[@]}" ps --status running 2>/dev/null | grep postgres >/dev/null; then
+  printf '\n\033[1;36m[0/5]\033[0m the sandbox is not running yet -- bringing it up first (one-time)\n'
+  "$SANDBOX_DIR/up.sh"
+fi
 
 printf '\n\033[1;32m========================================================================\n'
 printf '  Simpero local sandbox — running the pipeline\n'

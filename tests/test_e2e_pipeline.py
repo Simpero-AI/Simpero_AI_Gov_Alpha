@@ -130,9 +130,16 @@ async def _ingest(org_key: str, claims: list[dict], chunks: list[dict]) -> None:
             await session.flush()
         org_id = org.id
         session.add_all(_row_from_claim(c, org_id, session_id) for c in claims)
-        session.add_all(
-            _row_from_chunk(c, org_id, embedding=None, embedding_version=None) for c in chunks
-        )
+        for c in chunks:
+            row = _row_from_chunk(c, org_id, embedding=None, embedding_version=None)
+            # SIM-218 (migration 77be2ddc60a0) added the FK
+            # chunks.document_id -> data_source(id). This direct-ingest path has no
+            # real data_source row, so leave document_id NULL -- the FK only binds
+            # when non-null, and this runner asserts on org + content, never
+            # document_id (same treatment as test_chunks_rls). Wiring direct-ingest
+            # to a seeded data_source row is the proper follow-up.
+            row.document_id = None
+            session.add(row)
 
 
 async def _search_as(org_key: str, query_text: str):

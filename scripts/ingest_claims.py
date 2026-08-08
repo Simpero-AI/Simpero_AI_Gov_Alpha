@@ -14,9 +14,15 @@ SAFETY, by construction:
   nothing.
 - --org-key names a demo tenant; the demo organisation row is created in the
   same transaction, so it too vanishes on rollback.
+- NOT idempotent -- insert-only. Re-running with --commit on a document that was
+  already ingested INSERTS a second copy of its claims AND edges; it does not
+  replace them. The ordered teardown that makes re-ingest safe (delete edges ->
+  upsert claims -> re-insert edges) is SIM-367, and lands with the shared
+  production-ingest core. Until then: ingest a document once, or clear its rows
+  first. RESTRICT on the edge FKs is what will force that teardown's ordering.
 
-    uv run python scripts/ingest_claims.py claims.json --org-key demo_e2e_ptl
-    uv run python scripts/ingest_claims.py claims.json --org-key demo_e2e_ptl --commit
+    uv run python scripts/ingest_claims.py claims.json --org-key demo_e2e
+    uv run python scripts/ingest_claims.py claims.json --org-key demo_e2e --commit
 
 The nested seam location ({kind, page, char_start, ...}) is flattened into the
 table's per-format columns here -- that translation IS the ingest's job.
@@ -27,14 +33,17 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import uuid
 from pathlib import Path
 
 from sqlalchemy import func, select, text
 
 from app.core.database import AsyncSessionLocal
-from app.models import Claim, Organisation
+from app.models import Claim, Edge, Organisation
 from app.models.organisation import OrgType
+
+logger = logging.getLogger(__name__)
 
 _CONTRACT = Path(__file__).parent.parent / "contracts" / "claims.schema.json"
 
@@ -55,6 +64,11 @@ def _row_from_claim(claim: dict, org_id: int, session_id: uuid.UUID) -> Claim:
         session_id=session_id,
         entity=claim["entity"],
         attribute=claim["attribute"],
+        # SIM-365/364: carry the parser's stable id and assertion type across the seam.
+        # claim_type is contract-required; default to "unknown" defensively for any
+        # pre-field payload rather than failing the row.
+        claim_ref=claim.get("claim_ref"),
+        claim_type=claim.get("claim_type", "unknown"),
         value=claim["value"],
         # The parse service's emit.py cannot carry a period yet, but the
         # contract and this table both have the columns, so anything upstream
@@ -128,8 +142,81 @@ async def _run(payload: dict, org_key: str, commit: bool, session_id: uuid.UUID)
             await session.flush()  # assigns org.id
         org_id = org.id
 
-        session.add_all(_row_from_claim(c, org_id, session_id) for c in claims)
+        rows = [_row_from_claim(c, org_id, session_id) for c in claims]
+        session.add_all(rows)
         await session.flush()
+
+        # SIM-366: persist the reducer's edges. Resolve each endpoint's claim_ref to
+        # the claim just ingested; an unresolved from/to is a missing endpoint -- skip
+        # that one edge and record it (fail-closed but non-blocking) rather than
+        # failing the document or dropping it silently. (Idempotent delete-then-
+        # reinsert teardown is SIM-367, part of the shared production-ingest core;
+        # this demo path is insert-only, the same as it is for claims -- see the
+        # module docstring.)
+        ref_to_id = {r.claim_ref: r.id for r in rows if r.claim_ref is not None}
+        # An edge is advisory, so a bad one is skipped and recorded, never fatal to
+        # the document the way a bad claim is. Validate each edge against the
+        # contract's edge schema FIRST: that is what catches a malformed edge (a
+        # missing key) or a `type` outside the contract enum -- both of which
+        # cross-repo contract drift can produce -- before it reaches a hard e[...]
+        # read (KeyError) or a raw insert the CHECK rejects (IntegrityError), either
+        # of which would roll back every claim already flushed above.
+        from jsonschema import Draft202012Validator
+
+        edge_validator = Draft202012Validator(json.loads(_CONTRACT.read_text())["$defs"]["edge"])
+        edge_rows: list[Edge] = []
+        skipped: list[str] = []
+        for i, e in enumerate(payload.get("edges", [])):
+            errors = sorted(edge_validator.iter_errors(e), key=str)
+            if errors:
+                skipped.append(f"edge {i} violates the contract: {errors[0].message}")
+                continue
+            # Required-and-typed by the contract now, so these reads cannot raise.
+            from_id = ref_to_id.get(e["from"])
+            to_id = ref_to_id.get(e["to"])
+            if from_id is None or to_id is None:
+                missing = ", ".join(
+                    label for label, got in (("from", from_id), ("to", to_id)) if got is None
+                )
+                skipped.append(
+                    f"{e['type']} {e['from']!r}->{e['to']!r} (missing endpoint: {missing})"
+                )
+                continue
+            # SIM-369: CONTRADICTS is symmetric (neither side is "the" canonical
+            # claim, see the contract's edge $defs), so two runs that emit the
+            # same pair in opposite from/to order must still land as ONE row --
+            # otherwise the UNIQUE(org_id, from, to, type) below cannot dedupe
+            # them. Canonicalize to from < to by UUID so both orderings collapse
+            # onto the same row. same_fact is directional (from=corroborator,
+            # to=higher-precision source per the contract) and is NOT reordered.
+            if e["type"] == "contradicts" and from_id > to_id:
+                from_id, to_id = to_id, from_id
+            edge_rows.append(
+                Edge(
+                    org_id=org_id,
+                    from_claim_id=from_id,
+                    to_claim_id=to_id,
+                    type=e["type"],
+                    basis=e["basis"],
+                    # SIM-369: this ingest path is the parser's E1 reducer output
+                    # only (within-page same_fact/contradicts) -- reconciliation
+                    # and consistency write their own edges directly, elsewhere.
+                    created_by="extraction_reducer",
+                    run_id=str(session_id),
+                    # The parser doesn't emit rule/operand/value_delta metadata
+                    # for these edge types; nothing to carry here today.
+                    metadata_=None,
+                )
+            )
+        session.add_all(edge_rows)
+        await session.flush()
+        print(f"{len(edge_rows)} edge(s) inserted, {len(skipped)} skipped.")
+        # A skipped edge is dropped on purpose, but the drop must not be console-only:
+        # log it structured (keyed on the run's session_id + tenant) so it stays
+        # queryable after the fact, not just visible in this one terminal. `detail`
+        # already carries the edge's identity (type + from/to claim_ref) and reason.
+        for detail in skipped:
+            logger.warning("edge skipped: session=%s org=%s %s", session_id, org_key, detail)
 
         # Read back as dd_app under this tenant: the app's own view.
         seen = await session.scalar(select(func.count()).select_from(Claim))

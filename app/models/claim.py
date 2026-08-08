@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import CheckConstraint, ForeignKey, Integer, String, Text, func
+from sqlalchemy import CheckConstraint, ForeignKey, Index, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import DateTime
@@ -46,6 +46,17 @@ _LOCATION_KINDS = ("pdf", "xlsx", "docx")
 # Which extraction contract produced a claim. Absent means quantitative, so
 # every row written before this column existed stays valid.
 _CLAIM_KINDS = ("quantitative", "qualitative")
+# SIM-364 / FinGround: the assertion type. Non-null with `unknown` as the explicit
+# fallback (see the claims contract). String + CHECK, same shape as status.
+_CLAIM_TYPES = (
+    "numerical",
+    "temporal",
+    "entity_attribute",
+    "comparative",
+    "regulatory",
+    "computational",
+    "unknown",
+)
 _ASSERTION_CLASSES = (
     "related_party",
     "operating_model",
@@ -164,12 +175,34 @@ class Claim(Base):
 
     flags: Mapped[list[str] | None] = mapped_column(ARRAY(Text), nullable=True)
 
+    # SIM-365: the parser's stable, positional claim identity ({page}:{cs}-{ce}[#n],
+    # {sheet}!{cell}[#n], or {page}:none[#n]). Nullable -- rows written before this
+    # column existed have none. Unique per (org_id, data_source_id, claim_ref) so
+    # re-ingesting one document is idempotent (see the index in __table_args__).
+    claim_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # SIM-364: the FinGround assertion type; verification routes on it. Non-null with an
+    # `unknown` server-default so existing rows and un-typeable claims are visibly untyped.
+    claim_type: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="unknown", index=True
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
     __table_args__ = (
         CheckConstraint(f"status IN ({_sql_list(_STATUSES)})", name="ck_claims_status"),
+        CheckConstraint(f"claim_type IN ({_sql_list(_CLAIM_TYPES)})", name="ck_claims_claim_type"),
+        # SIM-365: idempotent re-ingest of one document. NULLs are distinct in a unique
+        # index, so this only binds once both data_source_id and claim_ref are present
+        # (the real upload flow); the demo direct-ingest path leaves data_source_id NULL.
+        Index(
+            "uq_claims_org_data_source_claim_ref",
+            "org_id",
+            "data_source_id",
+            "claim_ref",
+            unique=True,
+        ),
         CheckConstraint(
             f"verification_method IS NULL OR verification_method IN "
             f"({_sql_list(_VERIFICATION_METHODS)})",

@@ -1,0 +1,122 @@
+[
+  {
+    "question": "what is the net change in net revenue during 2015 for entergy corporation?",
+    "program": "   net_revenue_2015 = 5829\n net_revenue_2014 = 5735\n net_revenue_change = net_revenue_2015 - net_revenue_2014\n answer = net_revenue_change",
+    "answer": "94",
+    "exe_ans": 94.0
+  },
+  {
+    "question": "what is the percentage change in cash flow hedges in 2011 compare to the 2010?",
+    "program": "cash_flow_hedge_increase = 153.7\ncash_flow_hedge_decrease = 139.9\nincrease = cash_flow_hedge_increase - cash_flow_hedge_decrease\npercent_change = increase / cash_flow_hedge_decrease\nanswer = percent_change * 100",
+    "answer": "9.9%",
+    "exe_ans": 9.864188706218716
+  },
+  {
+    "question": "what percent of total recourse debt is current?",
+    "program": "recourse_debt_2011 = 463\nrecourse_debt_total = 4612\npercent_2011 = recourse_debt_2011 / recourse_debt_total\nanswer = percent_2011 * 100",
+    "answer": "10%",
+    "exe_ans": 10.039028620988725
+  },
+  {
+    "question": "what was the change in unrecognized tax benefits from the end of 2014 to the end of 2015?",
+    "program": "  change_2015 = 1136 - 1171\nanswer = change_2015",
+    "answer": "-35",
+    "exe_ans": -35.0
+  },
+  {
+    "question": "what portion of the total noncancelable future lease commitments are due in fiscal year of 2019?",
+    "program": "commitments_2019 = 137.4\ncommitments_total = 559.3\npercent_commitments = commitments_2019 / commitments_total\nanswer = percent_commitments * 100",
+    "answer": "24.6%",
+    "exe_ans": 24.566422313606296
+  },
+  {
+    "question": "what was the percentage change in deferred tax assets and regulatory assets from 2013 to 2014",
+    "program": "deferred_tax_assets_2014 = 6348\ndeferred_tax_assets_2013 = 6241\nchange = deferred_tax_assets_2014 - deferred_tax_assets_2013\npercent_change = change / deferred_tax_assets_2013\nanswer = percent_change * 100",
+    "answer": "1.7%",
+    "exe_ans": 1.7144688351225765
+  },
+  {
+    "question": "assuming each continent has the same number of destinations , approximately how many destinations does each continent have?",
+    "program": "  destinations_per_continent = 455\ncontinents = 7\nanswer = destinations_per_continent / continents",
+    "answer": "65",
+    "exe_ans": 65.0
+  },
+  {
+    "question": "the combined amount of accrued interest and penalties related to tax positions taken on our tax returns and included in non-current income taxes payable was what percent of the total ending balance as of november 28 2008?",
+    "program": "total_unrecognized_tax_benefits = 139549 / 1000\ntotal_accrued_interest_and_penalties = 15.3\npercent_of_total_balance = total_accrued_interest_and_penalties / total_unrecognized_tax_benefits\nanswer = percent_of_total_balance * 100",
+    "answer": "11.0%",
+    "exe_ans": 10.963890819712073
+  },
+  {
+    "question": "what was the percentage change in the commercial mortgage loans designated for sale at fair value from 2008 to 2009",
+    "program": "fair_value_2012 = 772\nlower_of_cost_or_market_2012 = 620\nfair_value_2011 = 843\nlower_of_cost_or_market_2011 = 451\nchange_fair_value = fair_value_2012 - fair_value_2011\nchange_lower_of_cost_or_market = lower_of_cost_or_market_2012 - lower_of_cost_or_market_2011\npercent_change_fair_value = change_fair_value / fair_value_2011\npercent_change_lower_of_cost_or_market = change_lower_of_cost_or_market / lower_of_cost_or_market_2011\nanswer = percent_change_fair_value * 100",
+    "answer": "-8.4%",
+    "exe_ans": -8.422301304863582
+  },
+  {
+    "question": "what is the ratio of the total flight attendants to total maintenance personnel",
+    "program": "  flight_attendants_to_maintenance = 26900 / 16900\nanswer = flight_attendants_to_maintenance",
+    "answer": "1.6",
+    "exe_ans": 1.5917159763313609
+  },
+  {
+    "question": "in 2010 what was the percent of the income tax benefit to the stock based compensation cost",
+    "program": "tax_benefit = 6.3\ncompensation_cost = 18.1\npercent_tax_benefit = tax_benefit / compensation_cost\nanswer = percent_tax_benefit * 100",
+    "answer": "34.8%",
+    "exe_ans": 34.80662983425414
+  },
+  {
+    "question": "what is the percentage change in the the gross liability for unrecognized tax benefits during 2008 compare to 2007?",
+    "program": "gross_liability_2008 = 139549\ngross_liability_2007 = 201808\nchange = gross_liability_2008 - gross_liability_2007\npercent_change = change / gross_liability_2007\nanswer = percent_change * 100",
+    "answer": "-30.9%",
+    "exe_ans": -30.8506104812495
+  },
+  {
+    "question": "in 2015 what was the percent of the total operating revenues associated with agriculture products",
+    "program": "agricultural_products_revenue = 3581\ntotal_operating_revenues = 21813\npercent_agricultural_products_revenue = agricultural_products_revenue / total_operating_revenues\nanswer = percent_agricultural_products_revenue * 100",
+    "answer": "16.4%",
+    "exe_ans": 16.416815660386007
+  },
+  {
+    "question": "what percent of net interest revenue where total operating expenses in 2009?",
+    "program": "net_interest_revenue_2009 = 896\ntotal_operating_expenses_2009 = 3173\npercent_2009 = net_interest_revenue_2009 / total_operating_expenses_2009\nanswer = percent_2009 * 100",
+    "answer": "28%",
+    "exe_ans": 28.238260321462338
+  },
+  {
+    "question": "what would the fair value of total securities available for sale be without the fair value of securities classified as corporate stocks as of december 31 , 2012?",
+    "program": "   available_for_sale = 61912\n fair_value = 51052\n fair_value_corporate_stocks = 367\n fair_value_other = fair_value - fair_value_corporate_stocks\n answer = available_for_sale - fair_value_corporate_stocks",
+    "answer": "61545",
+    "exe_ans": 61545.0
+  },
+  {
+    "question": "what is the total amount of stock options cancelled in millions during 2017 , 2016 and 2015?",
+    "program": "     total_cancelled_options_2017 = 4.6 + 5.5\n total_cancelled_options_2016 = total_cancelled_options_2017 + 2\n total_cancelled_options_2015 = total_cancelled_options_2016 + 0\n answer = total_cancelled_options_2015",
+    "answer": "12.1",
+    "exe_ans": 12.1
+  },
+  {
+    "question": "in 2004 and 2003 , what were the total shares of common stock that were issued to employees?",
+    "program": "  common_shares_2004 = 1939734\n common_shares_2003 = 1937141\ntotal_common_shares = common_shares_2004 + common_shares_2003\nanswer = total_common_shares",
+    "answer": "3876875",
+    "exe_ans": 3876875.0
+  },
+  {
+    "question": "what is the net change in net revenue for entergy wholesale commodities during 2012?",
+    "program": "  net_revenue_2012 = 1854\n net_revenue_2011 = 2045\n change = net_revenue_2012 - net_revenue_2011\n answer = change",
+    "answer": "-191",
+    "exe_ans": -191.0
+  },
+  {
+    "question": "what percent of total contractual obligations is categorized as long term debt?",
+    "program": "long_term_debt_2008 = 460.1\nlong_term_debt_total = 1020.1\npercent_long_term_debt = long_term_debt_2008 / long_term_debt_total\nanswer = percent_long_term_debt * 100",
+    "answer": "45.10%",
+    "exe_ans": 45.10342123321243
+  },
+  {
+    "question": "what is the total value of securities issued and approved by security holders , ( in millions ) ?",
+    "program": "  shares_issued = 766801\n price = 40.85\n value = shares_issued * price\n answer = value / 1000000",
+    "answer": "31.3",
+    "exe_ans": 31.32382085
+  }
+]

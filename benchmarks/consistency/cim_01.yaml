@@ -1,0 +1,350 @@
+# SIM-373: 3b consistency benchmark -- one CIM's hand-annotated arithmetic
+# relationships (design doc Step 3b: "both the production consistency pass
+# and the cross-claim benchmark").
+#
+# STATUS: DRAFT. Every relationship below is a proposal, not verified ground
+# truth, until someone with domain knowledge of the issuer's actual financials
+# has checked it against the underlying model -- not just the rounded
+# presentation. It was hand-extracted and hand-computed from the ONE real CIM
+# committed (gitignored) to this repo (no CIM-02/CIM-03 exist here).
+#
+# CONFIDENTIALITY: ANONYMIZED. The source CIM's PDF is gitignored
+# (tests/test_data/) and is NOT named here; party identities and all verbatim
+# document prose have been removed. What remains is the arithmetic
+# (figures + relationships) under an opaque entity id -- an anonymous financial
+# statement, not attributable to a named deal. Keep it that way: do not
+# re-introduce party names, the source filename, or quoted document prose.
+#
+# VOCABULARY (SIM-375 / SIM-376): every `attribute` is a canonical snake_case
+# name from contracts/claims.schema.json $defs/canonicalAttribute -- the same
+# names real E2-canonicalized claims carry, so a scorer joins on `attribute`.
+# gross_profit is the DOLLAR amount (revenue - cogs); gross_margin is the RATIO
+# -- one canonical name each, not the grossProfit/grossMargin conflation
+# SIM-376 removed. Percent values are stored FACE VALUE (21.2 for 21.2%, not
+# 0.212) with value_type: percent, matching the engine's storage and its
+# _base() arithmetic convention. value_type is stated on every operand/derived.
+#
+# ENGINE COVERAGE: `relationships` map onto the four post-SIM-376 DEFAULT_RULES
+# (gross_profit_from_revenue_and_cogs, gross_profit_from_revenue_and_margin,
+# ebitda_from_gross_profit_and_opex, ebitda_margin_from_ebitda_and_revenue) --
+# gross_profit is cross-checked both ways (from cogs and from margin), exactly
+# as the engine does. `synthetic_conflicts` injects deliberately-wrong derived
+# values (NOT in the source document) so the CONTRADICTS / precision path can
+# be scored: every REAL relationship in this CIM reconciles, so without these
+# the benchmark could measure recall only, not precision. `not_engine_scoreable`
+# holds real relationships the engine has no rule for (period-over-period
+# growth, secured-contract coverage) whose derived quantity is not a canonical
+# attribute -- kept for annotation value; a scorer skips them (rule: null).
+#
+# SOURCE: an internal CIM (PDF gitignored under tests/test_data/, filename
+# withheld), Income Statement (CAD, in thousands) p.11, plus two narrative
+# percentage callouts p.10. The
+# balance sheet (pp.12-13) and revenue-by-product breakdown (p.12) are
+# chart/graphic in the source PDF with no extractable numeric text -- see
+# relationship_types_not_covered rather than inventing unreadable numbers.
+#
+# FORMAT NOTES:
+#   - period uses year+kind where stated (kind=P = projected/forecast); the
+#     "Trailing 5 Year Average" column is a multi-year average not
+#     representable as one period_year/period_kind pair -- period_label carries
+#     it, a known gap with the app's Claim.period columns.
+#   - expected: holds  = the formula reconstructs within the value_type
+#       tolerance (currency/ratio 5% relative; percent 100bp absolute).
+#     expected: conflicts = a deliberate (synthetic) mismatch beyond tolerance.
+#     expected: uncertain = printed figures don't reconcile cleanly and the
+#       unrounded source values would be needed to judge -- deliberately not
+#       forced into holds/conflicts.
+
+annotation_format_version: 2
+status: DRAFT
+confidentiality: anonymized
+source_document: "internal CIM (filename withheld; gitignored under tests/test_data/)"
+source_table: "Income Statement, CAD (in Thousands) -- p.11"
+entity: "cim-01"
+
+relationship_types_not_covered:
+  - name: segments_sum_to_total
+    reason: >
+      "2018F - Revenue by Product/Service" chart (p.12) has category labels but
+      no extractable numeric values in this PDF's text layer -- it renders as a
+      chart, not a text table.
+  - name: balance_sheet_relationships
+    reason: >
+      "Projected financial results - Balance Sheet" (pp.12-13) is likewise not
+      text-extractable as a table; only narrative bullets survive (a $0.7M tax
+      recovery, an $0.8M redundant-equipment sale), not a reconcilable balance
+      sheet total to check pre/post relationships against.
+
+# ---------------------------------------------------------------------------
+# Engine-scoreable relationships: canonical attributes, real DEFAULT_RULES.
+# ---------------------------------------------------------------------------
+relationships:
+  # gross_profit = revenue - cogs   (gross_profit_from_revenue_and_cogs)
+  - id: r01
+    rule: gross_profit_from_revenue_and_cogs
+    period: {year: null, kind: null, period_label: "Trailing 5 Year Average"}
+    operands:
+      - {attribute: revenue, value_type: currency, value: 15295}
+      - {attribute: cogs, value_type: currency, value: 11124}
+    derived: {attribute: gross_profit, value_type: currency, value: 4171}
+    expected: holds
+    note: "15295 - 11124 = 4171, exact"
+  - id: r02
+    rule: gross_profit_from_revenue_and_cogs
+    period: {year: 2018, kind: P, period_label: "2018F"}
+    operands:
+      - {attribute: revenue, value_type: currency, value: 17146}
+      - {attribute: cogs, value_type: currency, value: 13515}
+    derived: {attribute: gross_profit, value_type: currency, value: 3631}
+    expected: holds
+    note: "17146 - 13515 = 3631, exact"
+  - id: r03
+    rule: gross_profit_from_revenue_and_cogs
+    period: {year: 2019, kind: P, period_label: "2019F"}
+    operands:
+      - {attribute: revenue, value_type: currency, value: 18003}
+      - {attribute: cogs, value_type: currency, value: 14186}
+    derived: {attribute: gross_profit, value_type: currency, value: 3817}
+    expected: holds
+    note: "18003 - 14186 = 3817, exact"
+  - id: r04
+    rule: gross_profit_from_revenue_and_cogs
+    period: {year: 2020, kind: P, period_label: "2020F"}
+    operands:
+      - {attribute: revenue, value_type: currency, value: 18903}
+      - {attribute: cogs, value_type: currency, value: 14896}
+    derived: {attribute: gross_profit, value_type: currency, value: 4007}
+    expected: holds
+    note: "18903 - 14896 = 4007, exact"
+
+  # gross_profit = revenue * gross_margin   (gross_profit_from_revenue_and_margin)
+  # Same gross_profit as r01-r04, cross-checked the second way the engine does;
+  # gross_margin is the stated ratio (face-value percent).
+  - id: r05
+    rule: gross_profit_from_revenue_and_margin
+    period: {year: null, kind: null, period_label: "Trailing 5 Year Average"}
+    operands:
+      - {attribute: revenue, value_type: currency, value: 15295}
+      - {attribute: gross_margin, value_type: percent, value: 27.3}
+    derived: {attribute: gross_profit, value_type: currency, value: 4171}
+    expected: holds
+    note: "15295 * 27.3% = 4176, within 5% of stated 4171 (the printed 27.3% is itself rounded)"
+  - id: r06
+    rule: gross_profit_from_revenue_and_margin
+    period: {year: 2018, kind: P, period_label: "2018F"}
+    operands:
+      - {attribute: revenue, value_type: currency, value: 17146}
+      - {attribute: gross_margin, value_type: percent, value: 21.2}
+    derived: {attribute: gross_profit, value_type: currency, value: 3631}
+    expected: holds
+    note: "17146 * 21.2% = 3635, within 5% of stated 3631"
+  - id: r07
+    rule: gross_profit_from_revenue_and_margin
+    period: {year: 2019, kind: P, period_label: "2019F"}
+    operands:
+      - {attribute: revenue, value_type: currency, value: 18003}
+      - {attribute: gross_margin, value_type: percent, value: 21.2}
+    derived: {attribute: gross_profit, value_type: currency, value: 3817}
+    expected: holds
+    note: "18003 * 21.2% = 3817, matches stated 3817"
+  - id: r08
+    rule: gross_profit_from_revenue_and_margin
+    period: {year: 2020, kind: P, period_label: "2020F"}
+    operands:
+      - {attribute: revenue, value_type: currency, value: 18903}
+      - {attribute: gross_margin, value_type: percent, value: 21.2}
+    derived: {attribute: gross_profit, value_type: currency, value: 4007}
+    expected: holds
+    note: "18903 * 21.2% = 4007, matches stated 4007"
+
+  # ebitda = gross_profit - opex   (ebitda_from_gross_profit_and_opex)
+  - id: r09
+    rule: ebitda_from_gross_profit_and_opex
+    period: {year: null, kind: null, period_label: "Trailing 5 Year Average"}
+    operands:
+      - {attribute: gross_profit, value_type: currency, value: 4171}
+      - {attribute: opex, value_type: currency, value: 2118}
+    derived: {attribute: ebitda, value_type: currency, value: 2052}
+    expected: holds
+    note: >
+      4171 - 2118 = 2053, table states 2052 -- a $1K (0.05%) rounding gap, well
+      inside tolerance; the unrounded components don't round-trip through the
+      printed thousands exactly.
+  - id: r10
+    rule: ebitda_from_gross_profit_and_opex
+    period: {year: 2018, kind: P, period_label: "2018F"}
+    operands:
+      - {attribute: gross_profit, value_type: currency, value: 3631}
+      - {attribute: opex, value_type: currency, value: 1672}
+    derived: {attribute: ebitda, value_type: currency, value: 1959}
+    expected: holds
+    note: "3631 - 1672 = 1959, exact"
+  - id: r11
+    rule: ebitda_from_gross_profit_and_opex
+    period: {year: 2019, kind: P, period_label: "2019F"}
+    operands:
+      - {attribute: gross_profit, value_type: currency, value: 3817}
+      - {attribute: opex, value_type: currency, value: 1723}
+    derived: {attribute: ebitda, value_type: currency, value: 2094}
+    expected: holds
+    note: "3817 - 1723 = 2094, exact"
+  - id: r12
+    rule: ebitda_from_gross_profit_and_opex
+    period: {year: 2020, kind: P, period_label: "2020F"}
+    operands:
+      - {attribute: gross_profit, value_type: currency, value: 4007}
+      - {attribute: opex, value_type: currency, value: 1774}
+    derived: {attribute: ebitda, value_type: currency, value: 2233}
+    expected: holds
+    note: "4007 - 1774 = 2233, exact"
+
+  # ebitda_margin = ebitda / revenue   (ebitda_margin_from_ebitda_and_revenue)
+  - id: r13
+    rule: ebitda_margin_from_ebitda_and_revenue
+    period: {year: null, kind: null, period_label: "Trailing 5 Year Average"}
+    operands:
+      - {attribute: ebitda, value_type: currency, value: 2052}
+      - {attribute: revenue, value_type: currency, value: 15295}
+    derived: {attribute: ebitda_margin, value_type: percent, value: 13.4}
+    expected: holds
+    note: "2052 / 15295 = 13.42%, rounds to stated 13.4%"
+  - id: r14
+    rule: ebitda_margin_from_ebitda_and_revenue
+    period: {year: 2018, kind: P, period_label: "2018F"}
+    operands:
+      - {attribute: ebitda, value_type: currency, value: 1959}
+      - {attribute: revenue, value_type: currency, value: 17146}
+    derived: {attribute: ebitda_margin, value_type: percent, value: 11.4}
+    expected: holds
+    note: "1959 / 17146 = 11.42%, rounds to stated 11.4%"
+  - id: r15
+    rule: ebitda_margin_from_ebitda_and_revenue
+    period: {year: 2019, kind: P, period_label: "2019F"}
+    operands:
+      - {attribute: ebitda, value_type: currency, value: 2094}
+      - {attribute: revenue, value_type: currency, value: 18003}
+    derived: {attribute: ebitda_margin, value_type: percent, value: 11.6}
+    expected: holds
+    note: "2094 / 18003 = 11.63%, rounds to stated 11.6%"
+  - id: r16
+    rule: ebitda_margin_from_ebitda_and_revenue
+    period: {year: 2020, kind: P, period_label: "2020F"}
+    operands:
+      - {attribute: ebitda, value_type: currency, value: 2233}
+      - {attribute: revenue, value_type: currency, value: 18903}
+    derived: {attribute: ebitda_margin, value_type: percent, value: 11.8}
+    expected: holds
+    note: "2233 / 18903 = 11.81%, rounds to stated 11.8%"
+
+# ---------------------------------------------------------------------------
+# Synthetic negatives -- NOT present in the source document. Injected so the
+# CONTRADICTS path (precision / error-detection) can be scored. A scorer counts
+# these toward precision only, never recall. Each derived value is a deliberate
+# out-of-tolerance perturbation of the real reconciled figure.
+# ---------------------------------------------------------------------------
+synthetic_conflicts:
+  - id: x01
+    rule: gross_profit_from_revenue_and_cogs
+    period: {year: 2018, kind: P, period_label: "2018F"}
+    synthetic: true
+    operands:
+      - {attribute: revenue, value_type: currency, value: 17146}
+      - {attribute: cogs, value_type: currency, value: 13515}
+    derived: {attribute: gross_profit, value_type: currency, value: 4200}
+    expected: conflicts
+    note: "revenue - cogs = 3631; derived states 4200 (delta 569, 15.7% > 5% currency tolerance). Synthetic; not in the source."
+  - id: x02
+    rule: ebitda_from_gross_profit_and_opex
+    period: {year: 2018, kind: P, period_label: "2018F"}
+    synthetic: true
+    operands:
+      - {attribute: gross_profit, value_type: currency, value: 3631}
+      - {attribute: opex, value_type: currency, value: 1672}
+    derived: {attribute: ebitda, value_type: currency, value: 2400}
+    expected: conflicts
+    note: "gross_profit - opex = 1959; derived states 2400 (delta 441, 22.5% > 5%). Synthetic."
+  - id: x03
+    rule: ebitda_margin_from_ebitda_and_revenue
+    period: {year: 2018, kind: P, period_label: "2018F"}
+    synthetic: true
+    operands:
+      - {attribute: ebitda, value_type: currency, value: 1959}
+      - {attribute: revenue, value_type: currency, value: 17146}
+    derived: {attribute: ebitda_margin, value_type: percent, value: 15.0}
+    expected: conflicts
+    note: "ebitda / revenue = 11.4%; derived states 15.0% (delta 3.6pp > 100bp percent tolerance). Synthetic."
+
+# ---------------------------------------------------------------------------
+# Real relationships the engine has NO rule for, and whose derived quantity is
+# not a canonical attribute (it falls to the operating_metric escape valve).
+# Kept for annotation value; a scorer must skip them (rule: null).
+# ---------------------------------------------------------------------------
+not_engine_scoreable:
+  - id: r17
+    rule: null
+    reason: "period-over-period revenue growth: no fixed-arity single-period rule, and revenue_growth is not a canonical attribute."
+    period: {year: 2019, kind: P, period_label: "2019F vs 2018F"}
+    operands:
+      - {attribute: revenue, attribute_raw: "revenue 2018F", value_type: currency, value: 17146}
+      - {attribute: revenue, attribute_raw: "revenue 2019F", value_type: currency, value: 18003}
+    derived: {attribute: operating_metric, attribute_raw: "revenue_growth_pct", value_type: percent, value: 5.0}
+    expected: holds
+    note: "18003 / 17146 - 1 = 5.00%, matches the text's stated 5% growth assumption."
+  - id: r18
+    rule: null
+    reason: "period-over-period revenue growth (see r17)."
+    period: {year: 2020, kind: P, period_label: "2020F vs 2019F"}
+    operands:
+      - {attribute: revenue, attribute_raw: "revenue 2019F", value_type: currency, value: 18003}
+      - {attribute: revenue, attribute_raw: "revenue 2020F", value_type: currency, value: 18903}
+    derived: {attribute: operating_metric, attribute_raw: "revenue_growth_pct", value_type: percent, value: 5.0}
+    expected: holds
+    note: "18903 / 18003 - 1 = 5.00%, matches the stated 5% assumption."
+  - id: r19
+    rule: null
+    reason: "period-over-period opex growth; opex_growth is not a canonical attribute."
+    period: {year: 2019, kind: P, period_label: "2019F vs 2018F"}
+    operands:
+      - {attribute: opex, attribute_raw: "opex 2018F", value_type: currency, value: 1672}
+      - {attribute: opex, attribute_raw: "opex 2019F", value_type: currency, value: 1723}
+    derived: {attribute: operating_metric, attribute_raw: "opex_growth_pct", value_type: percent, value: 3.0}
+    expected: holds
+    note: "1723 / 1672 - 1 = 3.05%, close to the stated 3% (rounding of the printed $1K figures)."
+  - id: r20
+    rule: null
+    reason: "period-over-period opex growth (see r19)."
+    period: {year: 2020, kind: P, period_label: "2020F vs 2019F"}
+    operands:
+      - {attribute: opex, attribute_raw: "opex 2019F", value_type: currency, value: 1723}
+      - {attribute: opex, attribute_raw: "opex 2020F", value_type: currency, value: 1774}
+    derived: {attribute: operating_metric, attribute_raw: "opex_growth_pct", value_type: percent, value: 3.0}
+    expected: holds
+    note: "1774 / 1723 - 1 = 2.96%, close to the stated 3% (rounding)."
+  - id: r21
+    rule: null
+    reason: "secured-revenue coverage ratio; secured_revenue is not a canonical attribute."
+    period: {year: 2018, kind: P, period_label: "2018F"}
+    operands:
+      - {attribute: operating_metric, attribute_raw: "secured_revenue", value_type: currency, value: 8900, unit_note: "stated as $8.9 million"}
+      - {attribute: revenue, value_type: currency, value: 17146}
+    derived: {attribute: operating_metric, attribute_raw: "secured_revenue_pct", value_type: percent, value: 52.0}
+    expected: holds
+    note: >
+      8900 / 17146 = 51.9%, rounds to the stated 52% -- a narrative callout for
+      the share of the fiscal revenue budget secured by firm contracts at the
+      start of the year.
+  - id: r22
+    rule: null
+    reason: "secured gross-margin ratio; secured_gross_margin is not a canonical attribute."
+    period: {year: 2018, kind: P, period_label: "2018F secured contracts"}
+    operands:
+      - {attribute: operating_metric, attribute_raw: "secured_gross_margin", value_type: currency, value: 2000, unit_note: "stated as $2.0 million"}
+      - {attribute: operating_metric, attribute_raw: "secured_revenue", value_type: currency, value: 8900, unit_note: "stated as $8.9 million"}
+    derived: {attribute: operating_metric, attribute_raw: "secured_gross_margin_pct", value_type: percent, value: 22.2}
+    expected: uncertain
+    note: >
+      2000 / 8900 = 22.47%, vs the stated 22.2% -- a 0.27pp gap. Both operands
+      are rounded to one decimal in the source; the true unrounded figures
+      aren't recoverable from the source alone, so this could be
+      exact-and-consistent or a genuine minor discrepancy. Do NOT treat as a
+      confirmed conflict without the underlying unrounded model.

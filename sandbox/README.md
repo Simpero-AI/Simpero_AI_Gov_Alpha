@@ -6,10 +6,11 @@ Run the whole pipeline on your own machine — with **no cloud database**. No Di
 - **Retrieval** — upload a CIM, ask a question, and see the **chunks** the hybrid search returns (dense + sparse), live in a small web app.
 
 ```
-./sandbox/up.sh                     # once: local Postgres + Valkey, roles, migrations
-./sandbox/run.sh path/to/cim.pdf    # PARSING   → parse → extract → emit → ingest → claims report
+./sandbox/run.sh path/to/cim.pdf    # PARSING → parse → extract → ingest → opens the claims report
+                                    #   (auto-brings the sandbox up on the first run — one command)
 ./sandbox/retrieve.sh               # RETRIEVAL → serve the upload / ask / chunks UI
 ./sandbox/down.sh                   # stop  (--wipe also deletes the data)
+# ./sandbox/up.sh                   # optional: bring the DB up on its own (run.sh does this for you)
 ```
 
 The infrastructure needs no credentials. **Extraction has two tiers, and the prose tier does:** table extraction is deterministic and offline, but reading facts out of prose calls the Anthropic API, so the default run needs `ANTHROPIC_API_KEY` (see [§3](#3-run-the-pipeline-on-a-cim)). Pass `--tables-only` for a fully offline, key-free run.

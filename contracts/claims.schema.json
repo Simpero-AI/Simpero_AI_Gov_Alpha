@@ -3,9 +3,69 @@
   "$id": "https://simpero.ai/contracts/claims.schema.json",
   "title": "Claim",
   "description": "The C3 seam contract: one claim row as emitted by the Python parse service across the JSON boundary to the backend. The consuming side validates against this SAME file. A change here must be made on both sides together, or the contract job fails.\n\nA claim is an assertion pending verification, not a verified truth (hence claims, not facts). Nothing is emitted without a citation attached at write time, and provenance is all-or-nothing: a claim resolves to an exact span, or it is emitted with status=missing. A partial or approximate citation is never written.",
+  "$defs": {
+    "canonicalAttribute": {
+      "type": "string",
+      "description": "SIM-344: the closed canonical attribute vocabulary -- the parser's CoreAttribute enum plus the operating_metric escape valve. E2 maps a document's raw label onto one of these and stores the result in `attribute` (the raw label is kept in `attribute_raw`). Published here so both repos and every cross-claim consumer -- 3b consistency rules, scoring, cross-source matching -- key on the SAME names; a contract test keeps this enum identical to the parser's CoreAttribute so the two cannot drift.",
+      "enum": [
+        "revenue",
+        "cogs",
+        "gross_profit",
+        "opex",
+        "ebitda",
+        "ebit",
+        "net_income",
+        "gross_margin",
+        "net_margin",
+        "ebitda_margin",
+        "depreciation_and_amortization",
+        "interest_expense",
+        "tax_expense",
+        "capex",
+        "total_assets",
+        "total_liabilities",
+        "total_equity",
+        "cash_and_equivalents",
+        "total_debt",
+        "net_debt",
+        "working_capital",
+        "accounts_receivable",
+        "accounts_payable",
+        "inventory",
+        "operating_cash_flow",
+        "free_cash_flow",
+        "operating_metric"
+      ]
+    },
+    "edge": {
+      "title": "Edge",
+      "description": "SIM-341: a within-page relationship between two claims a per-page reducer found at the extraction fan-in, sitting beside `claims` in the emitted payload (not a property of a single claim row, so it is not referenced from the Claim schema above). `from`/`to` name claims by their `claim_ref` (SIM-365) -- the stable, positional, attribute-independent id every claim carries -- not the backend's `id`, which does not exist yet at parse time. The parser only emits the edge; it never merges or drops a claim because of one -- store persistence and cross-document edges are the backend's job at ingest.\n\nsame_fact: `to` is the higher-precision source (table wins on a number); `from` is corroboration of the same real-world fact, not a duplicate to discard. contradicts: `from`/`to` disagree on value for what looks like the same fact -- neither is preferred, and the disagreement itself is what a consumer needs to see.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "from", "to", "basis"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["same_fact", "contradicts"]
+        },
+        "from": {
+          "type": "string"
+        },
+        "to": {
+          "type": "string"
+        },
+        "basis": {
+          "type": "string",
+          "description": "Human-readable reason the reducer linked these two claims, e.g. which tiers agreed or disagreed and on what."
+        }
+      }
+    }
+  },
   "type": "object",
   "additionalProperties": false,
   "required": [
+    "claim_ref",
+    "claim_type",
     "entity",
     "attribute",
     "value",
@@ -34,13 +94,37 @@
       ],
       "description": "FK to data_sources (document identity + versioning). Assigned by the ingesting backend; the parse service cites the file by name in location.file."
     },
+    "claim_ref": {
+      "type": "string",
+      "description": "SIM-365: a stable, positional, attribute-independent id the parser assigns to every claim -- {page}:{char_start}-{char_end}[#n] for a PDF span, {sheet}!{cell_ref}[#n] for XLSX, or {page}:none[#n] for a spanless claim; [#n] disambiguates claims sharing one span. Deterministic across runs and unaffected by attribute canonicalization. `edges` name their endpoints by it, and the backend keys idempotent re-ingest on it (unique per org + data_source). Distinct from the backend-assigned surrogate `id`, which does not exist at parse time."
+    },
+    "claim_type": {
+      "type": "string",
+      "enum": [
+        "numerical",
+        "temporal",
+        "entity_attribute",
+        "comparative",
+        "regulatory",
+        "computational",
+        "unknown"
+      ],
+      "description": "SIM-364 / FinGround (arXiv:2604.23588): the TYPE of assertion, assigned at extraction, orthogonal to the binding-audit verdicts. Verification routes on it: computational -> formula reconstruction, numerical -> exact-span, comparative/regulatory -> their own checks. Non-null with `unknown` as the explicit fallback for an un-typeable claim -- an untyped claim is skipped by type-routing, never defaulted to a wrong type. The table/XLSX tiers set it in code (numerical, or computational for a formula cell); the prose/qualitative tiers set it from the model."
+    },
     "entity": {
       "type": "string",
       "description": "What the claim is about (company, segment, etc.)."
     },
     "attribute": {
       "type": "string",
-      "description": "The field, e.g. revenueLatestUsd."
+      "description": "The claim's field. When E2 canonicalization has run (SIM-344; `attribute_raw` is then non-null) this is a canonical value from `$defs/canonicalAttribute` (e.g. `revenue`, `gross_profit`, `ebitda`) -- NOT a camelCase/unit-suffixed label; otherwise it is the document's own label (a pre-canonicalization or qualitative claim). Cross-claim matching (3b consistency, scoring) keys on the canonical value."
+    },
+    "attribute_raw": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "SIM-344: the document's own label for this attribute, before canonical mapping (e.g. \"Revenue | 2019F\"), retained alongside the canonical `attribute`. Null for a claim the canonicalization pass never reached -- e.g. a qualitative assertion, which is categorized by assertion_class instead and keeps its own attribute vocabulary."
     },
     "period_year": {
       "type": [
@@ -388,7 +472,9 @@
           "external_reference_unresolved",
           "magnitude_unparseable",
           "cites_boilerplate",
-          "binding_unsupported"
+          "binding_unsupported",
+          "attribute_unmapped",
+          "superseded_by_same_fact"
         ]
       }
     },
@@ -597,6 +683,28 @@
                 "type": "null"
               }
             }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "SIM-375: enforce, not just describe, that `attribute` is canonical once E2 has run. attribute's own description already asserted this ('When E2 canonicalization has run, attribute_raw is then non-null, this is a canonical value') but nothing checked it -- $defs/canonicalAttribute was published and never referenced, so the stale-style camelCase names (or any string) still validated clean. attribute_raw present and non-null IS the E2-ran signal (see attribute_raw's own description); a claim that omits it or carries it null is pre-canonicalization or qualitative and keeps an unconstrained attribute, same as before.",
+      "if": {
+        "properties": {
+          "attribute_raw": {
+            "not": {
+              "type": "null"
+            }
+          }
+        },
+        "required": [
+          "attribute_raw"
+        ]
+      },
+      "then": {
+        "properties": {
+          "attribute": {
+            "$ref": "#/$defs/canonicalAttribute"
           }
         }
       }
