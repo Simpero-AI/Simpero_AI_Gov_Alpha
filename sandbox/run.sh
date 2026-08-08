@@ -68,7 +68,7 @@ fi
 # (up.sh is idempotent) so a first run is a single step. grep without -q: under
 # pipefail, -q's early exit SIGPIPEs docker compose and can falsely fail this check.
 if ! "${COMPOSE[@]}" ps --status running 2>/dev/null | grep postgres >/dev/null; then
-  printf '\n\033[1;36m[0/5]\033[0m the sandbox is not running yet -- bringing it up first (one-time)\n'
+  printf '\n\033[1;36m[0/6]\033[0m the sandbox is not running yet -- bringing it up first (one-time)\n'
   "$SANDBOX_DIR/up.sh"
 fi
 
@@ -90,17 +90,21 @@ LOCAL_PDF="$SANDBOX_DIR/cim/$(basename "$PDF")"
 CLAIMS_JSON="$SANDBOX_DIR/cim/claims.json"
 EMIT_LOG="$SANDBOX_DIR/cim/emit.log"
 
-step "1/5" "Copying the CIM into sandbox/cim/  (gitignored, never committed)"
+step "1/6" "Copying the CIM into sandbox/cim/  (gitignored, never committed)"
 # -ef: skip the copy when the CIM is already sandbox/cim/<name> (cp would fail)
 [[ "$PDF" -ef "$LOCAL_PDF" ]] || cp "$PDF" "$LOCAL_PDF"
 ok "$(basename "$PDF")"
 
-step "2/5" "Parse → extract → emit   ($TIER_NAME; docling layout analysis)"
+step "2/6" "Parse → extract → emit   ($TIER_NAME; docling layout analysis)"
 # Empty tier flag (tables only) must not become an empty argv entry, so the flag
 # is built as an array. The parser subprocess inherits this shell's environment,
 # so ANTHROPIC_API_KEY reaches it without being echoed anywhere.
 EMIT_ARGS=(scripts/emit_claims.py "$LOCAL_PDF" --entity "$ENTITY")
-[[ -n "$TIER_FLAG" ]] && EMIT_ARGS+=("$TIER_FLAG")
+# SIM-380: on the prose tiers (which already require the API key) also map
+# attributes onto the SIM-344 canonical vocabulary in one batched call.
+# Without it, "EBITDA" stays "EBITDA" (not "ebitda") and 3b consistency has
+# no canonical operands to reconstruct -- step 4/6 would find nothing.
+[[ -n "$TIER_FLAG" ]] && EMIT_ARGS+=("$TIER_FLAG" --canonicalize-attributes)
 ( cd "$PARSER_DIR" && env -u VIRTUAL_ENV uv run python "${EMIT_ARGS[@]}" ) > "$CLAIMS_JSON" 2> "$EMIT_LOG" &
 EMIT_PID=$!
 # ASCII frames on purpose: macOS ships bash 3.2, whose ${var:i:1} slices by
@@ -119,14 +123,21 @@ else
   echo "      parse/emit failed:"; sed 's/^/      /' "$EMIT_LOG"; exit 1
 fi
 
-step "3/5" "Ingest into the local claims spine   (backend, as the dd_app app role)"
+step "3/6" "Ingest into the local claims spine   (backend, as the dd_app app role)"
 echo "      validates every claim against the contract, then INSERTs under RLS"
 # ENVIRONMENT=production only silences SQLAlchemy's SQL echo for clean output;
 # it changes nothing on this path (see app/core/database.py).
 ( cd "$BACKEND_DIR" && ENVIRONMENT=production uv run python scripts/ingest_claims.py "$CLAIMS_JSON" --org-key "$ORG_KEY" --commit \
     | sed 's/^/      /' )
 
-step "4/5" "Verifying what landed   (reading THIS run's claims back from Postgres)"
+step "4/6" "Reconcile + check consistency   (3a same-fact, 3b formula reconstruction → edges)"
+echo "      runs the verification passes on THIS tenant's claims; writes claim edges + flags."
+echo "      (3b needs computational claims -- the prose/qualitative tiers; --tables-only writes none)"
+# Same RLS scoping and --commit contract as the ingest above.
+( cd "$BACKEND_DIR" && ENVIRONMENT=production uv run python scripts/run_verification.py --org-key "$ORG_KEY" --commit \
+    | sed 's/^/      /' )
+
+step "5/6" "Reading the claims back   (this run's claims, from Postgres)"
 # Scoped to the session_id the ingest just created — earlier runs for the same
 # tenant stay in the table but don't pollute the demo numbers.
 IFS='|' read -r TOTAL CITED MISSING ATTRS NPAGES PMIN PMAX <<EOF
@@ -152,7 +163,7 @@ echo   "      Distinct attributes ...... $ATTRS"
 echo   "      Pages with claims ........ $NPAGES   (pages ${PMIN}-${PMAX} of the document)"
 ok "every stored value traces back to an exact spot in the source PDF"
 
-step "5/5" "Building the interactive report   (rendered pages + click-through citations)"
+step "6/6" "Building the interactive report   (rendered pages + click-through citations)"
 ( cd "$PARSER_DIR" && env -u VIRTUAL_ENV uv run python "$SANDBOX_DIR/export_report.py" --pdf "$LOCAL_PDF" --org "$ORG_KEY" )
 # Auto-open in the default browser (macOS; a no-op elsewhere).
 command -v open >/dev/null && open "$SANDBOX_DIR/report.html" || true
