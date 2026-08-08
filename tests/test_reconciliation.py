@@ -341,3 +341,32 @@ async def test_page_less_claims_are_left_to_e1() -> None:
         assert edges == []
     finally:
         _delete_org(ORG)
+
+
+@requires_db
+async def test_operating_metric_is_never_reconciled_as_same_fact() -> None:
+    # SIM-383: operating_metric is E2/SIM-344's catch-all -- two such claims for
+    # one (entity, period) are almost never the same fact (one is slot machines,
+    # the next is hotel rooms). A disagreeing pair that WOULD contradict on any
+    # real attribute must write no edge; a real-attribute pair beside it still
+    # reconciles, so the guard is specific to the catch-all, not a blanket skip.
+    _delete_org(ORG)
+    try:
+        ids = await _seed(
+            ORG,
+            {
+                "om_a": _claim(attribute="operating_metric", normalized=1_309, page=3),
+                "om_b": _claim(attribute="operating_metric", normalized=2_444, page=11),
+                "rev_a": _claim(attribute="revenue", normalized=15_000_000, page=3),
+                "rev_b": _claim(attribute="revenue", normalized=12_000_000, page=11),
+            },
+        )
+        summary = await _run_reconciliation(ORG, "run-1")
+        assert summary.same_fact_edges == 0
+        assert summary.contradicts_edges == 1  # revenue only; operating_metric excluded
+
+        edges, _ = await _edges_and_claims(ORG)
+        assert len(edges) == 1
+        assert {edges[0].from_claim_id, edges[0].to_claim_id} == {ids["rev_a"], ids["rev_b"]}
+    finally:
+        _delete_org(ORG)

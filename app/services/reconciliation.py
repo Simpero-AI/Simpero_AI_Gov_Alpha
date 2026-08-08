@@ -128,6 +128,17 @@ async def reconcile_same_fact(
     # Scope to paged claims: page-less claims stay entirely E1's. Cross-sheet XLSX
     # reconciliation, if ever needed, is a separate pass, not this one.
     stmt = stmt.where(Claim.page.isnot(None))
+    # `operating_metric` is E2/SIM-344's catch-all for every attribute outside the
+    # core financial vocabulary -- slot machines, hotel rooms, square footage, and
+    # every balance-sheet line item all canonicalize to it. It is NOT a same-fact
+    # key: two operating_metric claims sharing an (entity, period) are almost never
+    # the same fact, so grouping on it collapses unrelated metrics into one group
+    # and floods false `contradicts` edges (measured on one CIM: 98 of 105
+    # value-disagreeing groups were distinct raw metrics forced together). Exclude
+    # it here. Reconciling operating_metric claims BY attribute_raw -- the only
+    # key that actually identifies them -- is the follow-up, and it needs the
+    # backend to persist attribute_raw first (SIM-381).
+    stmt = stmt.where(Claim.attribute != "operating_metric")
     # Qualitative claims carry no magnitude (value.normalized is null by
     # construction), already excluded by the filter above. claim_kind is
     # otherwise irrelevant here: numeric facts, not extraction provenance.
