@@ -41,25 +41,8 @@ SANDBOX_DIR = Path(__file__).resolve().parent
 SCALE = 2.0  # 144 DPI over 72-point base; pixel = point * scale, no axis flip
 
 
-def fetch_claims(org_key: str) -> list[dict]:
-    """Pull the tenant's claims as JSON through psql inside the container."""
-    org_sql = org_key.replace("'", "''")
-    sql = f"""
-      SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM (
-        SELECT c.entity, c.attribute, c.value, c.kind, c.page,
-               c.char_start, c.char_end, c.bbox, c.status, c.flags,
-               c.claim_kind, c.assertion_class
-        FROM claims c JOIN organisation o ON o.id = c.org_id
-        WHERE o.clerk_org_id = '{org_sql}'
-          -- every run.sh ingest appends under a fresh session_id; the report
-          -- shows THIS parse, not the pile-up of all previous runs
-          AND c.session_id IS NOT DISTINCT FROM (
-            SELECT c2.session_id
-            FROM claims c2 JOIN organisation o2 ON o2.id = c2.org_id
-            WHERE o2.clerk_org_id = '{org_sql}'
-            ORDER BY c2.created_at DESC LIMIT 1)
-        ORDER BY c.page, c.char_start NULLS LAST) t;
-    """
+def _psql(sql: str) -> str:
+    """Run one SQL statement in the sandbox Postgres container, return stdout."""
     proc = subprocess.run(
         [
             "docker",
@@ -83,7 +66,72 @@ def fetch_claims(org_key: str) -> list[dict]:
     )
     if proc.returncode != 0:
         sys.exit(f"error: psql failed:\n{proc.stderr}")
-    return json.loads(proc.stdout)
+    return proc.stdout
+
+
+def fetch_claims(org_key: str) -> list[dict]:
+    """Pull the tenant's claims as JSON through psql inside the container."""
+    org_sql = org_key.replace("'", "''")
+    sql = f"""
+      SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM (
+        SELECT c.id::text AS id, c.entity, c.attribute, c.value, c.kind, c.page,
+               c.char_start, c.char_end, c.bbox, c.status, c.flags,
+               c.claim_kind, c.assertion_class
+        FROM claims c JOIN organisation o ON o.id = c.org_id
+        WHERE o.clerk_org_id = '{org_sql}'
+          -- every run.sh ingest appends under a fresh session_id; the report
+          -- shows THIS parse, not the pile-up of all previous runs
+          AND c.session_id IS NOT DISTINCT FROM (
+            SELECT c2.session_id
+            FROM claims c2 JOIN organisation o2 ON o2.id = c2.org_id
+            WHERE o2.clerk_org_id = '{org_sql}'
+            ORDER BY c2.created_at DESC LIMIT 1)
+        ORDER BY c.page, c.char_start NULLS LAST) t;
+    """
+    return json.loads(_psql(sql))
+
+
+def fetch_edges(org_key: str) -> list[dict]:
+    """The claim-to-claim verification edges for THIS run -- 3a reconciliation
+    (same_fact/contradicts), 3b consistency (derived_from/contradicts) and the
+    E1 reducer -- keyed by from/to claim id so the report can draw the
+    relationships the passes wrote."""
+    org_sql = org_key.replace("'", "''")
+    sql = f"""
+      SELECT COALESCE(json_agg(row_to_json(e)), '[]'::json) FROM (
+        SELECT e.from_claim_id::text AS "from", e.to_claim_id::text AS "to",
+               e.type, e.basis, e.created_by, e.metadata
+        FROM edges e JOIN organisation o ON o.id = e.org_id
+        WHERE o.clerk_org_id = '{org_sql}'
+          AND e.from_claim_id IN (
+            SELECT c.id FROM claims c JOIN organisation o2 ON o2.id = c.org_id
+            WHERE o2.clerk_org_id = '{org_sql}'
+              AND c.session_id IS NOT DISTINCT FROM (
+                SELECT c2.session_id FROM claims c2 JOIN organisation o3 ON o3.id = c2.org_id
+                WHERE o3.clerk_org_id = '{org_sql}' ORDER BY c2.created_at DESC LIMIT 1))
+        ORDER BY e.type) e;
+    """
+    return json.loads(_psql(sql))
+
+
+def fetch_audit_verdicts() -> list[dict]:
+    """The binding auditor's verdicts (SIM-359) as {mode, evidence}, read from
+    the emit payload's flag_log -- the claims table's `flags` column carries the
+    flag TYPE (binding_unsupported) but not the mode/evidence. Empty when the run
+    did not pass --audit, or the payload is absent."""
+    payload = SANDBOX_DIR / "cim" / "claims.json"
+    if not payload.is_file():
+        return []
+    try:
+        flog = json.loads(payload.read_text()).get("flag_log", [])
+    except (json.JSONDecodeError, OSError):
+        return []
+    verdicts = []
+    for entry in flog:
+        if entry.get("stage") == "binding_audit":
+            mode, _, evidence = entry.get("detail", "").partition(":")
+            verdicts.append({"mode": mode.strip(), "evidence": evidence.strip()})
+    return verdicts
 
 
 def render_pages(pdf_path: Path, pages: list[int]) -> dict[int, dict]:
@@ -136,10 +184,20 @@ def main() -> None:
 
     cited_pages = sorted({c["page"] for c in claims if c["bbox"] and c["page"] is not None})
     print(f"      {len(claims)} claims, {len(cited_pages)} page(s) carry a citation")
+    edges = fetch_edges(args.org)
+    audit = fetch_audit_verdicts()
+    print(f"      {len(edges)} verification edge(s), {len(audit)} binding-audit verdict(s)")
     pages = render_pages(pdf_path, cited_pages)
 
     out = SANDBOX_DIR / "cim" / "report_data.js"
-    data = {"pdf": pdf_path.name, "org": args.org, "claims": claims, "pages": pages}
+    data = {
+        "pdf": pdf_path.name,
+        "org": args.org,
+        "claims": claims,
+        "edges": edges,
+        "audit": audit,
+        "pages": pages,
+    }
     out.write_text("window.REPORT = " + json.dumps(data) + ";\n")
     print(f"      wrote {out}  ({out.stat().st_size / 1e6:.1f} MB; gitignored)")
     print(f"      open  {SANDBOX_DIR / 'report.html'}  in a browser")
