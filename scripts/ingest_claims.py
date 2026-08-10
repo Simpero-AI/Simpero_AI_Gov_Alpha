@@ -64,6 +64,9 @@ def _row_from_claim(claim: dict, org_id: int, session_id: uuid.UUID) -> Claim:
         session_id=session_id,
         entity=claim["entity"],
         attribute=claim["attribute"],
+        # SIM-381: the document's own label, retained alongside the canonical
+        # attribute. Absent means canonicalization never reached this claim.
+        attribute_raw=claim.get("attribute_raw"),
         # SIM-365/364: carry the parser's stable id and assertion type across the seam.
         # claim_type is contract-required; default to "unknown" defensively for any
         # pre-field payload rather than failing the row.
