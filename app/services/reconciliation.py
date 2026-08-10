@@ -242,6 +242,16 @@ async def _reconcile_group(
         if rep.page is not None and rep.page == canonical_claim.page:
             summary.skipped_same_page_pairs += 1
             continue
+        # SIM-387: the group key (entity, attribute, period_year, period_kind)
+        # forces period equality when BOTH claims have a known period, but a
+        # None period_year groups every unknown-period claim together too --
+        # that is not "the same period", it is "we don't know". A contradicts
+        # edge across a None-period pair would manufacture a disagreement
+        # this pass has no basis to claim; same_fact corroboration on a value
+        # match is still fine (agreement needs no period to be trustworthy),
+        # but contradicts requires both claims to actually name a period.
+        if rep.period_year is None or canonical_claim.period_year is None:
+            continue
         from_id, to_id = _canonical_from_to(rep.id, canonical_claim.id)
         value_delta = float(rep.value["normalized"]) - float(canonical_claim.value["normalized"])
         await _write_edge(
@@ -252,7 +262,11 @@ async def _reconcile_group(
             type_="contradicts",
             basis=f"cross-page reconciliation: {rep.attribute} disagrees with the canonical claim",
             run_id=run_id,
-            metadata_={"value_delta": value_delta},
+            metadata_={
+                "value_delta": value_delta,
+                "period_year": rep.period_year,
+                "period_kind": rep.period_kind,
+            },
         )
         summary.contradicts_edges += 1
 
