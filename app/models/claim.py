@@ -128,6 +128,10 @@ class Claim(Base):
 
     entity: Mapped[str] = mapped_column(Text, nullable=False)
     attribute: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    # SIM-381/344: the document's own label for this attribute, before E2
+    # canonicalization. Null means canonicalization never reached this claim
+    # (qualitative, or pre-canonicalization) -- non-null is the signal that it did.
+    attribute_raw: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     period_year: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # A=Actual, E=Estimate, P=Projected.
