@@ -244,20 +244,45 @@ async def test_missing_operand_skips_the_rule() -> None:
 
 
 @requires_db
-async def test_non_computational_derived_claim_is_not_routed() -> None:
-    """Routing is on claim_type == computational -- a claim that merely HAS
-    the derived attribute name but isn't typed computational must be
-    ignored, not treated as a formula result to verify."""
+async def test_numerical_derived_claim_is_routed_and_matches() -> None:
+    """SIM-385: routing is on matching a rule's derived_attribute, not on
+    claim_type -- a PDF table subtotal is typed `numerical` (only XLSX
+    formulas are `computational`), and must still be checked."""
     _delete_org(ORG)
     try:
-        claims = _gross_profit_claims(derived_value=999_999)  # would mismatch if checked
+        claims = _gross_profit_claims(derived_value=200_000)
         claims["derived"].claim_type = "numerical"
-        await _seed(ORG, claims)
+        ids = await _seed(ORG, claims)
+        summary = await _run_consistency(ORG, "run-1")
+        assert summary.derived_from_edges == 2
+        assert summary.contradicts_edges == 0
+
+        edges, claims_by_id = await _edges_and_claims(ORG)
+        derived_from = [e for e in edges if e.type == "derived_from"]
+        assert {e.to_claim_id for e in derived_from} == {ids["revenue"], ids["margin"]}
+        assert not claims_by_id[ids["derived"]].flags
+    finally:
+        _delete_org(ORG)
+
+
+@requires_db
+async def test_numerical_derived_claim_is_routed_and_mismatches() -> None:
+    """Same routing change, mismatch side: a `numerical`-typed claim that
+    disagrees with its recomputed value is still flagged and contradicted,
+    not silently ignored for being the "wrong" claim_type."""
+    _delete_org(ORG)
+    try:
+        claims = _gross_profit_claims(derived_value=999_999)  # expected 200_000
+        claims["derived"].claim_type = "numerical"
+        ids = await _seed(ORG, claims)
         summary = await _run_consistency(ORG, "run-1")
         assert summary.derived_from_edges == 0
-        assert summary.contradicts_edges == 0
-        edges, _ = await _edges_and_claims(ORG)
-        assert edges == []
+        assert summary.contradicts_edges == 2
+        assert summary.claims_flagged == 1
+
+        edges, claims_by_id = await _edges_and_claims(ORG)
+        assert {e.type for e in edges} == {"contradicts"}
+        assert "formula_mismatch" in (claims_by_id[ids["derived"]].flags or [])
     finally:
         _delete_org(ORG)
 

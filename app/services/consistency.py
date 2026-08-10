@@ -1,12 +1,15 @@
 """SIM-372: 3b Consistency -- related-fact arithmetic + FinGround formula
 reconstruction (design doc Step 3b; arXiv:2604.23588).
 
-Re-executes a computational claim's formula OUTSIDE the parser, from its
-operand claims, and compares -- this is what the FinGround paper's 43%
-missed-computational-error number is about: a uniform detector that only
-checks a claim against its own citation never catches the case where the
-citation is byte-exact but the ARITHMETIC connecting it to other claims is
-wrong. Routes on `claim_type == "computational"` (SIM-364).
+Re-executes a claim's formula OUTSIDE the parser, from its operand claims,
+and compares -- this is what the FinGround paper's 43% missed-computational-
+error number is about: a uniform detector that only checks a claim against
+its own citation never catches the case where the citation is byte-exact but
+the ARITHMETIC connecting it to other claims is wrong. Routes on matching a
+rule's `derived_attribute`, not on `claim_type` (SIM-385) -- PDF table
+subtotals are emitted `claim_type="numerical"`, not `"computational"` (only
+XLSX formulas are), and a successful recompute against the by_key match is
+itself the evidence a figure is derivable.
 
 Match -> DERIVED_FROM edges, one row per operand (derived -> operand),
 `metadata_={"rule": ..., "operands": [...]}`, `created_by="consistency"`.
@@ -185,12 +188,16 @@ async def reconcile_consistency(
         rules_by_attribute.setdefault(rule.derived_attribute, []).append(rule)
 
     for attribute, attribute_rules in rules_by_attribute.items():
+        # SIM-385: intake is not gated on claim_type -- a PDF table subtotal
+        # is emitted "numerical", not "computational" (only XLSX formulas
+        # are); a successful recompute against by_key's derived_attribute
+        # match IS the evidence this figure is derivable, regardless of how
+        # the parser typed it.
         derived_candidates = [
             c
             for key, group in by_key.items()
             if key[3] == attribute and len(group) == 1
             for c in group
-            if c.claim_type == "computational"
         ]
         for derived in derived_candidates:
             await _check_derived(
