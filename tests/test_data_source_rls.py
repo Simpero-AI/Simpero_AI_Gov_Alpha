@@ -275,6 +275,77 @@ async def test_trigger_blocks_second_update_dd_app(db_session, org_a_id, org_a_d
         await repo.update_status(row.id, status="mismatch", fingerprint=_FINGERPRINT_HASH)
 
 
+async def test_trigger_allows_verified_to_ocr_needed(db_session, org_a_id, org_a_deal_id):
+    """docs/plans/start-analysis-flow-alpha.md's Option A: the parser's
+    no_extractable_text signal (SIM-350) must be able to land as a
+    verified -> ocr_needed transition -- the one deliberate carve-out this
+    migration added to the otherwise one-way trigger."""
+    repo = DataSourceRepo(db_session)
+    row = await repo.create(
+        {
+            "org_id": org_a_id,
+            "deal_id": org_a_deal_id,
+            "storage_key": "org-a/key8.pdf",
+            "filename": "a8.pdf",
+            "declared_sha256": _DECLARED_HASH,
+        }
+    )
+    await db_session.flush()
+    await repo.update_status(row.id, status="verified", fingerprint=_FINGERPRINT_HASH)
+    await db_session.flush()
+
+    updated = await repo.update_status(row.id, status="ocr_needed", fingerprint=_FINGERPRINT_HASH)
+    assert updated is not None
+    assert updated.status == "ocr_needed"
+    # Implementer trap the plan calls out: fingerprint must still be the
+    # row's real (already-verified) hash, never wiped to None.
+    assert updated.fingerprint == _FINGERPRINT_HASH
+
+
+async def test_trigger_still_blocks_ocr_needed_as_a_dead_end(db_session, org_a_id, org_a_deal_id):
+    """ocr_needed stays terminal -- the carve-out is narrowly
+    verified->ocr_needed only, not a reopening of the lifecycle."""
+    repo = DataSourceRepo(db_session)
+    row = await repo.create(
+        {
+            "org_id": org_a_id,
+            "deal_id": org_a_deal_id,
+            "storage_key": "org-a/key9.pdf",
+            "filename": "a9.pdf",
+            "declared_sha256": _DECLARED_HASH,
+        }
+    )
+    await db_session.flush()
+    await repo.update_status(row.id, status="verified", fingerprint=_FINGERPRINT_HASH)
+    await db_session.flush()
+    await repo.update_status(row.id, status="ocr_needed", fingerprint=_FINGERPRINT_HASH)
+    await db_session.flush()
+
+    with pytest.raises(DBAPIError, match="status is final once left pending"):
+        await repo.update_status(row.id, status="verified", fingerprint=_FINGERPRINT_HASH)
+
+
+async def test_trigger_still_blocks_verified_to_mismatch(db_session, org_a_id, org_a_deal_id):
+    """The carve-out is specifically verified->ocr_needed -- every other
+    post-verified transition is still rejected."""
+    repo = DataSourceRepo(db_session)
+    row = await repo.create(
+        {
+            "org_id": org_a_id,
+            "deal_id": org_a_deal_id,
+            "storage_key": "org-a/key10.pdf",
+            "filename": "a10.pdf",
+            "declared_sha256": _DECLARED_HASH,
+        }
+    )
+    await db_session.flush()
+    await repo.update_status(row.id, status="verified", fingerprint=_FINGERPRINT_HASH)
+    await db_session.flush()
+
+    with pytest.raises(DBAPIError, match="status is final once left pending"):
+        await repo.update_status(row.id, status="mismatch", fingerprint=_FINGERPRINT_HASH)
+
+
 def test_trigger_blocks_second_update_even_via_table_owner(owner_conn, org_a_id, org_a_deal_id):
     """Confirms the trigger fires for EVERY role, not just dd_app -- the part
     of the design that closes the gap plain GRANT/REVOKE alone would leave

@@ -19,6 +19,11 @@ class DataSourceRepo(BaseRepo[DataSource, dict]):
     async def get_by_id(self, id: object) -> DataSource | None:
         return await self.session.get(DataSource, id)
 
+    async def list_for_deal(self, deal_id: uuid.UUID) -> list[DataSource]:
+        """RLS scopes this to the request's org — no WHERE org_id here."""
+        result = await self.session.execute(select(DataSource).where(DataSource.deal_id == deal_id))
+        return list(result.scalars().all())
+
     async def find_dedupe_candidate(self, deal_id: uuid.UUID, hash: str) -> DataSource | None:
         """Presign-time dedupe lookup. Matches `declared_sha256 OR
         fingerprint` -- not `fingerprint` alone -- because `fingerprint` stays

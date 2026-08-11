@@ -11,9 +11,11 @@ a queue no worker is listening to.
 This module only enqueues and checks status — it does not fetch the parsed
 result. The worker writes results to Spaces (see Simpero_Gov_AI_Services'
 results_store.py / ParserSettings.results_key_prefix); reading them back
-requires boto3, which this app deliberately does not depend on today (see
-pyproject.toml's 2026-07-17 note). Add that once something here actually
-needs to read a parsed result rather than just trigger and poll a job.
+requires boto3, which this app already depends on (pyproject.toml — kept for
+future Spaces access from this app; app/services/uploads/spaces.py already
+reuses the parser service's bucket). Add that read once something here
+actually needs to open a parsed result rather than just trigger and poll a
+job — get_parse_job's `result` dict is a bucket+key pointer, not the body.
 """
 
 from functools import lru_cache

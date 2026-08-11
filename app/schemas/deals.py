@@ -11,6 +11,17 @@ class PipelineStepResponse(CamelModel):
     status: Literal["done", "current", "pending", "failed"]
 
 
+class JobCommentResponse(CamelModel):
+    """One `analysis_run.job_comments` entry — a frontend-facing summary of
+    what happened to one document, derived from `parse_jobs` once the run
+    goes terminal (see app/jobs/tasks/start_deal_analysis.py::_build_job_comments)."""
+
+    data_source_id: str
+    file_name: str | None
+    status: str
+    comment: str
+
+
 class DealStatusResponse(CamelModel):
     """`deals.status` / DealStatusPayload. Phase 1 has no job model yet, so
     this is always the `no_job` shape — Phase 2's job model fills in real
@@ -22,6 +33,9 @@ class DealStatusResponse(CamelModel):
     steps: list[PipelineStepResponse]
     phase_progress: dict[str, int] | None = None
     error_message: str | None = None
+    # Only populated once a run reaches a terminal status (successful/failed)
+    # -- null everywhere else, including no_job/queued/processing.
+    job_comments: list[JobCommentResponse] | None = None
 
 
 class ValueDelta(CamelModel):
@@ -111,3 +125,22 @@ class LatestMemoSessionResponse(CamelModel):
 class DealWithLatestMemoResponse(CamelModel):
     deal: DealRowResponse
     latest_memo_session: LatestMemoSessionResponse | None
+
+
+class CreateDealRequest(CamelModel):
+    name: str
+    gp_source: str | None
+    deal_size_min_usd: int | None
+    deal_size_max_usd: int | None
+    sector_tags: list[str] | None
+
+
+class CreateDealResponse(CamelModel):
+    id: str
+
+
+class StartAnalysisRequest(CamelModel):
+    """Persisted verbatim onto analysis_run.selected_frameworks, not
+    interpreted — nothing consumes it yet (Open Question 3)."""
+
+    selected_frameworks: list[str] | None = None

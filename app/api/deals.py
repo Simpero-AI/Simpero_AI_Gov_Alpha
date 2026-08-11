@@ -3,16 +3,22 @@ import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dependencies import get_claims, get_db
+from app.jobs.queue import get_queue
 from app.models.deal import Deal
+from app.repo.AnalysisRunRepo import AnalysisRunRepo
+from app.repo.DataSourceRepo import DataSourceRepo
 from app.repo.DealRepo import DealRepo
 from app.repo.HumanAuditRepo import HumanAuditRepo
 from app.repo.SessionRepo import SessionRepo
 from app.repo.UserRepo import UserRepo
 from app.schemas.deals import (
     AvgAiScoreStat,
+    CreateDealRequest,
+    CreateDealResponse,
     DashboardStatsResponse,
     DdCompletionStat,
     DealRowResponse,
@@ -22,6 +28,7 @@ from app.schemas.deals import (
     LivePipelineRowResponse,
     PipelineStepResponse,
     PipelineValueStat,
+    StartAnalysisRequest,
     ValueDelta,
 )
 from app.services.dashboard_stats import compute_month_bounds, compute_pipeline_value_delta
@@ -38,18 +45,40 @@ async def _actor(db: AsyncSession, claims: dict[str, Any]) -> tuple[int, str, st
     return user.org_id, claims["user_id"], user.email
 
 
-def _no_job_status() -> DealStatusResponse:
-    """Phase 1 has no job model yet — every deal reports this shape until
-    Phase 2's job model lands. The frontend renders an empty state for it."""
-    return DealStatusResponse(
-        job_status="no_job",
-        current_phase=None,
-        steps=[
+def _steps_for_status(
+    current_phase: str | None, failed_phase: str | None = None
+) -> list[PipelineStepResponse]:
+    """D14 of docs/plans/start-analysis-flow-alpha.md: phases before
+    `current_phase` are "done", `current_phase` itself is "current",
+    `failed_phase` (if given) is "failed" and nothing after it is reachable —
+    everything else is "pending"."""
+    phases = [step["phase"] for step in no_job_steps()]
+    current_index = phases.index(current_phase) if current_phase is not None else None
+
+    steps = []
+    for index, step in enumerate(no_job_steps()):
+        if failed_phase is not None:
+            step_status = "failed" if step["phase"] == failed_phase else "pending"
+        elif current_index is None:
+            step_status = "pending"
+        elif step["phase"] == current_phase:
+            step_status = "current"
+        elif index < current_index:
+            step_status = "done"
+        else:
+            step_status = "pending"
+        steps.append(
             PipelineStepResponse(
-                phase=step["phase"], title=step["title"], detail=step["detail"], status="pending"
+                phase=step["phase"], title=step["title"], detail=step["detail"], status=step_status
             )
-            for step in no_job_steps()
-        ],
+        )
+    return steps
+
+
+def _no_job_status() -> DealStatusResponse:
+    """No analysis_run exists yet for this deal — every step pending."""
+    return DealStatusResponse(
+        job_status="no_job", current_phase=None, steps=_steps_for_status(None)
     )
 
 
@@ -68,6 +97,40 @@ def _deal_row_response(deal: Deal) -> DealRowResponse:
         created_at=deal.created_at,
         updated_at=deal.updated_at,
     )
+
+
+@router.post("", response_model=CreateDealResponse, status_code=status.HTTP_201_CREATED)
+async def create_deal(
+    body: CreateDealRequest,
+    claims: dict[str, Any] = Depends(get_claims),
+    db: AsyncSession = Depends(get_db),
+) -> CreateDealResponse:
+    """deals.create. fund_id stays null — the frontend's contract has no fund
+    field yet (see the comment on Deal.fund_id)."""
+    org_id, actor_id, actor_email = await _actor(db, claims)
+
+    deal = await DealRepo(db).create(
+        {
+            "id": uuid.uuid4(),
+            "org_id": org_id,
+            "name": body.name,
+            "gp_source": body.gp_source,
+            "deal_size_min_usd": body.deal_size_min_usd,
+            "deal_size_max_usd": body.deal_size_max_usd,
+            "sector_tags": body.sector_tags,
+        }
+    )
+    await HumanAuditRepo(db).append(
+        {
+            "org_id": org_id,
+            "actor_id": actor_id,
+            "actor_email": actor_email,
+            "event_type": "deal_created",
+            "deal_id": deal.id,
+        }
+    )
+
+    return CreateDealResponse(id=str(deal.id))
 
 
 @router.get("/pipeline", response_model=list[LivePipelineRowResponse])
@@ -167,9 +230,133 @@ async def get_deal(
 async def get_deal_status(
     deal_id: uuid.UUID, db: AsyncSession = Depends(get_db)
 ) -> DealStatusResponse:
-    """deals.status -> DealStatusPayload. Phase 1 has no job model yet, so
-    this is always the no_job shape (Phase 2 adds real jobStatus/currentPhase)."""
+    """deals.status -> DealStatusPayload. Maps the deal's latest
+    analysis_run onto this shape per D14 of
+    docs/plans/start-analysis-flow-alpha.md. `parsed` deliberately maps to
+    "processing"/"classify", never "complete" — classification hasn't run
+    yet, so reporting complete would make the frontend render an empty memo
+    tab."""
     deal = await DealRepo(db).get_by_id(deal_id)
     if deal is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
-    return _no_job_status()
+
+    run = await AnalysisRunRepo(db).latest_for_deal(deal_id)
+    if run is None:
+        return _no_job_status()
+
+    if run.status == "queued":
+        return DealStatusResponse(
+            job_status="queued", current_phase=None, steps=_steps_for_status(None)
+        )
+    if run.status == "in_progress":
+        return DealStatusResponse(
+            job_status="processing", current_phase="parsing", steps=_steps_for_status("parsing")
+        )
+    if run.status == "successful":
+        return DealStatusResponse(
+            job_status="processing",
+            current_phase="classify",
+            steps=_steps_for_status("classify"),
+            job_comments=run.job_comments,
+        )
+    return DealStatusResponse(
+        job_status="error",
+        current_phase="parsing",
+        steps=_steps_for_status(None, failed_phase="parsing"),
+        error_message=run.error_message,
+        job_comments=run.job_comments,
+    )
+
+
+@router.post(
+    "/{deal_id}/analysis",
+    response_model=DealStatusResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def start_analysis(
+    deal_id: uuid.UUID,
+    body: StartAnalysisRequest,
+    claims: dict[str, Any] = Depends(get_claims),
+    db: AsyncSession = Depends(get_db),
+) -> DealStatusResponse:
+    """deals.startAnalysis. Enqueues on this app's own "simpero" queue only —
+    start_deal_analysis (the worker task) does the actual fan-out to the
+    parser service's "parse" queue; never enqueued here directly, same
+    precedent as app/api/uploads.py's complete_upload."""
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    analysis_repo = AnalysisRunRepo(db)
+    if await analysis_repo.active_for_deal(deal_id) is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Analysis is already running for this deal",
+        )
+
+    data_sources = await DataSourceRepo(db).list_for_deal(deal_id)
+    usable = [ds for ds in data_sources if ds.status == "verified"]
+    pending = [ds for ds in data_sources if ds.status == "pending"]
+
+    if not usable and not pending:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Upload at least one document before starting analysis",
+        )
+    if not usable:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Documents are still being verified — try again in a moment",
+        )
+
+    org_id, actor_id, actor_email = await _actor(db, claims)
+
+    try:
+        run = await analysis_repo.create(
+            {
+                "id": uuid.uuid4(),
+                "org_id": org_id,
+                "deal_id": deal_id,
+                "job_name": "parsing",
+                "selected_frameworks": body.selected_frameworks,
+                "status": "queued",
+            }
+        )
+        # Forces uq_analysis_run_active's constraint check now, inside this
+        # try block, rather than at the transaction's final commit (outside
+        # any handler of ours) — D6's actual double-submit guarantee, for the
+        # race the fast-path SELECT above can't catch.
+        await db.flush()
+    except IntegrityError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Analysis is already running for this deal",
+        ) from exc
+
+    # "simpero" queue -- this app's own SAQ worker, never the "parse" queue
+    # (app/jobs/parse_client.py). Explicit timeout/retries/ttl: SAQ's default
+    # timeout is 10 seconds, far short of this task's multi-hour fan-out+poll.
+    await get_queue().enqueue(
+        "start_deal_analysis",
+        analysis_run_id=str(run.id),
+        deal_id=str(deal_id),
+        clerk_org_id=claims["tenant_id"],
+        timeout=7200,
+        retries=1,
+        ttl=86400,
+    )
+
+    await HumanAuditRepo(db).append(
+        {
+            "org_id": org_id,
+            "actor_id": actor_id,
+            "actor_email": actor_email,
+            "event_type": "analysis_requested",
+            "deal_id": deal_id,
+            "payload": {"analysis_run_id": str(run.id), "document_count": len(usable)},
+        }
+    )
+
+    return DealStatusResponse(
+        job_status="queued", current_phase=None, steps=_steps_for_status(None)
+    )
