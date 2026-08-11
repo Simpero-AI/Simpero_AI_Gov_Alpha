@@ -73,6 +73,7 @@ def _claim(
     kind: str = "pdf",
     sheet: str | None = None,
     cell_ref: str | None = None,
+    session_id: uuid.UUID | None = None,
 ) -> Claim:
     # A PDF claim carries a page + char span; an XLSX claim carries sheet/cell_ref
     # and no page (the locator CHECK enforces this; the span requirement exempts
@@ -97,6 +98,7 @@ def _claim(
         },
         status="proposed",
         table_group_id=table_group_id,
+        session_id=session_id,
         **location,
     )
 
@@ -118,12 +120,14 @@ async def _seed(org_key: str, claims: dict[str, Claim]) -> dict[str, uuid.UUID]:
         return {label: c.id for label, c in claims.items()}
 
 
-async def _run_reconciliation(org_key: str, run_id: str) -> ReconciliationSummary:
+async def _run_reconciliation(
+    org_key: str, run_id: str, session_id: uuid.UUID | None = None
+) -> ReconciliationSummary:
     async with AsyncSessionLocal() as session, session.begin():
         await session.execute(text("SET LOCAL ROLE dd_app"))
         await session.execute(text("SELECT set_config('app.org_id', :k, true)"), {"k": org_key})
         summary: ReconciliationSummary = await reconcile_same_fact(
-            session, data_source_id=None, run_id=run_id
+            session, data_source_id=None, session_id=session_id, run_id=run_id
         )
         await session.flush()
     return summary
@@ -255,6 +259,114 @@ async def test_rerun_is_idempotent_via_the_unique_constraint() -> None:
         assert edges_second[0].id == edges_first[0].id
         # The flag write is separately idempotent (checked before appending).
         _, claims = await _edges_and_claims(ORG)
+    finally:
+        _delete_org(ORG)
+
+
+# --------------------------------------------------------------------------
+# SIM-389: run scoping. Two ingests of the same document into the same tenant
+# are two RUNS, not corroboration -- a figure restated by a re-parse of the
+# same PDF is the same reading twice, and treating it as a cross-page
+# agreement (or, worse, a contradiction) manufactures evidence that no
+# document ever contained.
+# --------------------------------------------------------------------------
+
+
+@requires_db
+async def test_claims_from_two_runs_do_not_corroborate_each_other() -> None:
+    """The exact pathology: run 2's claims agreeing with run 1's must not
+    become same_fact edges. Scoped to one run, each run sees only itself."""
+    _delete_org(ORG)
+    try:
+        run_a, run_b = uuid.uuid4(), uuid.uuid4()
+        await _seed(
+            ORG,
+            {
+                # Run A: a genuine cross-page pair -> 1 edge, on its own.
+                "a_table": _claim(
+                    normalized=15_000_000, page=3, table_group_id=uuid.uuid4(), session_id=run_a
+                ),
+                "a_prose": _claim(normalized=15_000_000, page=11, session_id=run_a),
+                # Run B: the same document parsed again. Same figure, same pages.
+                "b_table": _claim(
+                    normalized=15_000_000, page=3, table_group_id=uuid.uuid4(), session_id=run_b
+                ),
+                "b_prose": _claim(normalized=15_000_000, page=11, session_id=run_b),
+            },
+        )
+
+        summary_a = await _run_reconciliation(ORG, str(run_a), session_id=run_a)
+        # Exactly the one within-run pair -- not the 6 pairs the 4 claims would
+        # form if the two runs were reconciled together.
+        assert summary_a.same_fact_edges == 1
+        assert summary_a.contradicts_edges == 0
+
+        edges, _ = await _edges_and_claims(ORG)
+        assert len(edges) == 1
+        assert edges[0].run_id == str(run_a), "edge must be attributable to its run"
+    finally:
+        _delete_org(ORG)
+
+
+@requires_db
+async def test_cross_run_values_do_not_manufacture_contradicts() -> None:
+    """A re-parse that reads a figure differently is a parser-version delta,
+    not a contradiction inside a document. Unscoped it fabricates one."""
+    _delete_org(ORG)
+    try:
+        run_a, run_b = uuid.uuid4(), uuid.uuid4()
+        await _seed(
+            ORG,
+            {
+                "a_table": _claim(
+                    normalized=15_000_000, page=3, table_group_id=uuid.uuid4(), session_id=run_a
+                ),
+                "b_prose": _claim(normalized=12_000_000, page=11, session_id=run_b),
+            },
+        )
+
+        scoped = await _run_reconciliation(ORG, str(run_a), session_id=run_a)
+        assert scoped.groups_considered == 0, "a lone claim in run A forms no group"
+        assert scoped.contradicts_edges == 0
+        edges, _ = await _edges_and_claims(ORG)
+        assert edges == []
+
+        # And the unscoped pass is what the ticket describes: pass session_id
+        # None and the two runs DO collide into a false contradiction. Pinning
+        # it so the difference between the two modes stays visible, and so
+        # nobody "fixes" the None branch into silently scoping itself.
+        unscoped = await _run_reconciliation(ORG, "all-runs", session_id=None)
+        assert unscoped.contradicts_edges == 1
+    finally:
+        _delete_org(ORG)
+
+
+@requires_db
+async def test_run_scoped_pass_ignores_claims_with_no_session_id() -> None:
+    """Rows ingested before SIM-389 carry a NULL session_id and belong to no
+    run -- an equality filter must exclude them rather than sweeping them into
+    whichever run happens to be scoped."""
+    _delete_org(ORG)
+    try:
+        run_a = uuid.uuid4()
+        await _seed(
+            ORG,
+            {
+                "scoped": _claim(
+                    normalized=15_000_000, page=3, table_group_id=uuid.uuid4(), session_id=run_a
+                ),
+                "legacy": _claim(normalized=15_000_000, page=11, session_id=None),
+            },
+        )
+        summary = await _run_reconciliation(ORG, str(run_a), session_id=run_a)
+        assert summary.groups_considered == 0
+        assert summary.same_fact_edges == 0
+
+        edges, claims = await _edges_and_claims(ORG)
+        assert edges == []
+        # The legacy claim is skipped, never deleted or flagged.
+        assert len(claims) == 2
+        assert all(not c.flags for c in claims.values())
     finally:
         _delete_org(ORG)
 

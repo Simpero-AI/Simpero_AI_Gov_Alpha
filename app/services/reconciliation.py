@@ -96,6 +96,7 @@ async def reconcile_same_fact(
     session: AsyncSession,
     *,
     data_source_id: uuid.UUID | None,
+    session_id: uuid.UUID | None,
     run_id: str,
 ) -> ReconciliationSummary:
     """Cross-page/tier same-fact reconciliation over one document's claims.
@@ -108,6 +109,16 @@ async def reconcile_same_fact(
     fact"); pass None for the demo/no-data_source_id ingest path, which
     matches every claim with data_source_id IS NULL.
 
+    `session_id` (SIM-389) narrows to ONE ingest run. It is a separate axis
+    from data_source_id -- that one is document identity, this one is run
+    identity -- and today it is the only one that discriminates, because the
+    demo ingest leaves data_source_id NULL on every claim of every run. Pass
+    None to reconcile every run in RLS scope at once; that is the old
+    behaviour, kept for ad-hoc inspection but no longer the only option,
+    since it forms same_fact/contradicts edges ACROSS runs and inflates the
+    counts. Required keyword rather than a defaulted one, same as
+    data_source_id: a caller must decide the scope, not inherit it silently.
+
     Idempotent: edge writes go through INSERT ... ON CONFLICT DO NOTHING
     against SIM-369's UNIQUE(org_id, from, to, type), so a re-run over
     unchanged claims writes zero new rows. The `superseded_by_same_fact`
@@ -119,6 +130,11 @@ async def reconcile_same_fact(
         if data_source_id is None
         else Claim.data_source_id == data_source_id
     )
+    # An equality filter, NOT an `IS NULL`-style fallback like data_source_id
+    # above: a claim with a NULL session_id predates run-scoping and belongs
+    # to no run, so it must not be pulled into a scoped run's groups.
+    if session_id is not None:
+        stmt = stmt.where(Claim.session_id == session_id)
     # SIM-371: 3a is CROSS-PAGE reconciliation, and the within-vs-cross split that
     # keeps it from double-counting E1's within-page edges is decided by comparing
     # `page` (see _reconcile_group's same-page skip). A page-less claim -- an XLSX

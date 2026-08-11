@@ -72,6 +72,7 @@ def _claim(
     period_kind: str = "A",
     claim_type: str = "numerical",
     value_type: str = "currency",
+    session_id: uuid.UUID | None = None,
 ) -> Claim:
     return Claim(
         entity=entity,
@@ -79,6 +80,7 @@ def _claim(
         period_year=period_year,
         period_kind=period_kind,
         claim_type=claim_type,
+        session_id=session_id,
         value={
             "raw": str(normalized),
             "normalized": normalized,
@@ -111,11 +113,15 @@ async def _seed(org_key: str, claims: dict[str, Claim]) -> dict[str, uuid.UUID]:
         return {label: c.id for label, c in claims.items()}
 
 
-async def _run_consistency(org_key: str, run_id: str) -> ConsistencySummary:
+async def _run_consistency(
+    org_key: str, run_id: str, session_id: uuid.UUID | None = None
+) -> ConsistencySummary:
     async with AsyncSessionLocal() as session, session.begin():
         await session.execute(text("SET LOCAL ROLE dd_app"))
         await session.execute(text("SELECT set_config('app.org_id', :k, true)"), {"k": org_key})
-        summary = await reconcile_consistency(session, data_source_id=None, run_id=run_id)
+        summary = await reconcile_consistency(
+            session, data_source_id=None, session_id=session_id, run_id=run_id
+        )
         await session.flush()
     return summary
 
@@ -128,12 +134,19 @@ async def _edges_and_claims(org_key: str) -> tuple[list[Edge], dict[uuid.UUID, C
     return list(edges), {c.id: c for c in claims}
 
 
-def _gross_profit_claims(*, derived_value: float) -> dict[str, Claim]:
+def _gross_profit_claims(
+    *, derived_value: float, session_id: uuid.UUID | None = None
+) -> dict[str, Claim]:
     return {
-        "revenue": _claim(attribute="revenue", normalized=1_000_000),
-        "margin": _claim(attribute="gross_margin", normalized=20.0, value_type="percent"),
+        "revenue": _claim(attribute="revenue", normalized=1_000_000, session_id=session_id),
+        "margin": _claim(
+            attribute="gross_margin", normalized=20.0, value_type="percent", session_id=session_id
+        ),
         "derived": _claim(
-            attribute="gross_profit", normalized=derived_value, claim_type="computational"
+            attribute="gross_profit",
+            normalized=derived_value,
+            claim_type="computational",
+            session_id=session_id,
         ),
     }
 
@@ -392,7 +405,11 @@ async def test_tolerance_is_selected_by_the_derived_claims_value_type() -> None:
             await session.execute(text("SET LOCAL ROLE dd_app"))
             await session.execute(text("SELECT set_config('app.org_id', :k, true)"), {"k": ORG})
             summary = await reconcile_consistency(
-                session, data_source_id=None, run_id="run-ratio", rules=(ratio_rule,)
+                session,
+                data_source_id=None,
+                session_id=None,
+                run_id="run-ratio",
+                rules=(ratio_rule,),
             )
             await session.flush()
         assert summary.contradicts_edges == 2  # one per operand
@@ -432,12 +449,132 @@ async def test_percent_derived_is_compared_in_its_native_unit() -> None:
             await session.execute(text("SET LOCAL ROLE dd_app"))
             await session.execute(text("SELECT set_config('app.org_id', :k, true)"), {"k": ORG})
             summary = await reconcile_consistency(
-                session, data_source_id=None, run_id="run-margin", rules=(margin_rule,)
+                session,
+                data_source_id=None,
+                session_id=None,
+                run_id="run-margin",
+                rules=(margin_rule,),
             )
             await session.flush()
         # 200_000 / 1_000_000 = 0.20 -> 20.0% == claimed 20.0 -> match
         assert summary.derived_from_edges == 2
         assert summary.contradicts_edges == 0
+    finally:
+        _delete_org(ORG)
+
+
+# --------------------------------------------------------------------------
+# SIM-389: run scoping. 3b degrades WORSE than 3a when runs are mixed. This
+# pass skips any operand key shared by more than one claim as ambiguous
+# (it refuses to guess which revenue is "the" revenue), so a second ingest of
+# the same document doesn't add noisy edges -- it makes the rules stop firing
+# entirely, silently. That reads identically to "no clean chains in this
+# document," which is exactly the wrong conclusion.
+# --------------------------------------------------------------------------
+
+
+@requires_db
+async def test_second_run_silently_suppresses_rules_when_unscoped() -> None:
+    _delete_org(ORG)
+    try:
+        run_a, run_b = uuid.uuid4(), uuid.uuid4()
+        claims = _gross_profit_claims(derived_value=200_000, session_id=run_a)
+        claims |= {
+            f"b_{k}": v
+            for k, v in _gross_profit_claims(derived_value=200_000, session_id=run_b).items()
+        }
+        await _seed(ORG, claims)
+
+        # Unscoped, the duplicated gross_profit key is itself ambiguous, so the
+        # derived claim is never even selected as a candidate. The failure is
+        # therefore TOTALLY silent: no edges, no flags, and not even a
+        # skipped_missing_operands tick to hint that a rule was dropped. That
+        # is indistinguishable from "this document has no derivable subtotals."
+        unscoped = await _run_consistency(ORG, "all-runs", session_id=None)
+        assert unscoped.derived_from_edges == 0
+        assert unscoped.contradicts_edges == 0
+        assert unscoped.claims_flagged == 0
+        assert unscoped.skipped_missing_operands == 0
+
+        # Scoped to one run, the same data reconstructs cleanly.
+        scoped = await _run_consistency(ORG, str(run_a), session_id=run_a)
+        assert scoped.derived_from_edges == 2
+        assert scoped.contradicts_edges == 0
+
+        edges, _ = await _edges_and_claims(ORG)
+        assert len(edges) == 2
+        assert {e.run_id for e in edges} == {str(run_a)}
+    finally:
+        _delete_org(ORG)
+
+
+@requires_db
+async def test_a_chain_split_across_runs_does_not_reconstruct() -> None:
+    """Operands from run A must never satisfy a derived claim from run B --
+    that would assert an arithmetic relationship no single document states."""
+    _delete_org(ORG)
+    try:
+        run_a, run_b = uuid.uuid4(), uuid.uuid4()
+        await _seed(
+            ORG,
+            {
+                "revenue": _claim(attribute="revenue", normalized=1_000_000, session_id=run_a),
+                "margin": _claim(
+                    attribute="gross_margin",
+                    normalized=20.0,
+                    value_type="percent",
+                    session_id=run_a,
+                ),
+                # The derived claim landed in a different run than its operands.
+                "derived": _claim(
+                    attribute="gross_profit",
+                    normalized=200_000,
+                    claim_type="computational",
+                    session_id=run_b,
+                ),
+            },
+        )
+        summary = await _run_consistency(ORG, str(run_b), session_id=run_b)
+        assert summary.derived_from_edges == 0
+        assert summary.contradicts_edges == 0
+        assert summary.skipped_missing_operands > 0, "operands are out of scope, not disagreeing"
+
+        edges, claims = await _edges_and_claims(ORG)
+        assert edges == []
+        # Nothing flagged: a missing operand is not a formula mismatch.
+        assert all(not c.flags for c in claims.values())
+    finally:
+        _delete_org(ORG)
+
+
+@requires_db
+async def test_run_scoped_consistency_ignores_claims_with_no_session_id() -> None:
+    """Pre-SIM-389 rows (NULL session_id) belong to no run and must not be
+    pulled in as operands for a scoped one."""
+    _delete_org(ORG)
+    try:
+        run_a = uuid.uuid4()
+        await _seed(
+            ORG,
+            {
+                "revenue": _claim(attribute="revenue", normalized=1_000_000, session_id=None),
+                "margin": _claim(
+                    attribute="gross_margin", normalized=20.0, value_type="percent", session_id=None
+                ),
+                "derived": _claim(
+                    attribute="gross_profit",
+                    normalized=200_000,
+                    claim_type="computational",
+                    session_id=run_a,
+                ),
+            },
+        )
+        summary = await _run_consistency(ORG, str(run_a), session_id=run_a)
+        assert summary.derived_from_edges == 0
+        assert summary.contradicts_edges == 0
+
+        edges, _ = await _edges_and_claims(ORG)
+        assert edges == []
     finally:
         _delete_org(ORG)
 

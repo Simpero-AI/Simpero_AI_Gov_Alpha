@@ -131,16 +131,25 @@ fi
 
 step "3/6" "Ingest into the local claims spine   (backend, as the dd_app app role)"
 echo "      validates every claim against the contract, then INSERTs under RLS"
+# SIM-389: this run's identity, generated HERE rather than inside the ingest, so
+# step 3 and step 4 provably agree on which run they are working on. Previously
+# the ingest minted its own id and the verification pass never learned it, so
+# step 4 reconciled every run in the tenant at once. uuidgen ships with macOS and
+# util-linux; python3 is the fallback (the parser venv is not on PATH here).
+SESSION_ID="$(uuidgen 2>/dev/null || python3 -c 'import uuid; print(uuid.uuid4())')"
+echo "      session_id for this run: $SESSION_ID"
 # ENVIRONMENT=production only silences SQLAlchemy's SQL echo for clean output;
 # it changes nothing on this path (see app/core/database.py).
-( cd "$BACKEND_DIR" && ENVIRONMENT=production uv run python scripts/ingest_claims.py "$CLAIMS_JSON" --org-key "$ORG_KEY" --commit \
+( cd "$BACKEND_DIR" && ENVIRONMENT=production uv run python scripts/ingest_claims.py "$CLAIMS_JSON" --org-key "$ORG_KEY" --session-id "$SESSION_ID" --commit \
     | sed 's/^/      /' )
 
 step "4/6" "Reconcile + check consistency   (3a same-fact, 3b formula reconstruction → edges)"
-echo "      runs the verification passes on THIS tenant's claims; writes claim edges + flags."
+echo "      runs the verification passes on THIS RUN's claims; writes claim edges + flags."
 echo "      (3b needs computational claims -- the prose/qualitative tiers; --tables-only writes none)"
-# Same RLS scoping and --commit contract as the ingest above.
-( cd "$BACKEND_DIR" && ENVIRONMENT=production uv run python scripts/run_verification.py --org-key "$ORG_KEY" --commit \
+# Same RLS scoping and --commit contract as the ingest above. --session-id is what
+# keeps a second run from reconciling against the first one's claims (SIM-389);
+# the edges it writes carry this same id as their run_id.
+( cd "$BACKEND_DIR" && ENVIRONMENT=production uv run python scripts/run_verification.py --org-key "$ORG_KEY" --session-id "$SESSION_ID" --commit \
     | sed 's/^/      /' )
 
 step "5/6" "Reading the claims back   (this run's claims, from Postgres)"

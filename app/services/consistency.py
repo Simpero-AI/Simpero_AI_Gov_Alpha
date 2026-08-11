@@ -147,6 +147,7 @@ async def reconcile_consistency(
     session: AsyncSession,
     *,
     data_source_id: uuid.UUID | None,
+    session_id: uuid.UUID | None,
     run_id: str,
     rules: Sequence[Rule] = DEFAULT_RULES,
 ) -> ConsistencySummary:
@@ -156,6 +157,14 @@ async def reconcile_consistency(
     app/services/reconciliation.py and memory_scope.py). `data_source_id`
     narrows to one document, same reasoning as reconciliation: a formula
     only makes sense within one document's own claims.
+
+    `session_id` (SIM-389) narrows to one ingest run -- see
+    reconcile_same_fact's docstring for why that is a separate axis from
+    data_source_id and why None (every run at once) is no longer the only
+    option. It matters more here than the edge count alone suggests: this
+    pass skips any operand key shared by >1 claim as ambiguous, so a second
+    run's copy of an operand doesn't just add edges, it SILENTLY SUPPRESSES
+    rules that would otherwise evaluate.
     """
     stmt = select(Claim).where(Claim.value["normalized"].isnot(None))
     stmt = stmt.where(
@@ -163,6 +172,10 @@ async def reconcile_consistency(
         if data_source_id is None
         else Claim.data_source_id == data_source_id
     )
+    # Equality only -- a NULL session_id claim belongs to no run. Same
+    # reasoning as reconciliation.py.
+    if session_id is not None:
+        stmt = stmt.where(Claim.session_id == session_id)
     claims = list((await session.scalars(stmt)).all())
 
     # (entity, period_year, period_kind, attribute) -> claims sharing that key.
