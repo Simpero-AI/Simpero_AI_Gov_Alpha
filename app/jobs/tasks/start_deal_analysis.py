@@ -1,7 +1,12 @@
-"""Start-analysis fan-out job (docs/plans/start-analysis-flow-alpha.md):
+"""Start-analysis fan-out job (docs/plans/start-analysis-flow-alpha.md,
+reworked per docs/plans/analysis-pipeline-stage-chaining.md's point 4):
 resolves an analysis_run, fans its deal's already-verified documents out to
-the parser service's "parse" queue (app/jobs/parse_client.py), and awaits
-every parse job to a terminal outcome before marking the run parsed/failed.
+the parser service's "parse" queue (app/jobs/parse_client.py) as combined
+parse+extract+audit jobs, and awaits every one to a terminal outcome before
+marking the run successful/failed. On success, enqueues the ingest+verify
+task (start_deal_verification) -- this job's `job_name` stays `"parsing"`
+for its whole lifetime; there is no separate `job_name="extraction"` row,
+since extraction now happens inside this same per-document job.
 
 Runs in the SAQ worker process -- there is no FastAPI request/Depends(get_db)
 here, so this replicates get_db's `SET LOCAL app.org_id` discipline by hand,
@@ -19,16 +24,18 @@ pooler.
 """
 
 import asyncio
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from saq.job import TERMINAL_STATUSES, Status
 from saq.types import Context
 from sqlalchemy import text
 
 from app.core.database import AsyncSessionLocal
-from app.jobs.parse_client import enqueue_parse_job, get_parse_job
+from app.jobs.parse_client import enqueue_process_document_job, get_parse_job
+from app.jobs.queue import get_queue
 from app.repo.AnalysisRunRepo import AnalysisRunRepo
 from app.repo.DataSourceRepo import DataSourceRepo
+from app.repo.DealRepo import DealRepo
 from app.repo.HumanAuditRepo import HumanAuditRepo
 
 # D8/D9: worst case is N documents x (1800s parser timeout x 2 parser
@@ -163,6 +170,9 @@ async def start_deal_analysis(
         if run is None:
             raise ValueError(f"analysis_run {analysis_run_id} not found")
 
+        deal = await DealRepo(session).get_by_id(UUID(deal_id))
+        assert deal is not None  # RLS already scoped this read to the run's own org
+
         data_sources = await DataSourceRepo(session).list_for_deal(UUID(deal_id))
         usable = [ds for ds in data_sources if ds.status == "verified"]
 
@@ -173,7 +183,9 @@ async def start_deal_analysis(
                 continue
             # D12: known_sha256s is a duplicate-*rejection* list on the
             # parser's side -- never pass the document's own fingerprint.
-            job_key = await enqueue_parse_job(data_source.storage_key, None)
+            job_key = await enqueue_process_document_job(
+                data_source.storage_key, entity=deal.name, known_sha256s=None
+            )
             parse_jobs.append(
                 {
                     "data_source_id": str(data_source.id),
@@ -258,6 +270,46 @@ async def start_deal_analysis(
                         },
                     }
                 )
+
+                if final_status == "successful":
+                    # Chain straight into ingest+verify -- no job_name="extraction"
+                    # row, since extraction already happened inside this job's own
+                    # per-document calls (point 4). Inline, same worker, same
+                    # pattern as the fan-out above -- no reconciler (D9/D2 of the
+                    # stage-chaining plan).
+                    verification_run_id = uuid4()
+                    verification_repo = AnalysisRunRepo(session)
+                    await verification_repo.create(
+                        {
+                            "id": verification_run_id,
+                            "org_id": org_id,
+                            "deal_id": deal_uuid,
+                            "job_name": "verification",
+                            "status": "queued",
+                        }
+                    )
+                    await get_queue().enqueue(
+                        "start_deal_verification",
+                        analysis_run_id=str(verification_run_id),
+                        parsing_run_id=analysis_run_id,
+                        clerk_org_id=clerk_org_id,
+                        timeout=7200,
+                        retries=1,
+                        ttl=86400,
+                    )
+                    await HumanAuditRepo(session).append(
+                        {
+                            "org_id": org_id,
+                            "actor_id": "Internal System",
+                            "actor_email": "Internal System",
+                            "event_type": "analysis_requested",
+                            "deal_id": deal_uuid,
+                            "payload": {
+                                "analysis_run_id": str(verification_run_id),
+                                "job_name": "verification",
+                            },
+                        }
+                    )
                 return
 
             await run_repo.update_progress(run_id, parse_jobs=parse_jobs)

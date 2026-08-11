@@ -118,12 +118,13 @@ def _seed_analysis_run(
     status: str,
     error_message: str | None = None,
     job_comments: list[dict[str, Any]] | None = None,
+    job_name: str = "parsing",
 ) -> str:
     with owner_conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO analysis_run (org_id, deal_id, status, error_message, job_comments) "
-            "VALUES (%s, %s, %s, %s, %s::jsonb) RETURNING id",
-            (org_pk, deal_id, status, error_message, json.dumps(job_comments)),
+            "INSERT INTO analysis_run (org_id, deal_id, job_name, status, error_message, "
+            "job_comments) VALUES (%s, %s, %s, %s, %s, %s::jsonb) RETURNING id",
+            (org_pk, deal_id, job_name, status, error_message, json.dumps(job_comments)),
         )
         return str(cur.fetchone()[0])
 
@@ -258,21 +259,80 @@ def test_status_in_progress_run(client, owner_conn, seeded_org, seeded_deal):
     assert steps["classify"] == "pending"
 
 
-def test_status_successful_run_maps_to_processing_classify_not_complete(
+def test_status_parsing_successful_run_maps_to_processing_pass2_not_complete(
     client, owner_conn, seeded_org, seeded_deal
 ):
-    """D14: successful must never surface as "complete" -- classification
-    hasn't run yet, so the frontend would render an empty memo tab."""
+    """docs/plans/analysis-pipeline-stage-chaining.md point 4: extraction +
+    the binding audit now happen inside the combined parsing job itself, so
+    a successful parsing row points straight past pass1 to pass2 -- and
+    must never surface as "complete", since nothing downstream of pass2 has
+    run yet either."""
     _seed_analysis_run(owner_conn, seeded_org["org_pk"], seeded_deal, "successful")
     _authed(seeded_org["clerk_org_id"], "user-1")
 
     body = client.get(f"/deals/{seeded_deal}/status").json()
     assert body["jobStatus"] == "processing"
-    assert body["currentPhase"] == "classify"
+    assert body["currentPhase"] == "pass2"
     steps = {step["phase"]: step["status"] for step in body["steps"]}
     assert steps["parsing"] == "done"
-    assert steps["classify"] == "current"
-    assert steps["pass1"] == "pending"
+    assert steps["classify"] == "done"
+    assert steps["pass1"] == "done"
+    assert steps["pass2"] == "current"
+    assert steps["governance"] == "pending"
+
+
+def test_status_verification_in_progress_maps_to_pass2_current(
+    client, owner_conn, seeded_org, seeded_deal
+):
+    _seed_analysis_run(
+        owner_conn, seeded_org["org_pk"], seeded_deal, "in_progress", job_name="verification"
+    )
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    body = client.get(f"/deals/{seeded_deal}/status").json()
+    assert body["jobStatus"] == "processing"
+    assert body["currentPhase"] == "pass2"
+    steps = {step["phase"]: step["status"] for step in body["steps"]}
+    assert steps["pass2"] == "current"
+
+
+def test_status_verification_successful_maps_to_governance_next(
+    client, owner_conn, seeded_org, seeded_deal
+):
+    """The 3a/3b pass succeeding moves currentPhase past pass2 to
+    governance -- still never "complete", since nothing beyond governance
+    has a job behind it either."""
+    _seed_analysis_run(
+        owner_conn, seeded_org["org_pk"], seeded_deal, "successful", job_name="verification"
+    )
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    body = client.get(f"/deals/{seeded_deal}/status").json()
+    assert body["jobStatus"] == "processing"
+    assert body["currentPhase"] == "governance"
+    steps = {step["phase"]: step["status"] for step in body["steps"]}
+    assert steps["pass2"] == "done"
+    assert steps["governance"] == "current"
+
+
+def test_status_verification_failed_maps_to_pass2_failed(
+    client, owner_conn, seeded_org, seeded_deal
+):
+    _seed_analysis_run(
+        owner_conn,
+        seeded_org["org_pk"],
+        seeded_deal,
+        "failed",
+        "No documents were successfully extracted to verify.",
+        job_name="verification",
+    )
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    body = client.get(f"/deals/{seeded_deal}/status").json()
+    assert body["jobStatus"] == "error"
+    assert body["currentPhase"] == "pass2"
+    steps = {step["phase"]: step["status"] for step in body["steps"]}
+    assert steps["pass2"] == "failed"
 
 
 def test_status_failed_run(client, owner_conn, seeded_org, seeded_deal):

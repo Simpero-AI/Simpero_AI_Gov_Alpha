@@ -231,11 +231,15 @@ async def get_deal_status(
     deal_id: uuid.UUID, db: AsyncSession = Depends(get_db)
 ) -> DealStatusResponse:
     """deals.status -> DealStatusPayload. Maps the deal's latest
-    analysis_run onto this shape per D14 of
-    docs/plans/start-analysis-flow-alpha.md. `parsed` deliberately maps to
-    "processing"/"classify", never "complete" — classification hasn't run
-    yet, so reporting complete would make the frontend render an empty memo
-    tab."""
+    analysis_run onto this shape, keyed by (job_name, status) per
+    docs/plans/analysis-pipeline-stage-chaining.md (point 4's combined
+    per-document job folds extraction+the binding audit into `job_name
+    == "parsing"` itself, so that row's `successful` now points straight
+    at `"pass2"` rather than `"classify"` — pass1's work already happened
+    inside it). `job_name == "verification"` is the separate, deal-level
+    3a/3b pass (`start_deal_verification`), which only ever runs after a
+    `parsing` row succeeds. Neither ever maps to `"complete"` — the memo
+    tail (governance/OFAC/drafting/scoring) has no job behind it yet."""
     deal = await DealRepo(db).get_by_id(deal_id)
     if deal is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
@@ -244,25 +248,50 @@ async def get_deal_status(
     if run is None:
         return _no_job_status()
 
-    if run.status == "queued":
+    if run.job_name == "parsing":
+        if run.status == "queued":
+            return DealStatusResponse(
+                job_status="queued", current_phase=None, steps=_steps_for_status(None)
+            )
+        if run.status == "in_progress":
+            return DealStatusResponse(
+                job_status="processing",
+                current_phase="parsing",
+                steps=_steps_for_status("parsing"),
+            )
+        if run.status == "successful":
+            return DealStatusResponse(
+                job_status="processing",
+                current_phase="pass2",
+                steps=_steps_for_status("pass2"),
+                job_comments=run.job_comments,
+            )
         return DealStatusResponse(
-            job_status="queued", current_phase=None, steps=_steps_for_status(None)
+            job_status="error",
+            current_phase="parsing",
+            steps=_steps_for_status(None, failed_phase="parsing"),
+            error_message=run.error_message,
+            job_comments=run.job_comments,
         )
-    if run.status == "in_progress":
+
+    # job_name == "verification"
+    if run.status in ("queued", "in_progress"):
         return DealStatusResponse(
-            job_status="processing", current_phase="parsing", steps=_steps_for_status("parsing")
+            job_status="queued" if run.status == "queued" else "processing",
+            current_phase="pass2",
+            steps=_steps_for_status("pass2"),
         )
     if run.status == "successful":
         return DealStatusResponse(
             job_status="processing",
-            current_phase="classify",
-            steps=_steps_for_status("classify"),
+            current_phase="governance",
+            steps=_steps_for_status("governance"),
             job_comments=run.job_comments,
         )
     return DealStatusResponse(
         job_status="error",
-        current_phase="parsing",
-        steps=_steps_for_status(None, failed_phase="parsing"),
+        current_phase="pass2",
+        steps=_steps_for_status(None, failed_phase="pass2"),
         error_message=run.error_message,
         job_comments=run.job_comments,
     )

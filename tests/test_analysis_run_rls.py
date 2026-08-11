@@ -92,7 +92,7 @@ async def test_new_run_defaults_queued_with_no_parse_jobs(db_session, org_a_id, 
     await db_session.refresh(row)
 
     assert row.status == "queued"
-    assert row.job_name == "parsing"  # only job_name actually wired up today
+    assert row.job_name == "parsing"  # server_default; "extraction" is unused (point 4)
     assert row.parse_jobs is None
     assert row.error_message is None
     assert row.started_at is not None

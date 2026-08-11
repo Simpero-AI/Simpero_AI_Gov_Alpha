@@ -1,0 +1,210 @@
+"""app/jobs/tasks/start_deal_verification.py -- the ingest+verify job
+(docs/plans/analysis-pipeline-stage-chaining.md, points 2-3).
+
+Runs the job function directly against real Postgres (owner_conn bypasses
+RLS, same idiom as test_start_deal_analysis_job.py).
+app.jobs.tasks.start_deal_verification's get_json_object is monkeypatched at
+its own call site -- no real Spaces/network call. reconcile_same_fact and
+reconcile_consistency are the REAL functions, not mocked: this test verifies
+genuine end-to-end integration (ingest, then those passes reading back what
+was just inserted in the same transaction), not just that they get called.
+"""
+
+import importlib
+import uuid
+from collections.abc import Iterator
+from typing import Any
+
+import pytest
+
+job_module = importlib.import_module("app.jobs.tasks.start_deal_verification")
+
+
+@pytest.fixture
+def seeded_org(owner_conn) -> Iterator[dict[str, Any]]:
+    clerk_org_id = f"test-tenant-{uuid.uuid4().hex[:8]}"
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO organisation (clerk_org_id, name, created_at) VALUES (%s, %s, now()) "
+            "RETURNING id",
+            (clerk_org_id, "Verify Test Org"),
+        )
+        org_pk = cur.fetchone()[0]
+
+    yield {"clerk_org_id": clerk_org_id, "org_pk": org_pk}
+
+    with owner_conn.cursor() as cur:
+        for table in ("human_audit_log", "edges", "claims", "analysis_run", "data_source", "deals"):
+            cur.execute(f"DELETE FROM {table} WHERE org_id = %s", (org_pk,))
+        cur.execute("DELETE FROM organisation WHERE id = %s", (org_pk,))
+
+
+@pytest.fixture
+def seeded_deal(owner_conn, seeded_org) -> str:
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO deals (org_id, name) VALUES (%s, %s) RETURNING id",
+            (seeded_org["org_pk"], "Verify Test Deal"),
+        )
+        return str(cur.fetchone()[0])
+
+
+def _seed_data_source(owner_conn, org_pk: int, deal_id: str, filename: str) -> str:
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO data_source (org_id, deal_id, storage_key, filename, declared_sha256) "
+            "VALUES (%s, %s, %s, %s, %s) RETURNING id",
+            (org_pk, deal_id, f"org/{filename}", filename, "a" * 64),
+        )
+        return str(cur.fetchone()[0])
+
+
+def _seed_parsing_run(owner_conn, org_pk: int, deal_id: str, parse_jobs: list[dict]) -> str:
+    import json
+
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO analysis_run (org_id, deal_id, job_name, status, parse_jobs) "
+            "VALUES (%s, %s, 'parsing', 'successful', %s::jsonb) RETURNING id",
+            (org_pk, deal_id, json.dumps(parse_jobs)),
+        )
+        return str(cur.fetchone()[0])
+
+
+def _seed_verification_run(owner_conn, org_pk: int, deal_id: str) -> str:
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO analysis_run (org_id, deal_id, job_name, status) "
+            "VALUES (%s, %s, 'verification', 'queued') RETURNING id",
+            (org_pk, deal_id),
+        )
+        return str(cur.fetchone()[0])
+
+
+def _claim_json(claim_ref: str, page: int, normalized: float = 100.0) -> dict[str, Any]:
+    return {
+        "claim_ref": claim_ref,
+        "claim_type": "numerical",
+        "entity": "Acme Corp",
+        "attribute": "revenue",
+        "value": {
+            "raw": str(normalized),
+            "normalized": normalized,
+            "unit": "USD",
+            "value_type": "currency",
+            "scale_multiplier": 1.0,
+            "scale_source": "assumed_1x",
+        },
+        "status": "proposed",
+        "location": {"kind": "pdf", "page": page, "char_start": 0, "char_end": 10},
+        "period_year": 2025,
+        "period_kind": "A",
+    }
+
+
+def _fetch_run(owner_conn, run_id: str) -> dict[str, Any]:
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "SELECT status, error_message, job_comments FROM analysis_run WHERE id = %s",
+            (run_id,),
+        )
+        status, error_message, job_comments = cur.fetchone()
+        return {"status": status, "error_message": error_message, "job_comments": job_comments}
+
+
+def _count_claims(owner_conn, org_pk: int) -> int:
+    with owner_conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM claims WHERE org_id = %s", (org_pk,))
+        return cur.fetchone()[0]
+
+
+def _fetch_edges(owner_conn, org_pk: int) -> list[tuple[str, str]]:
+    with owner_conn.cursor() as cur:
+        cur.execute("SELECT type, created_by FROM edges WHERE org_id = %s", (org_pk,))
+        return cur.fetchall()
+
+
+async def test_ingests_claims_and_reconciles_same_page_fact(
+    owner_conn, seeded_org, seeded_deal, monkeypatch
+):
+    data_source_id = _seed_data_source(owner_conn, seeded_org["org_pk"], seeded_deal, "cim.pdf")
+    parse_jobs = [
+        {
+            "data_source_id": data_source_id,
+            "filename": "cim.pdf",
+            "storage_key": "org/cim.pdf",
+            "job_key": "job-1",
+            "outcome": "parsed",
+            "code": None,
+            "message": None,
+            "bucket": "test-bucket",
+            "key": "claims/cim.json",
+        }
+    ]
+    parsing_run_id = _seed_parsing_run(owner_conn, seeded_org["org_pk"], seeded_deal, parse_jobs)
+    run_id = _seed_verification_run(owner_conn, seeded_org["org_pk"], seeded_deal)
+
+    envelope = {
+        "run_id": parsing_run_id,
+        "sha256": "a" * 64,
+        "source_file": "cim.pdf",
+        # Same entity/attribute/period, same value, different pages -> a
+        # genuine cross-page same_fact case for reconcile_same_fact.
+        "claims": [_claim_json("c1", page=1), _claim_json("c2", page=5)],
+        "edges": [],
+    }
+
+    def fake_get_json_object(bucket: str, key: str) -> dict:
+        assert bucket == "test-bucket"
+        assert key == "claims/cim.json"
+        return envelope
+
+    monkeypatch.setattr(job_module, "get_json_object", fake_get_json_object)
+
+    await job_module.start_deal_verification(
+        {},
+        analysis_run_id=run_id,
+        parsing_run_id=parsing_run_id,
+        clerk_org_id=seeded_org["clerk_org_id"],
+    )
+
+    run = _fetch_run(owner_conn, run_id)
+    assert run["status"] == "successful"
+    assert run["error_message"] is None
+    assert _count_claims(owner_conn, seeded_org["org_pk"]) == 2
+
+    edges = _fetch_edges(owner_conn, seeded_org["org_pk"])
+    assert ("same_fact", "reconciliation") in edges
+
+    assert run["job_comments"][0]["dataSourceId"] == data_source_id
+    assert run["job_comments"][0]["status"] == "verified"
+    assert "2 claim(s) ingested" in run["job_comments"][0]["comment"]
+    assert "1 same_fact" in run["job_comments"][0]["comment"]
+
+
+async def test_no_usable_documents_marks_run_failed(owner_conn, seeded_org, seeded_deal):
+    parsing_run_id = _seed_parsing_run(owner_conn, seeded_org["org_pk"], seeded_deal, [])
+    run_id = _seed_verification_run(owner_conn, seeded_org["org_pk"], seeded_deal)
+
+    await job_module.start_deal_verification(
+        {},
+        analysis_run_id=run_id,
+        parsing_run_id=parsing_run_id,
+        clerk_org_id=seeded_org["clerk_org_id"],
+    )
+
+    run = _fetch_run(owner_conn, run_id)
+    assert run["status"] == "failed"
+    assert "extracted" in run["error_message"]
+    assert _count_claims(owner_conn, seeded_org["org_pk"]) == 0
+
+
+async def test_missing_run_raises(owner_conn, seeded_org, seeded_deal):
+    parsing_run_id = _seed_parsing_run(owner_conn, seeded_org["org_pk"], seeded_deal, [])
+    with pytest.raises(ValueError, match="not found"):
+        await job_module.start_deal_verification(
+            {},
+            analysis_run_id=str(uuid.uuid4()),
+            parsing_run_id=parsing_run_id,
+            clerk_org_id=seeded_org["clerk_org_id"],
+        )

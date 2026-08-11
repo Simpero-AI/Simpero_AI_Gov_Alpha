@@ -8,14 +8,14 @@ queue — because that queue's `functions` list only knows about this app's own
 jobs (app/jobs/tasks/__init__.py); enqueuing a parse job there would land in
 a queue no worker is listening to.
 
-This module only enqueues and checks status — it does not fetch the parsed
-result. The worker writes results to Spaces (see Simpero_Gov_AI_Services'
-results_store.py / ParserSettings.results_key_prefix); reading them back
-requires boto3, which this app already depends on (pyproject.toml — kept for
-future Spaces access from this app; app/services/uploads/spaces.py already
-reuses the parser service's bucket). Add that read once something here
-actually needs to open a parsed result rather than just trigger and poll a
-job — get_parse_job's `result` dict is a bucket+key pointer, not the body.
+This module only enqueues and checks status — it does not fetch the result
+body itself. The worker writes results to Spaces (see
+Simpero_Gov_AI_Services' results_store.py / ParserSettings.results_key_prefix)
+and returns a `{bucket, key}` pointer through the queue, never the payload
+inline — get_parse_job's `result` dict is that pointer. The claims envelope
+`process_document` produces is read back separately, via
+app/services/uploads/spaces.py::get_json_object, by whatever ingests it
+(app/jobs/tasks/start_deal_verification.py) — not here.
 """
 
 from functools import lru_cache
@@ -40,20 +40,35 @@ def get_parse_queue() -> Queue:
     return Queue.from_url(settings.valkey_url, name=PARSE_QUEUE_NAME)
 
 
-async def enqueue_parse_job(spaces_key: str, known_sha256s: list[str] | None = None) -> str:
-    """Enqueue a parse job for the document already uploaded to Spaces at
-    `spaces_key`. Returns the SAQ job key for status polling via get_parse_job
-    (saq.Job has no separate "id" — `key` is the unique identifier SAQ itself
-    uses, e.g. in Queue.job(key)).
+async def enqueue_process_document_job(
+    spaces_key: str, *, entity: str, known_sha256s: list[str] | None = None
+) -> str:
+    """Enqueue the combined parse+extract+audit job for the document already
+    uploaded to Spaces at `spaces_key`. Returns the SAQ job key for status
+    polling via get_parse_job (saq.Job has no separate "id" — `key` is the
+    unique identifier SAQ itself uses, e.g. in Queue.job(key)).
+
+    Named "process_document" (not "parse_document") because it does more:
+    docs/plans/analysis-pipeline-stage-chaining.md's point 4 — parsing and
+    claim extraction re-enter the same SHA-256-cached parse
+    (Simpero_Gov_AI_Services' docling_parser.py), so a second, separate
+    parse-only job bought nothing but an extra queue round trip. `audit`
+    is not a parameter here: the binding audit is always on, folded into
+    this single call, never a caller-supplied option (same doc, point 1).
+
+    `entity` is the claim-attribution label (this app passes `Deal.name`,
+    see start_deal_analysis.py) — required by extract_claims on the other
+    side, no default.
 
     Uploading the document to Spaces first is the caller's responsibility —
-    there is no data-source/upload model in this app yet (app/api/deals.py is
-    still a stub), so this function intentionally does no upload of its own.
+    this function intentionally does no upload of its own.
     """
     job = await get_parse_queue().enqueue(
-        "parse_document",
+        "process_document",
         spaces_key=spaces_key,
+        entity=entity,
         known_sha256s=known_sha256s,
+        audit=True,
     )
     assert job is not None, (
         "enqueue() only returns None if the job already exists uniquely and was skipped"

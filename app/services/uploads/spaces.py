@@ -13,6 +13,7 @@ boto3 is already a dependency (pyproject.toml) -- kept for exactly this.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from functools import lru_cache
 from uuid import UUID
@@ -91,6 +92,18 @@ def head_object(key: str) -> bool:
         if error_code in ("404", "NoSuchKey", "NotFound"):
             return False
         raise
+
+
+def get_json_object(bucket: str, key: str) -> dict:
+    """Fetch and parse a JSON object -- the claims envelope
+    Simpero_Gov_AI_Services' process_document job writes, per the
+    `{bucket, key}` pointer in its result. `bucket` is taken from the
+    pointer itself, not `settings.spaces_bucket` -- today they're always
+    the same shared bucket, but the read-back should trust what the
+    pointer names, not assume it.
+    """
+    response = _client().get_object(Bucket=bucket, Key=key)
+    return json.loads(response["Body"].read())
 
 
 def stream_and_hash(key: str, max_bytes: int | None = None) -> str:
