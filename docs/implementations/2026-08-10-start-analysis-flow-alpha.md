@@ -1,264 +1,178 @@
-# Start Analysis → Parse Fan-Out — Implementation Summary
+# Start Analysis → Parse/Extract/Audit → Ingest → Verify — Implementation Summary
 
-**Status:** Implemented, verified against a real Postgres/Valkey stack (`docker-compose.dev.yml`), not yet committed to git (working tree only as of this writing).
-**Plan followed:** `docs/plans/start-analysis-flow-alpha.md` — that doc's "Verified findings" and "Architectural decisions" (D1–D17) are the design rationale; this doc is what actually shipped, one decision the plan left open, and how the two Valkey queues are actually used end to end.
-**Session:** 2026-08-10.
+**Status:** Implemented and committed on branch `SIM-399` (`90f237c`, `cc09cf5`, `828f875`), open as PR #81 on `Simpero_AI_Gov_Alpha`, pushed. Reviewed twice by `kpal002` (`Simpero_Gov_AI_Services`' owner) — first review reshaped the design mid-implementation (see "Reworked after review" below), second confirmed the contract against that repo's own `process_document` implementation (PR #49, merge-ready). **Not yet merged** — see "What's still needed" at the end.
+**Plan followed:** `docs/plans/start-analysis-flow-alpha.md` (original design) and `docs/plans/analysis-pipeline-stage-chaining.md` (the post-review redesign — that doc is now itself the more current design record; this doc is what actually shipped from both).
+**Session:** 2026-08-10 (original build) through 2026-08-12 (rework + review response).
 
 ---
 
 ## What this feature is
 
-Replaces the dead `/api/simpero/analyse` call the frontend's Step 3 ("Start Analysis") used to make. `POST /api/deals/{deal_id}/analysis` now takes a `dealId`, creates an `analysis_run` row, and enqueues a worker task on this app's own Valkey queue. That task fans the deal's already-verified documents out to the parser service's (`Simpero_Gov_AI_Services`) Valkey queue, waits for every parse to finish, and reports the outcome back onto `analysis_run` (and, for scanned/unreadable documents, onto `data_source.status`) so `GET /deals/{deal_id}/status` can report real progress instead of the permanent `no_job` stub.
+Replaces the dead `/api/simpero/analyse` call the frontend's Step 3 ("Start Analysis") used to make, with a real, multi-stage pipeline:
 
-Nothing changed in `Simpero_Gov_AI_Services` — its `parse_document` consumer function and its two result-dict shapes were already exactly what this needed.
+1. `POST /api/deals/{deal_id}/analysis` creates an `analysis_run` row (`job_name="parsing"`) and enqueues `start_deal_analysis`, this app's own worker task.
+2. That task fans the deal's verified documents out to `Simpero_Gov_AI_Services`' `"parse"` queue — one **combined** parse+extract+binding-audit job per document (`process_document`, not the older parse-only `parse_document`) — waits for every one to finish, and records outcomes onto `analysis_run.parse_jobs`/`job_comments` (and, for scanned/unreadable documents, `data_source.status = "ocr_needed"`).
+3. On success, it creates a second `analysis_run` row (`job_name="verification"`) and enqueues `start_deal_verification`, a second worker task: reads each document's claims envelope back from Spaces, ingests it into the `claims`/`edges` spine under RLS, then runs the deal's already-built 3a/3b reconciliation passes (`reconcile_same_fact`, `reconcile_consistency`) over what was just ingested.
+
+`GET /deals/{deal_id}/status` reports real progress through both stages instead of the permanent `no_job` stub, mapped through the 9-phase UI vocabulary the frontend already has.
+
+**`Simpero_Gov_AI_Services` *did* change**, unlike the original build's assumption — `process_document` is new work there (PR #49), built in response to this repo's handoff doc after a design review found the original split (a parse-only job, then a separate extract job) was solving a problem that didn't exist (see "Reworked after review").
 
 ---
 
-## The one open decision, closed
+## Reworked after review — the design changed mid-implementation
 
-The plan flagged a blocking DDL choice: `data_source`'s one-way status trigger (added when SIM-216/218 shipped) rejected any UPDATE once a row left `pending`, which meant the parser's `no_extractable_text` signal (SIM-350) could never legally write `verified → ocr_needed`. Two options were laid out (Option A: relax the trigger to allow that one additional edge; Option B: skip the DB write, record the signal only in `analysis_run.parse_jobs`). **Vansh chose Option A.** `alembic/versions/92fda2e2a5db_data_source_ocr_needed_transition.py` replaces the trigger function body: `pending → anything` is still allowed (existing behavior, unchanged), `verified → ocr_needed` is now also allowed, everything else still raises. Still enforced against every role including the table owner — this is a narrowing of what's *rejected*, not a reopening of the lifecycle.
+The first pass (2026-08-10) shipped `job_name` with three declared-but-mostly-unused values (`parsing`/`extraction`/`verification`) and a plan to wire `extraction`/`verification` up later. Before that happened, `kpal002` reviewed the plan on PR #81 and found three things wrong with it, all verified against real code before being accepted:
+
+1. **The planned split (separate parse job, separate extract job) was unnecessary.** `Simpero_Gov_AI_Services`' `parse_pdf_bytes` is read-through cached by SHA-256, storing the full `DoclingDocument` — a second call from a separate extract job would have been a cache read, not a second docling run. **Fix:** one combined `process_document` job per document (parse + `extract_claims(audit=True)` in one call). `job_name="extraction"` is now confirmed **unused** — no row is ever created with it; left in the `CHECK` constraint harmlessly rather than migrated away.
+2. **`job_name="verification"` was conflated with the parser's binding audit.** Folding the audit into the combined job via `audit=True` is correct (it needs the same in-memory page geometry `extract_claims` already produces). But "verification" in the product sense is this repo's **own** cross-claim reconciliation (`app/services/reconciliation.py::reconcile_same_fact`, `app/services/consistency.py::reconcile_consistency` — SIM-371/372, already built, never previously wired to anything async) — a deal-level pass over **ingested** claims, not a parser call at all. **Fix:** `job_name="verification"` now maps to a real new task, `start_deal_verification.py`.
+3. **Nothing ingested the claims — the pipeline dead-ended before the database.** The original design recorded a `{bucket, key}` pointer to a claims envelope on Spaces and stopped. Nothing read it back or inserted it into `claims`/`edges`, so 3a/3b would have had nothing to run on even once built. **Fix:** `start_deal_verification.py`'s first phase is exactly this — the async equivalent of the already-existing `scripts/ingest_claims.py`.
+
+Full reasoning, file:line citations, and the two docs `kpal002` wrote (`stage-chaining-suggested-changes.md`, the PR comment) are preserved in `docs/plans/analysis-pipeline-stage-chaining.md`, which now supersedes this doc as the primary design record — read that first for *why*; this doc is *what shipped*.
+
+**A second, narrower review round** (after the rework landed) confirmed the contract against `Simpero_Gov_AI_Services`' real `process_document` implementation (PR #49) and found one more real bug, fixed in the same session — see "Bugs found and fixed," #2.
 
 ---
 
-## Column/vocabulary revisions (same session, before anything shipped)
+## The one open DDL decision, closed (unchanged from the original build)
 
-Four changes made after the initial build, all edited directly into the not-yet-committed `3fd6292e23f0_analysis_run.py` migration rather than layered on as separate migrations (nothing had shipped yet, so there was no reason to carry the churn forward):
+The plan flagged a blocking DDL choice: `data_source`'s one-way status trigger (added when SIM-216/218 shipped) rejected any UPDATE once a row left `pending`, which meant the parser's `no_extractable_text` signal (SIM-350) could never legally write `verified → ocr_needed`. **Vansh chose Option A**: relax the trigger to allow that one additional edge. `alembic/versions/92fda2e2a5db_data_source_ocr_needed_transition.py` — `pending → anything` still allowed, `verified → ocr_needed` now also allowed, everything else still raises, still enforced against every role including the table owner.
 
-- **`created_at` → `started_at`, plus a new `ended_at`.** `started_at` keeps `created_at`'s original behavior (`not null`, `server_default now()`) under a name that says what it actually represents for this table — when the run started. `ended_at` is new: nullable, no server default, stamped exactly once — server-side, via `func.now()` inside `AnalysisRunRepo.update_progress` — the moment `status` is set to a terminal value. Added to the table's `GRANT UPDATE (...)` list; `started_at` stays append-only, same as `created_at` did.
-- **`analysis_run.status`'s four values renamed:** `queued` (unchanged) → `queued`, `parsing` → `in_progress`, `parsed` → `successful`, `failed` (unchanged) → `failed`. This is `analysis_run.status` only — two adjacent, easily-confused vocabularies were deliberately left alone:
-  - The **UI phase name** `"parsing"` (`app/services/pipeline_steps.py`, one of the 9 frontend-mirrored phases, surfaced as `DealStatusResponse.currentPhase`) — unrelated to the run's own status column, untouched.
-  - The **parser service's own per-document result vocabulary** (`parse_jobs[].outcome`, literally `"parsed"`/`"rejected"`, coming straight from `Simpero_Gov_AI_Services`' response dict) — an external contract this app must match verbatim, untouched.
-- **New `job_comments` column (JSONB, nullable).** Requested directly: a frontend-facing findings summary, distinct from `parse_jobs`' internal bookkeeping shape (`job_key`/`bucket`/`key`, snake_case, never meant to leave this app). Built by a new `_build_job_comments` helper in `start_deal_analysis.py` at the same moment `ended_at` is stamped — one entry per document, camelCase keys, e.g. `{"dataSourceId": "...", "fileName": "financials.pdf", "status": "parsed", "comment": "Parsed successfully."}`. Threaded onto `DealStatusResponse.job_comments` (a new, optional field — a deliberate, explicit widening of D3's originally "no new response fields" resolution, since nothing needed reporting yet at that point) so `GET .../status` returns it directly: `null` everywhere except the two terminal branches (`successful`/`failed`). `parse_jobs` also picked up a `filename` field (captured once, at fan-out, from the `data_source` row already in hand) purely so `_build_job_comments` has something human-readable to key off.
-  - **Follow-up, same session:** a rejected entry's `comment` is now the parser service's own `message` verbatim (`ParseError`'s message, e.g. `"PDF contains no extractable text."` from `docling_parser.py:461` in `Simpero_Gov_AI_Services`) — checked directly against that repo's `staging` branch, not the plan's cached findings, since a `message` field has been present on every `ParseError` there all along. `_apply_outcome` now persists it onto the `parse_jobs` entry (`"message": result.get("message")`) so `_comment_for_job` can use it; this app's own hardcoded phrasing is now only a fallback for the one case that genuinely has no parser message — a SAQ-level job `FAILED`/`ABORTED` that never reached the parser's own error path at all. A "parsed" success still gets this app's own `"Parsed successfully."` — the parser has no narrative field there either, only structural metadata (`kind`/`sha256`/`bucket`/`key`/`count`).
-- **New `job_name` column (Text, `CHECK`'d, `server_default 'parsing'`, not null).** Names what kind of job a run represents — `'parsing'` (the only one actually built), `'extraction'`, `'verification'` (named ahead of their own implementation, per Vansh, so this table can host those job types without a schema change later). Identity, append-only — stays out of the `GRANT UPDATE (...)` list, alongside `org_id`/`deal_id`. Set explicitly (`"parsing"`) at the one place a run gets created today, `POST /deals/{deal_id}/analysis`'s handler. **Deliberately not threaded into `uq_analysis_run_active`'s scope** — that partial unique index still enforces one active run per *deal*, full stop, not per `(deal_id, job_name)`, since only `"parsing"` is ever created anywhere in this app right now; flagged in the migration's docstring as worth revisiting if `extraction`/`verification` ever become real, independently-running job types.
-  - **Follow-up, same session — the real state of `extraction`/`verification` on the services side turned out to be more (and less) built than assumed.** Checked `Simpero_Gov_AI_Services`' `staging` branch directly: `extraction` is fully working code (`extract_service.py::extract_claims`, ~700 lines, merged via SIM-340–345) exposed synchronously via `POST /extract`, but has no SAQ queue job — `worker.py`'s `functions` list is still `[parse_document]` only. `verification` (the binding audit, `verify.py`) is not a separate pass at all today — it only runs *inside* `extract_claims` via an `audit=True` flag, over claims that same call just emitted; there's no entry point that audits an already-existing claims payload. Wrote up a separate handoff doc for that repo's owner rather than guessing at either gap: `docs/plans/analysis-pipeline-job-scaffolding-services.md` — queue-contract scaffolding proposal only (an `extract_document` job mirroring `parse_document`'s shape), with the real open questions (result-delivery size, timeout/concurrency, and whether `verification` is its own pass or just `audit=True` under a different name) called out explicitly rather than decided.
+---
 
-Cascaded through: `app/models/analysis_run.py`, the migration, `AnalysisRunRepo` (`_ACTIVE_STATUSES`, `_TERMINAL_STATUSES`, `update_progress`'s `ended_at` stamp and new `job_comments` param), `start_deal_analysis.py` (`_final_status`'s return values, the fan-out transaction's `status="in_progress"` and new `filename`/`message` fields, `_build_job_comments`/`_comment_for_job`), `app/schemas/deals.py` (`JobCommentResponse`, `DealStatusResponse.job_comments`), `app/api/deals.py`'s `GET .../status` mapping and the `job_name="parsing"` on run creation, and every test touching `analysis_run` (`test_analysis_run_rls.py`, `test_start_analysis_endpoint.py`, `test_start_deal_analysis_job.py`). The original plan doc (`docs/plans/start-analysis-flow-alpha.md`) is left as the historical record of what was originally decided (D3/D5's original wording) rather than edited to match — this doc is the "what actually shipped" record.
+## `analysis_run` schema — final shape
+
+Two rounds of revision, both folded directly into the not-yet-shipped `3fd6292e23f0_analysis_run.py` migration rather than layered as separate migrations (nothing had shipped, so no reason to carry the churn):
+
+- **`created_at` → `started_at`**, plus new **`ended_at`** (nullable, stamped server-side by `AnalysisRunRepo.update_progress` the one time `status` becomes terminal).
+- **`status`'s four values**: `queued` → `in_progress` → `successful`|`failed`. (Two adjacent vocabularies deliberately left alone: the UI phase name `"parsing"` in `pipeline_steps.py`, and the parser's own per-document `parse_jobs[].outcome` vocabulary (`"parsed"`/`"rejected"`) — both unrelated to this column.)
+- **`job_comments`** (JSONB, nullable) — frontend-facing findings summary, one entry per document, camelCase, populated at the same moment `ended_at` is stamped. A rejected entry's `comment` is the parser's own `message` verbatim when it has one (persisted onto `parse_jobs[].message` by `_apply_outcome`); this app's own wording is only a fallback for a "parsed" success (no narrative field on the parser's side) or a SAQ-level job failure (never reached the parser's error path at all).
+- **`job_name`** (Text, `CHECK`'d to `parsing`/`extraction`/`verification`, `server_default 'parsing'`, append-only) — see "Reworked after review": only `parsing` and `verification` are ever actually created.
+- `uq_analysis_run_active` — partial unique index, `(deal_id) WHERE status IN ('queued','in_progress')`. Deliberately **not** scoped to `(deal_id, job_name)` — at most one active run per deal, full stop, since the two job types run strictly sequentially (verification only ever starts after parsing succeeds), never concurrently.
+- `REVOKE UPDATE, DELETE ... FROM dd_app` then `GRANT UPDATE (status, parse_jobs, error_message, job_comments, ended_at, updated_at) ... TO dd_app` — everything else (`org_id`/`deal_id`/`job_name`/`selected_frameworks`/`started_at`/`id`) stays append-only.
+- **Deliberately no one-way trigger** (unlike `data_source`) — this table's whole point is walking a real multi-step lifecycle, not enforcing a single legitimate transition.
 
 ---
 
 ## What was built
 
-### Database (two new migrations)
+### Database (two migrations)
 
-- **`92fda2e2a5db_data_source_ocr_needed_transition.py`** — the trigger relaxation above. `down_revision = 7b837e251134` (the prior head).
-- **`3fd6292e23f0_analysis_run.py`** — new `analysis_run` table:
-  - `id`, `org_id` (Integer FK → `organisation.id`), `deal_id` (FK → `deals.id`), `job_name` (`parsing`/`extraction`/`verification`, `CHECK` constraint, `server_default 'parsing'` — see below), `selected_frameworks` (JSONB, nullable), `status` (`queued`/`in_progress`/`successful`/`failed`, `CHECK` constraint), `parse_jobs` (JSONB array, nullable), `error_message` (nullable), `job_comments` (JSONB array, nullable — frontend-facing findings summary, see below), `started_at` (not null, `server_default now()` — when the run was created), `ended_at` (nullable, no server default — stamped once the run reaches a terminal status), `updated_at`.
-  - `ENABLE` + `FORCE ROW LEVEL SECURITY`, `org_isolation` policy — identical shape to `data_source`/`deals`.
-  - `REVOKE UPDATE, DELETE ... FROM dd_app` then `GRANT UPDATE (status, parse_jobs, error_message, job_comments, ended_at, updated_at) ... TO dd_app` — `org_id`/`deal_id`/`job_name`/`selected_frameworks`/`started_at`/`id` stay append-only. `ended_at` is mutable but never caller-supplied: `AnalysisRunRepo.update_progress` stamps it server-side (`func.now()`) the one time `status` is set to `successful`/`failed`, the same idiom `DataSourceRepo.update_status` uses for `status_updated_at`.
-  - **Deliberately no one-way trigger** (unlike `data_source`): this table's whole point is walking `queued → in_progress → successful|failed`, a real multi-step lifecycle, not a single legitimate transition. Documented explicitly in the migration's own docstring so it doesn't read as an oversight.
-  - `uq_analysis_run_active` — a **partial unique index** on `(deal_id) WHERE status IN ('queued', 'in_progress')`. This, not the handler's fast-path `SELECT`, is the actual guarantee against two concurrent "Start Analysis" clicks creating two active runs for the same deal. Deliberately scoped to `deal_id` alone, not `(deal_id, job_name)` — see the `job_name` revision below for why.
+- `92fda2e2a5db_data_source_ocr_needed_transition.py` — the trigger relaxation above.
+- `3fd6292e23f0_analysis_run.py` — the `analysis_run` table, final shape above.
 
-### New Python modules
+### Python modules
 
 | File | Purpose |
 |---|---|
 | `app/models/analysis_run.py` | `AnalysisRun` ORM model |
-| `app/repo/AnalysisRunRepo.py` | `create`, `get_by_id`, `latest_for_deal`, `active_for_deal` (the fast-path 409 check), `update_progress` (`SELECT ... FOR UPDATE` read-modify-write of the mutable columns) |
-| `app/jobs/tasks/start_deal_analysis.py` | The worker task — see "How the worker task works" below |
-| `tests/test_analysis_run_rls.py` | RLS isolation, column grants, the partial unique index |
-| `tests/test_start_analysis_endpoint.py` | HTTP contract for `POST .../analysis` and the `GET .../status` mapping |
-| `tests/test_start_deal_analysis_job.py` | The worker task's branch logic (all-parsed, all-rejected, mixed outcomes) |
+| `app/repo/AnalysisRunRepo.py` | `create`, `get_by_id`, `latest_for_deal`, `active_for_deal`, `update_progress` (`SELECT ... FOR UPDATE`) |
+| `app/jobs/tasks/start_deal_analysis.py` | Parsing stage — fan-out, poll, terminal write, **chains into verification on success** |
+| `app/jobs/tasks/start_deal_verification.py` | Verification stage — ingest + 3a/3b, **new this session** |
+| `app/jobs/parse_client.py` | `enqueue_process_document_job` (replaced `enqueue_parse_job`), `get_parse_job` (unchanged, generic) |
+| `app/services/uploads/spaces.py` | `get_json_object` (new) — reads the claims envelope back from Spaces |
+| `tests/test_analysis_run_rls.py`, `test_start_analysis_endpoint.py`, `test_start_deal_analysis_job.py`, `test_start_deal_verification_job.py` | Full coverage, both stages |
 
-**Modified, not new:**
-- `app/repo/DataSourceRepo.py` — added `list_for_deal(deal_id)`.
-- `app/schemas/deals.py` — added `StartAnalysisRequest` (`selectedFrameworks: list[str] | None`).
-- `app/api/deals.py` — new `POST /{deal_id}/analysis` handler; `GET /{deal_id}/status` now consults `AnalysisRunRepo.latest_for_deal` instead of always returning the `no_job` stub. Added a `_steps_for_status(current_phase, failed_phase)` helper so the done/current/failed/pending step-status computation isn't duplicated across five branches.
-- `app/jobs/tasks/__init__.py` — registered `start_deal_analysis` in `functions`.
-- `app/jobs/parse_client.py` — corrected a stale docstring claim (it said this app "deliberately does not depend on boto3 today"; it has for a while — `pyproject.toml` and `app/services/uploads/spaces.py` both already use it).
-- `tests/test_data_source_rls.py` — added coverage for the trigger relaxation (`verified→ocr_needed` now allowed; `ocr_needed→anything` and `verified→mismatch` still rejected).
+**Modified, not new:** `app/repo/DataSourceRepo.py` (`list_for_deal`), `app/schemas/deals.py` (`StartAnalysisRequest`, `JobCommentResponse`, `DealStatusResponse.job_comments`), `app/api/deals.py` (`POST .../analysis`, `_steps_for_status` now `(job_name, status)`-keyed), `app/jobs/tasks/__init__.py` (both tasks registered), `tests/test_data_source_rls.py` (trigger-relaxation coverage).
 
 ### API surface (final)
 
-- **`POST /deals/{deal_id}/analysis`** — body `{selectedFrameworks?: string[]}`. Sequence: `DealRepo.get_by_id` (404) → `AnalysisRunRepo.active_for_deal` fast-path check (409) → `DataSourceRepo.list_for_deal`, partitioned by status (422 if zero documents at all, 409 if documents exist but none are `verified` yet) → `AnalysisRunRepo.create` (`job_name="parsing"`, hardcoded — this handler only ever creates parsing runs) + `flush()` inside a `try/except IntegrityError` (catches the *real* double-submit race the partial unique index guards against, converts it to the same 409) → enqueue `start_deal_analysis` on the `"simpero"` queue → `HumanAuditRepo.append(event_type="analysis_requested")` → **`202`** with a `DealStatusResponse` (`jobStatus: "queued"`).
-- **`GET /deals/{deal_id}/status`** — now maps `AnalysisRunRepo.latest_for_deal`'s row through `_steps_for_status` per the plan's D14 table:
+- **`POST /deals/{deal_id}/analysis`** — unchanged contract from the original build (`{selectedFrameworks?}` → `202` + `DealStatusResponse`). Internally now always creates `job_name="parsing"` explicitly (hardcoded — this handler only ever creates parsing runs; verification runs are created by the worker, not the API).
+- **`GET /deals/{deal_id}/status`** — `_steps_for_status` now keyed by `(job_name, status)`, not `status` alone:
 
-  | run status | `jobStatus` | `currentPhase` |
-  |---|---|---|
-  | *(no run)* | `no_job` | `null` |
-  | `queued` | `queued` | `null` |
-  | `in_progress` | `processing` | `"parsing"` |
-  | `successful` | `processing` | `"classify"` |
-  | `failed` | `error` | `"parsing"` (+ `errorMessage`) |
+  | `job_name` | `status` | `jobStatus` | `currentPhase` |
+  |---|---|---|---|
+  | *(no run)* | — | `no_job` | `null` |
+  | `parsing` | `queued` | `queued` | `null` |
+  | `parsing` | `in_progress` | `processing` | `"parsing"` |
+  | `parsing` | `successful` | `processing` | `"pass2"` (extraction+audit already happened inside this same job) |
+  | `parsing` | `failed` | `error` | `"parsing"` (+ `errorMessage`) |
+  | `verification` | `queued`/`in_progress` | `queued`/`processing` | `"pass2"` |
+  | `verification` | `successful` | `processing` | `"governance"` |
+  | `verification` | `failed` | `error` | `"pass2"` (+ `errorMessage`) |
 
-  `successful` deliberately never maps to `"complete"` — classification hasn't run yet, so the frontend would render an empty memo tab.
-
----
-
-## How the worker task works (`start_deal_analysis`)
-
-Runs in the SAQ worker process (`app.jobs.worker.settings`), not a FastAPI request — no `Depends(get_db)`, so it replicates `get_db`'s `SET LOCAL app.org_id` discipline by hand, exactly like `ingest_data_source.py`. Two phases:
-
-**Phase 1 — fan-out (one short transaction):**
-1. Load the `analysis_run` row.
-2. `DataSourceRepo.list_for_deal(deal_id)`, filter to `status == 'verified'` — this read is authoritative (supersedes whatever the request handler saw; a document that flips `pending → verified` in the gap between the request and the worker running is still picked up correctly).
-3. For each verified document **not already recorded** in `parse_jobs` (idempotency — a SAQ redelivery resumes instead of double-enqueuing), enqueue a parse job (see the Valkey contract below) and append `{data_source_id, filename, storage_key, job_key, outcome: null, code: null, message: null, bucket: null, key: null}` to `parse_jobs` (`filename` comes along from the `data_source` row already in hand, purely so the terminal-write step below has something human-readable to build `job_comments` from).
-4. `AnalysisRunRepo.update_progress(status="in_progress", parse_jobs=...)`, commit, close the session.
-
-**Phase 2 — poll to terminal (a new short transaction per poll, forever until done or 2 hours pass):**
-1. Open a fresh transaction, re-issue `SET LOCAL app.org_id` from scratch.
-2. For every `parse_jobs` entry still `outcome: null`, call `get_parse_job(job_key)` (a plain Valkey read, no network call to the parser service itself). If terminal, apply the outcome — building a **new** dict rather than mutating the loaded one in place (see "Bug found and fixed" below) — capturing `code` and, for a rejection, the parser's own `message` verbatim (`None` on a "parsed" success; the parser has no narrative field there).
-3. If a rejection's `code == "no_extractable_text"`: write `data_source.status = "ocr_needed"`, passing the row's *existing* `fingerprint` (never `None` — `update_status` writes it unconditionally, and passing `None` would silently wipe an already-verified hash).
-4. If everything is terminal, or the 2-hour deadline has passed: compute the final run status —
-   - `successful` if **any** document parsed successfully (mixed outcomes still count as `successful`, not `failed`).
-   - `failed` with a specific message otherwise: `"All N documents need OCR before analysis."` if every rejection was `no_extractable_text`, `"Analysis timed out..."` on deadline, or a generic message otherwise.
-   - Build `job_comments` (`_build_job_comments`/`_comment_for_job`) — one entry per document, `comment` = the parser's own `message` for a rejection when it has one, this app's own wording only as a fallback (a "parsed" success, or a SAQ-level job failure that never reached the parser's error path at all).
-   - Write both via `update_progress` (`status`, `parse_jobs`, `error_message`, `job_comments`), append a closing `human_audit_log` row (`event_type="analysis_parsing_completed"`, payload includes `job_comments` too), return.
-5. Otherwise: persist whatever partial progress landed this round, commit, close, `asyncio.sleep(15)`, repeat.
-
-The transaction never stays open across the sleep — each iteration is its own `AsyncSessionLocal()` block, so PgBouncer's transaction-pooling slot is released between polls rather than pinned for the run's entire (potentially hours-long) lifetime.
+  Never maps to `"complete"` at any point — the memo tail (`governance` → `scoring`) has no job behind it yet.
 
 ---
 
-## Request → worker flow (wireframe)
+## How the parsing stage works (`start_deal_analysis`)
 
-What actually happens, in order, once the `POST /analysis` request lands — the API handler returns in step 7 (well under a second); everything from step 8 onward runs later, in a different process (the SAQ worker), on its own clock.
+Same two-phase shape as the original build, with the fan-out target changed and a new final step:
 
-```mermaid
-sequenceDiagram
-    participant FE as Frontend
-    participant API as app/api/deals.py<br/>POST .../analysis
-    participant DB as Postgres<br/>(analysis_run / data_source)
-    participant SQ as Valkey simpero queue
-    participant W as SAQ worker<br/>start_deal_analysis
-    participant PQ as Valkey parse queue
-    participant PS as Simpero_Gov_AI_Services<br/>worker
+**Phase 1 — fan-out:** loads the run, loads the `Deal` (for `entity=deal.name`), lists verified documents, and for each not already recorded, calls `enqueue_process_document_job(storage_key, entity=deal.name, known_sha256s=None)` — **not** `enqueue_parse_job`/`parse_document` anymore. Records `{data_source_id, filename, storage_key, job_key, outcome: null, code: null, message: null, bucket: null, key: null}` per document, writes `status="in_progress"`.
 
-    FE->>API: POST /analysis (selectedFrameworks optional)
-    API->>DB: 1. get deal (404 if missing)
-    API->>DB: 2. active_for_deal fast-path check (409 if active)
-    API->>DB: 3. list_for_deal, partition by status (422/409 if no usable docs)
-    API->>DB: 4. INSERT analysis_run (status=queued, job_name=parsing)
-    Note over API,DB: uq_analysis_run_active catches any race<br/>the step-2 SELECT missed → 409
-    Note over API,DB: job_name is always "parsing" here -- "extraction"/"verification"<br/>are named columns with no worker task yet (see the services-repo handoff doc)
-    API->>SQ: 5. enqueue("start_deal_analysis", run_id, deal_id, org_id,<br/>timeout=7200, retries=1, ttl=86400)
-    API->>DB: 6. INSERT human_audit_log (analysis_requested)
-    API-->>FE: 7. 202 (jobStatus: queued)
-
-    Note over W: The request returns above. Everything below runs later, in the worker process.
-
-    SQ->>W: 8. this app's own SAQ worker picks up the job
-    W->>DB: 9. SET LOCAL app.org_id, then load run
-    W->>DB: 10. list_for_deal → filter status == 'verified'
-    loop one parse job per verified doc not already in parse_jobs
-        W->>PQ: 11. enqueue("parse_document", spaces_key, known_sha256s=None)
-        PQ-->>W: job_key
-    end
-    W->>DB: 12. update_progress(status="in_progress", parse_jobs=[...])
-    Note over W,DB: transaction commits + closes here — never held across the wait
-
-    par parser service works independently
-        PQ->>PS: parse_document(spaces_key, known_sha256s) dequeued
-        PS->>PS: parse the Spaces object
-        PS->>PQ: write result - parsed outcome, or rejected with a code + message
-    end
-
-    loop every 15s, new transaction each time, until terminal or 2h deadline
-        W->>DB: 13. SET LOCAL app.org_id, then load run
-        W->>PQ: 14. get_parse_job(job_key) for each still-pending entry
-        PQ-->>W: job.status + job.result (fresh read, no caching)
-        alt job terminal
-            W->>DB: 15. record outcome + code + message (new dict, not mutated in place)
-            opt code == "no_extractable_text"
-                W->>DB: 15a. data_source.status = "ocr_needed" (fingerprint preserved)
-            end
-        end
-        W->>DB: 16. update_progress(parse_jobs=[...]) — partial progress persisted
-    end
-
-    W->>W: 17. build job_comments -- one entry per doc,<br/>comment = parser's own message when rejected, else this app's wording
-    W->>DB: 18. update_progress(status="successful"|"failed", error_message, job_comments)
-    W->>DB: 19. INSERT human_audit_log (analysis_parsing_completed)
-
-    Note over FE,API: meanwhile, independently of the worker:
-    FE->>API: GET /deal_id/status (polled repeatedly)
-    API->>DB: latest_for_deal(deal_id)
-    API-->>FE: jobStatus/currentPhase/steps, mapped per D14
-```
-
-Two things worth reading off this diagram directly: the API handler and the worker task never talk to each other except through the `"simpero"` Valkey queue (one enqueue, fire-and-forget) and the shared `analysis_run` row in Postgres — there's no synchronous callback either way. And the frontend's status polling is completely decoupled from the worker's own polling of the parser service; they're two independent loops on two independent clocks, joined only by the `analysis_run` row.
+**Phase 2 — poll to terminal:** unchanged polling shape (new transaction per 15s poll, never held across the wait). Applies outcomes, writes `ocr_needed` on `no_extractable_text`, builds `job_comments`. **New:** on `final_status == "successful"`, creates a `job_name="verification"` `analysis_run` row and enqueues `start_deal_verification` on the `"simpero"` queue — inline, same worker, same transaction pattern as the fan-out itself, no reconciler. A `failed` parsing run does **not** chain into verification — nothing to verify.
 
 ---
 
-## The Valkey contract: what actually gets picked up, by whom
+## How the verification stage works (`start_deal_verification`, new)
 
-Two **separate** Valkey queues are involved, on the same Valkey instance but never conflated:
+No external async wait (ingest and reconciliation are synchronous DB/Spaces work), so — unlike the parsing stage — the **whole job runs in one transaction**, committed once at the end:
 
-### 1. This app's own queue (`"simpero"`) — API handler → this app's own worker
+1. Load the verification run and the parsing run it follows.
+2. **Idempotency guard** (added after the second review round — see "Bugs found and fixed," #2): if the verification run has already reached a terminal status, return immediately. Guards against a SAQ redelivery re-running the insert-only ingest after a successful commit.
+3. Filter the parsing run's `parse_jobs` to `outcome == "parsed"` — anything rejected (needs OCR, etc.) is skipped, not ingested. If none, the run fails with `"No documents were successfully extracted to verify."`
+4. For each usable document: `get_json_object(bucket, key)` reads the claims envelope back from Spaces, validates it against `contracts/claims.schema.json` (same schema `scripts/ingest_claims.py` validates against), inserts `Claim` rows (with real `deal_id`/`data_source_id`, unlike the demo script's NULLs) and the envelope's own extraction-reducer `Edge` rows, under RLS.
+5. Once every document is ingested: for each `data_source_id`, calls `reconcile_same_fact` then `reconcile_consistency` — **scoped per document**, not per deal (see "Known gap" below — this is Vansh's explicit call, not an oversight).
+6. Builds a `job_comments`-shaped summary per document (claims ingested, edges written, reconciliation edge counts), writes the terminal `status`/`job_comments`, appends a closing `human_audit_log` row (`event_type="analysis_verification_completed"`).
 
-The `POST /deals/{deal_id}/analysis` handler enqueues:
+---
+
+## The Valkey contract: what actually gets picked up, by whom (updated)
+
+Same two-queue shape as the original build (`"simpero"` for this app's own tasks, `"parse"` for the cross-service hop) — the cross-service payload changed:
 
 ```python
-await get_queue().enqueue(
-    "start_deal_analysis",
-    analysis_run_id=str(run.id),   # str(UUID)
-    deal_id=str(deal_id),          # str(UUID)
-    clerk_org_id=claims["tenant_id"],
-    timeout=7200,   # SAQ job property — max runtime, 2 hours (D8/D9)
-    retries=1,      # SAQ job property
-    ttl=86400,      # SAQ job property — how long Valkey keeps the job's result, 24h
+# app/jobs/parse_client.py::enqueue_process_document_job
+job = await get_parse_queue().enqueue(
+    "process_document",              # was "parse_document"
+    spaces_key=spaces_key,
+    entity=entity,                   # NEW -- Deal.name, required by extract_claims
+    known_sha256s=known_sha256s,     # always None from this app, unchanged reasoning
+    audit=True,                      # NEW -- always True, never a caller option
 )
 ```
 
-Picked up by this app's own SAQ worker (`app/jobs/worker.py`, `functions = [example_task, ingest_data_source, start_deal_analysis]`). `timeout`/`retries`/`ttl` are SAQ *job properties*, not function kwargs — SAQ's `enqueue()` merges both into one keyword namespace, so none of `start_deal_analysis`'s own parameter names may ever collide with those four reserved names.
-
-### 2. The parser service's queue (`"parse"`) — this app's worker → `Simpero_Gov_AI_Services`' worker
-
-Inside `start_deal_analysis`, once per verified document, via `app/jobs/parse_client.py::enqueue_parse_job`:
-
-```python
-job = await get_parse_queue().enqueue(   # a DIFFERENT Queue instance, name="parse"
-    "parse_document",
-    spaces_key=data_source.storage_key,  # e.g. "AcmeCapital-org_xyz/<deal_id>/<upload_id>-financials.pdf"
-    known_sha256s=None,                  # ALWAYS None — see below
-)
-```
-
-This is the exact payload `Simpero_Gov_AI_Services`' worker (`parser_service/worker.py::parse_document(ctx, *, spaces_key, known_sha256s)`) picks up — the function name and both kwarg names must match verbatim, since SAQ dispatches by name with no schema validation across the two codebases. `spaces_key` is the document's already-uploaded Spaces object key (`data_source.storage_key`, set back at `/uploads/{upload_id}/complete` time) — this app never uploads anything itself here, it just points the parser at bytes that are already there.
-
-**`known_sha256s` is always `None`, never the document's `fingerprint`.** It's easy to reach for the fingerprint here (the two fields sit right next to each other conceptually), but on the parser's side it's a *duplicate-rejection* list — a digest present in it makes the parser immediately raise `ParseError("duplicate_pdf", ..., 409)`. Passing the document's own hash would make every single parse fail. Deal-level dedupe already happens earlier, at presign time; this is not that.
-
-**What comes back**, read via `get_parse_job(job_key)` (a `saq.Job`, fetched fresh from Valkey on every poll — no caching):
-- `job.status` — one of SAQ's own statuses (`new`/`queued`/`active`/`aborting`/`aborted`/`failed`/`complete`). Only `complete`/`failed`/`aborted` are terminal.
-- `job.result` — on `complete`, the parser's own outcome dict, one of:
-  - `{"status": "parsed", "kind": ..., "sha256": ..., "bucket": ..., "key": ..., "count": ...}` — success. **`bucket`/`key` is a pointer, not the parsed body** — this app records it in `analysis_run.parse_jobs` and stops there; nothing reads the actual parsed content yet (that's a later analysis/memo stage, out of scope here).
-  - `{"status": "rejected", "code": ..., "message": ...}` — a `ParseError` on the parser's side comes back as this normal result dict, **never** a raised exception on the queue. `code == "no_extractable_text"` is SIM-350's signal; `code == "duplicate_pdf"` is what a (never-triggered, since `known_sha256s` is always `None`) dedupe rejection would look like.
-
-  A SAQ-level `failed`/`aborted` status (the *job itself* erroring, not a `ParseError`) is recorded as `outcome: "rejected", code: "job_failed"` / `"job_aborted"` — distinguished from a parser-side rejection by that `job_` prefix, in case anyone needs to tell the two apart later.
-
-This is the entirety of the cross-service contract — nothing else about the parser service changed, and nothing here reads back the actual parsed Spaces object.
+Confirmed by `kpal002` against the real `Simpero_Gov_AI_Services` PR #49 implementation — function name and every kwarg name match exactly. **Return shape is unchanged** from the old `parse_document` contract (`{status: "parsed", bucket, key, sha256, count}` / `{status: "rejected", code, message}`) — only what's *at* the `{bucket, key}` pointer changed, from a bare `ParseResponse` to the richer `extract_claims` payload (`{run_id, sha256, source_file, claims, edges, flag_log, skipped_pages}`). This is why `start_deal_analysis`'s outcome-recording code (`_apply_outcome`, `_build_job_comments`) needed almost no changes — the polling contract it was already built against didn't change shape, just what the pointer resolves to.
 
 ---
 
-## Bug found and fixed during implementation
+## Bugs found and fixed (both via testing/review, not by inspection)
 
-The polling loop originally mutated each `parse_jobs` entry (a plain `dict`) **in place** before reassigning `run.parse_jobs` to the (same, mutated) list. Because the dicts loaded from the DB earlier in the same transaction were the *same Python objects* being mutated, SQLAlchemy's dirty-tracking compared "old" against "new" at flush time, found them equal (literally the same already-mutated objects), and **silently skipped the `UPDATE`** — parse outcomes would never have actually persisted to `analysis_run.parse_jobs` in production, even though the `status` column update (a different, actually-changed column) went through fine and made it look like everything worked.
+**1. In-place JSONB mutation silently defeated SQLAlchemy's dirty-tracking** (original build, 2026-08-10). The polling loop mutated each `parse_jobs` dict in place before reassigning; since the dicts loaded from the DB earlier in the same transaction were the *same Python objects*, SQLAlchemy compared "old" against "new" at flush time, found them identical, and silently skipped the `UPDATE` — parse outcomes would never have persisted. Caught by `tests/test_start_deal_analysis_job.py` against real Postgres (a pure-mock test would not have caught this — it's specifically about SQLAlchemy's change-tracking on a JSONB column). Fixed by returning **new** dicts instead of mutating.
 
-Caught by `tests/test_start_deal_analysis_job.py` against a real Postgres — a pure unit-test-with-mocks version would not have caught this, since the bug is specifically about SQLAlchemy's change-tracking behavior on a JSONB column, not about the Python logic in isolation. Fixed by having `_apply_outcome` return a **new** dict instead of mutating the one it's given, and restructuring the loop to build a fresh `parse_jobs` list each iteration rather than mutating list elements.
+**2. Verification's ingest had a real, if narrower, idempotency gap than first flagged** (`kpal002`'s second review round, 2026-08-12). A `ponytail:` comment originally warned about a mid-job-crash retry violating `uq_claims_org_data_source_claim_ref` — overstated, since the whole job is one transaction and a mid-job crash already rolls back cleanly. The real exposure: a SAQ redelivery **after** a successful commit would re-run the insert-only ingest and hard-fail on that same constraint, leaving the run stuck. Fixed with a terminal-state guard at the top of `start_deal_verification` (mirrors `start_deal_analysis`'s own D11 idempotency pattern), covered by a new test (`test_already_terminal_run_is_a_noop`).
+
+---
+
+## Known, named gaps (not fixed here — flagged, not papered over)
+
+- **Cross-document reconciliation.** `reconcile_same_fact`/`reconcile_consistency` are called once per `data_source_id`, not once per deal — a fact stated in two different documents of the same deal (the concrete example from review: a CIM says $50M revenue, an uploaded financial model says $52M for the same period) is never reconciled today. `kpal002` flagged this `[High]`, filed as a SIM-368 follow-up once Linear has room. **Checked directly with Vansh after the flag**: keeping the original "loop per document" call for now rather than building deal-level scope into this PR.
+- **Long transaction in `start_deal_verification`.** Ingest + reconcile of every document in a deal runs inside one transaction, pinning one PgBouncer backend connection for the run's whole duration — unlike the parsing stage, which deliberately never holds a transaction across a wait. Assessed as fine at alpha scale by `kpal002`; revisit (commit per document, or chunk) if it becomes a real constraint.
+- **The rest of the pipeline is still unbuilt**: `classify` (no `job_name` of its own), and everything past `governance` in the 9-phase UI list (`ofac`/`pass3_compose`/`pass4_score`/`finalize`) — `currentPhase` will sit at `"governance"` on a successful verification run and advance no further. The entire chunking/embedding/retrieval lane (`parser_service/chunker.py`, `app/services/embedding.py`/`retrieval.py`) is a separate, parallel, entirely unbuilt branch, not touched by anything in this doc.
 
 ---
 
 ## Verification performed
 
-- Brought up `docker-compose.dev.yml` (real Postgres 16 + pgvector, real Valkey) from a fresh volume.
-- `alembic upgrade head`: full chain (30 migrations, including both new ones) applies cleanly.
-- Directly inspected the resulting `analysis_run` table via `psql`: RLS policy, `FORCE`, column grants, the partial unique index, and the relaxed `data_source_enforce_one_way_status()` function body all match the design exactly.
-- `uv run pytest tests -q` against the real stack: **263 passed** (231 pre-existing + 32 new/extended across the two rounds of column revisions above), on a freshly-migrated DB.
-- `uv run pyright`: 0 errors.
-- Found the in-place-mutation bug above via the new job-level tests, fixed it, reran — all green.
-- Re-verified after each later revision (the `started_at`/`ended_at`/status-vocabulary rename, `job_comments`, `job_name`, and the `message`-field wiring): fresh `docker-compose.dev.yml` volume, full migration chain, full suite, every time — not just the initial pass.
+- Fresh `docker-compose.dev.yml` volume (real Postgres 16 + pgvector, real Valkey), full migration chain (32 migrations as of this writing), reset and re-verified after every revision round, not just the first pass.
+- `uv run pytest tests -q`: **270 passed**, 0 failures, on a freshly-migrated DB each time. (231 original baseline → 263 after the first build → 270 after the rework + idempotency fix.)
+- `uv run pyright`: 0 errors throughout.
+- `tests/test_start_deal_verification_job.py` runs the **real** `reconcile_same_fact` against genuinely-ingested claims (not mocked) — confirmed a real cross-page `same_fact` edge actually gets written, not just that the function gets called.
+- Directly inspected `analysis_run`'s RLS policy, `FORCE`, column grants, partial unique index, and the relaxed trigger function body via `psql` — all match the design.
 
-**Pre-existing, unrelated issue flagged (not fixed here):** `tests/test_retrieval_rls.py` and `tests/test_memory_scope_rls.py` each `DROP TABLE chunks CASCADE` and replace it with their own minimal test schema, then never restore the real migration-defined table. Running the full suite twice against the same DB without a fresh migration in between leaves `chunks` gone for the second run — surfaced as spurious failures in `test_chunks_rls.py`/`test_e2e_pipeline.py` during verification, confirmed unrelated by resetting to a fresh DB and rerunning once cleanly.
+**Pre-existing, unrelated issue, still present:** `tests/test_retrieval_rls.py`/`test_memory_scope_rls.py` drop and replace the real `chunks` table without restoring it; running the suite twice against the same DB without a fresh migration leaves `chunks` gone for the second run. Confirmed unrelated every time it recurred, by resetting to a fresh DB.
 
 ---
 
-## Out of scope / deliberately not built (per the plan)
+## What's still needed (as of this writing)
 
-- **Reading the parsed result body.** `analysis_run.parse_jobs[].{bucket,key}` is recorded and left there — a future analysis/memo stage consumes it via `app/services/uploads/spaces.py` and writes a `sessions` row. Not built here (D16).
-- **OCR execution.** `no_extractable_text` only flags the need for OCR (via `data_source.status = "ocr_needed"`); nothing triggers Textract/Claude Vision/etc. (Open Question 7).
-- **`conferenceMode`/`fixtureId`.** Still live in the frontend's Step 3 UI from the dead `/api/simpero/analyse` call; excluded from this API's contract entirely rather than inventing semantics for them (Open Question 2 — still open, frontend-side).
-- **Fan-out-and-exit + reconciler alternative to D9's in-worker wait.** Ceiling is ~10 concurrent analysis runs (one SAQ worker slot each) before they start queuing behind each other; acceptable for now per the plan, revisit if it becomes a real constraint.
+**Alpha side:** nothing — PR #81 is complete and merge-ready pending the item below.
 
-## Not yet committed
+**`Simpero_Gov_AI_Services` side:** `process_document` is built (PR #49, merge-ready, contract confirmed). Two live items before anything works end-to-end:
+1. `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` provisioned in the **parser worker's** deploy environment specifically — `audit=True` is unconditional on every call, so there is no key-free path.
+2. That worker brought up **before** PR #81 merges and starts enqueuing — otherwise jobs queue up unconsumed, silently, on either side.
 
-New: both migrations, `app/models/analysis_run.py`, `app/repo/AnalysisRunRepo.py`, `app/jobs/tasks/start_deal_analysis.py`, three new test files, this doc, and the services-repo handoff doc (`docs/plans/analysis-pipeline-job-scaffolding-services.md`). Modified: `app/api/deals.py`, `app/jobs/parse_client.py`, `app/jobs/tasks/__init__.py`, `app/models/__init__.py`, `app/repo/DataSourceRepo.py`, `app/schemas/deals.py`, `tests/test_data_source_rls.py`. Review `git status`/`git diff` before committing.
+**`Simpero_AI_Gov_Web` side:** two small, independent gaps found while checking that repo's own in-progress (uncommitted) rewire against this contract — `DealStatusPayload` missing the new `jobComments` field, and a stale e2e test (`analyse-async.spec.ts`) still targeting the dead legacy endpoint. Full detail: `docs/plans/web-frontend-status-gaps-handoff.md`. Neither blocks PR #81.
+
+Full design record, open questions, and the wireframe diagram of the complete pipeline: `docs/plans/analysis-pipeline-stage-chaining.md`. Services handoff, now marked superseded/historical now that PR #49 shipped: `docs/plans/analysis-pipeline-job-scaffolding-services.md`.
