@@ -154,6 +154,17 @@ async def start_deal_verification(
         run = await run_repo.get_by_id(run_id)
         if run is None:
             raise ValueError(f"analysis_run {analysis_run_id} not found")
+
+        # Idempotency guard (review on PR #81): the whole job runs in one
+        # transaction, so a mid-job crash already rolls back cleanly on its
+        # own -- the real exposure is a SAQ redelivery *after* a successful
+        # commit, which would otherwise re-run the insert-only ingest below
+        # and hit uq_claims_org_data_source_claim_ref on rows already
+        # committed, hard-failing the retry and leaving the run stuck. Same
+        # spirit as start_deal_analysis's D11 guard: if this run already
+        # reached a terminal status, there's nothing left to do.
+        if run.status in ("successful", "failed"):
+            return
         parsing_run = await run_repo.get_by_id(UUID(parsing_run_id))
         if parsing_run is None:
             raise ValueError(f"analysis_run {parsing_run_id} (parsing) not found")

@@ -199,6 +199,47 @@ async def test_no_usable_documents_marks_run_failed(owner_conn, seeded_org, seed
     assert _count_claims(owner_conn, seeded_org["org_pk"]) == 0
 
 
+async def test_already_terminal_run_is_a_noop(owner_conn, seeded_org, seeded_deal, monkeypatch):
+    """D11-style idempotency guard (review on PR #81): a SAQ redelivery after
+    a successful commit must not re-run the insert-only ingest -- it would
+    hit uq_claims_org_data_source_claim_ref on rows already committed and
+    hard-fail the retry, leaving the run stuck."""
+    data_source_id = _seed_data_source(owner_conn, seeded_org["org_pk"], seeded_deal, "cim.pdf")
+    parse_jobs = [
+        {
+            "data_source_id": data_source_id,
+            "filename": "cim.pdf",
+            "storage_key": "org/cim.pdf",
+            "job_key": "job-1",
+            "outcome": "parsed",
+            "code": None,
+            "message": None,
+            "bucket": "test-bucket",
+            "key": "claims/cim.json",
+        }
+    ]
+    parsing_run_id = _seed_parsing_run(owner_conn, seeded_org["org_pk"], seeded_deal, parse_jobs)
+    run_id = _seed_verification_run(owner_conn, seeded_org["org_pk"], seeded_deal)
+    with owner_conn.cursor() as cur:
+        cur.execute("UPDATE analysis_run SET status = 'successful' WHERE id = %s", (run_id,))
+
+    def fail_if_called(bucket: str, key: str) -> dict:
+        raise AssertionError("get_json_object must not be called once the run is terminal")
+
+    monkeypatch.setattr(job_module, "get_json_object", fail_if_called)
+
+    await job_module.start_deal_verification(
+        {},
+        analysis_run_id=run_id,
+        parsing_run_id=parsing_run_id,
+        clerk_org_id=seeded_org["clerk_org_id"],
+    )
+
+    assert _count_claims(owner_conn, seeded_org["org_pk"]) == 0
+    run = _fetch_run(owner_conn, run_id)
+    assert run["status"] == "successful"
+
+
 async def test_missing_run_raises(owner_conn, seeded_org, seeded_deal):
     parsing_run_id = _seed_parsing_run(owner_conn, seeded_org["org_pk"], seeded_deal, [])
     with pytest.raises(ValueError, match="not found"):

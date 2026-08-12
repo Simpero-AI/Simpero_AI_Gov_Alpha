@@ -1,18 +1,34 @@
 # `process_document` — Implementation Handoff to `Simpero_Gov_AI_Services`
 
-> **This is a handoff document**, written from a `Simpero_AI_Gov_Alpha`
-> session for whoever owns `Simpero_Gov_AI_Services`. Hand this file (or
-> paste it) to that repo's owner/session to act on.
+> **Status: SUPERSEDED — `process_document` is built and merge-ready,
+> `Simpero_Gov_AI_Services` PR #49.** kpal002 confirmed PR #49's worker
+> consumes Alpha's enqueue exactly (`spaces_key`, `entity`,
+> `known_sha256s=None`, `audit=True`) and reviewed PR #81's ingest step
+> against it — contract matches, chain is complete. **The "What to
+> implement" sketch below is historical and has two known bugs** (it passed
+> `known_sha256s` to `extract_claims`, which isn't one of that function's
+> parameters, and omitted `extract_claims`'s required `run_id`/
+> `correlation_id` arguments) — both already fixed correctly in the real
+> PR #49 implementation. Left in place only so the reasoning sections below
+> (why `audit=True` always, why `known_sha256s` is always empty, result
+> delivery) still have something concrete to anchor to — **do not copy the
+> code sketch**, it does not match what actually shipped.
+>
+> **What's actually still open, as of PR #49 landing:**
+> 1. **`ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` in the parser worker's
+>    deploy environment** — per kpal002, this is the live blocker now.
+>    `audit` is unconditionally `True` on every call, so there is no
+>    key-free path; every document fails closed until this is set.
+> 2. **Sequencing**: bring the `Simpero_Gov_AI_Services` worker up
+>    *before* `Simpero_AI_Gov_Alpha` PR #81 starts enqueuing — otherwise
+>    jobs queue up unconsumed (the same silent-drop risk this doc
+>    described from the other direction, back when #49 didn't exist yet).
+>
+> Original framing below, for the historical record and the still-valid
+> reasoning sections.
 >
 > Companion to `docs/plans/analysis-pipeline-stage-chaining.md` (reviewed by
-> `kpal002` on PR #81 of `Simpero_AI_Gov_Alpha` — that review corrected the
-> plan and resolved every design question below; this doc states the
-> resolved contract, not a proposal). **Alpha's side is fully implemented
-> and merge-ready on PR #81** — `app/jobs/parse_client.py::
-> enqueue_process_document_job`, `app/jobs/tasks/start_deal_analysis.py`,
-> `app/jobs/tasks/start_deal_verification.py`. It already enqueues the job
-> described below. **Nothing on this repo's side consumes it yet** — that
-> gap is what this doc closes.
+> `kpal002` on PR #81 of `Simpero_AI_Gov_Alpha`).
 
 ---
 
@@ -106,9 +122,18 @@ async def process_document(
 
     data = obj["Body"].read()
 
+    # CORRECTED from the original sketch (kpal002's review on PR #81):
+    # extract_claims has no known_sha256s parameter at all -- that's
+    # parse_pdf_bytes's own dedupe-rejection argument, and extract_claims
+    # calls parse_pdf_bytes(data) internally without forwarding it, so this
+    # job's known_sha256s kwarg is accepted (Alpha's contract sends it) but
+    # not something extract_claims itself takes. run_id/correlation_id ARE
+    # required by extract_claims and were missing from the original sketch
+    # -- Alpha doesn't send either, so generate them here (e.g. the SAQ
+    # job's own key, or a fresh uuid4 per call).
     try:
         payload = extract_claims(
-            data, entity=entity, known_sha256s=known_sha256s or [], audit=audit,
+            data, entity=entity, run_id=ctx["job"].key, correlation_id=str(uuid4()), audit=audit,
         )
     except ParseError as exc:
         return {"status": "rejected", "code": exc.code, "message": exc.message}
@@ -236,39 +261,30 @@ it's the same `extract_claims` call `scripts/emit_claims.py` and
 
 ---
 
-## Open questions (Alpha-side, still real — this repo's contract doesn't depend on the answer)
+## Resolved (this doc's original open questions)
 
-1. `entity = Deal.name` — is that the right attribution label for a real
-   claim, or does it need to be something else (fund name, legal entity
-   name)? Whatever the answer, it's an Alpha-side change (what string gets
-   passed), not something this repo's contract needs to accommodate
-   differently.
-2. Real `before_process` timeout/retries/concurrency numbers — unmeasured,
-   this repo's to decide.
-3. `ANTHROPIC_API_KEY` provisioning in the worker's real deploy environment
-   — unconfirmed, blocking (see Hard Blockers above).
-
-**Not open, resolved by review — do not re-litigate:**
-- Whether `verification` needs its own job on this side: **no**. It's
-  Alpha's `reconcile_same_fact`/`reconcile_consistency`
-  (`app/services/reconciliation.py`, `app/services/consistency.py`),
-  entirely outside this repo, run over claims Alpha has already ingested.
+- `entity = Deal.name` — shipped as-is; not revisited.
+- `before_process` timeout/retries/concurrency — set in PR #49; not
+  re-litigated here.
+- Whether `verification` needs its own job on this side: **no**, confirmed
+  on PR #81 review. It's Alpha's `reconcile_same_fact`/`reconcile_consistency`,
+  entirely outside this repo, run over claims Alpha has already ingested —
+  see `docs/plans/analysis-pipeline-stage-chaining.md` for the two follow-up
+  items filed against that step (deal-level reconciliation scope; ingest
+  idempotency — both Alpha-side, not this repo's).
 - Whether the binding audit needs a standalone entry point: **no**.
   `audit=True` on the one combined call covers it.
 - Whether parsing and extraction should stay two separate jobs: **no**,
-  combined into `process_document`, per the cache-read finding above.
+  combined into `process_document`, confirmed correct and shipped.
 
 ---
 
 ## Definition of done
 
-- [ ] `process_document` implemented in `worker.py`, matching the contract
-      above exactly (function name, kwarg names, return shape).
-- [ ] Registered in `functions`.
-- [ ] Its own measured `before_process` timeout/retries.
+- [x] `process_document` implemented in `worker.py` — PR #49.
+- [x] Registered in `functions` — PR #49.
+- [x] Contract confirmed matching Alpha's enqueue — kpal002, PR #81 review.
 - [ ] `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` confirmed present in the
-      actual worker deploy environment.
-- [ ] Verified per "How to verify this yourself" above, including the
-      deliberate no-credential failure test.
-- [ ] Confirmed with Alpha's owner once live, so PR #81 (Alpha side, already
-      built, waiting on this) can be tested end-to-end and merged.
+      actual worker deploy environment — **the live blocker**.
+- [ ] Worker brought up and confirmed consuming before PR #81 merges and
+      starts enqueuing for real.

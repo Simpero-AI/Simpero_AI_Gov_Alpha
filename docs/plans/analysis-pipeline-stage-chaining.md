@@ -17,11 +17,33 @@
 > **What's actually built:** everything under "What needs building — Alpha"
 > — `app/jobs/tasks/start_deal_analysis.py` reworked, new `app/jobs/tasks/
 > start_deal_verification.py`, `enqueue_process_document_job` replacing
-> `enqueue_parse_job`, the `_steps_for_status` mapping extended, 269 tests
-> passing. **Not built:** anything under "What needs building — Services" —
-> `process_document` doesn't exist in `Simpero_Gov_AI_Services` yet; see the
-> companion handoff doc. Until it does, Alpha's fan-out enqueues a job name
-> nothing consumes.
+> `enqueue_parse_job`, the `_steps_for_status` mapping extended, 270 tests
+> passing. **Services side: also done.** `process_document` is built and
+> merge-ready on `Simpero_Gov_AI_Services` PR #49 — kpal002 confirmed it
+> consumes Alpha's enqueue exactly and reviewed this PR's ingest step
+> against it, chain lines up. **Remaining, in priority order:**
+> 1. `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` in the parser worker's
+>    deploy environment — the live blocker (`audit=True` always, no
+>    key-free path). Bring that worker up *before* this PR merges and
+>    starts enqueuing, or jobs queue up unconsumed.
+> 2. **Ingest idempotency — fixed, this session.** kpal002's review found
+>    the `ponytail:` comment overstated the risk (a mid-job crash already
+>    rolls back cleanly, single transaction) but named the real one — a
+>    SAQ redelivery *after* a successful commit would re-run the
+>    insert-only ingest and hard-fail on `uq_claims_org_data_source_claim_ref`,
+>    leaving the run stuck. `start_deal_verification.py` now has a
+>    terminal-state guard at the top (no-op if the run already reached
+>    `successful`/`failed`), matching `start_deal_analysis`'s own D11
+>    idempotency pattern. Covered by a new test.
+> 3. **Deal-level (cross-document) reconciliation — open, needs Vansh's
+>    call, not built.** `reconcile_same_fact`/`reconcile_consistency` loop
+>    per `data_source_id`, so a fact stated in two different documents of
+>    the same deal (e.g. the CIM says $50M revenue, the uploaded financial
+>    model says $52M for the same period) is never reconciled — kpal002
+>    flagged this as [High] priority, filed as a follow-up under SIM-368
+>    once Linear has room. Vansh's original call was "loop per document,
+>    for now" (below); this is the concrete case that call was made
+>    against, worth revisiting given the reviewer's framing.
 
 ---
 
@@ -348,7 +370,8 @@ not a parser call (point 2); and the dead-end note at the bottom now names
    mock — proved a real cross-page `same_fact` edge gets written), plus
    reworked coverage in `test_start_deal_analysis_job.py` and
    `test_start_analysis_endpoint.py` for the new enqueue signature and
-   status mapping. **269 tests passing**, `pyright` clean, verified against
+   status mapping, plus a terminal-state idempotency guard (kpal002's PR #81
+   review) with its own test. **270 tests passing**, `pyright` clean, verified against
    a fresh `docker-compose.dev.yml` stack.
 
 ## What needs building — Services (`Simpero_Gov_AI_Services`) — not started
@@ -457,9 +480,13 @@ than picking one.
    implementation, not previously known:** `reconcile_same_fact`/
    `reconcile_consistency` are scoped to one `data_source_id` each, not a
    deal — neither does cross-document reconciliation as written. **Vansh's
-   call: loop per document, for now.** The cross-document gap (a fact
-   reported in two different filings for the same deal is never caught) is
-   real and open, not solved by anything built this session.
+   call at the time: loop per document, for now.** **Re-opened by kpal002's
+   PR #81 review**, flagged [High]: this is the highest-value case for a
+   multi-document deal (CIM says $50M, uploaded financial model says $52M
+   for the same period → should produce a cross-source `contradicts`, and
+   doesn't). Filed as a SIM-368 follow-up once Linear has room. Still not
+   built — worth Vansh revisiting the original call given the concrete
+   example, not silently reversed here.
 4. `entity = deal.name` — right label for claim attribution? Implemented as
    the default (point 5); still unconfirmed whether it's the *right* one.
 5. Where do chunking/embedding/retrieval fit relative to this chain — same
@@ -467,9 +494,18 @@ than picking one.
    entirely unbuilt, not started)
 6. `classify` and the memo tail (`pass2` → `scoring`) — which stages, which
    repo, when? (point 6, still unbuilt)
-7. Is `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` actually provisioned in the
-   worker's real runtime environment? Still unconfirmed — blocks
-   `process_document` from ever succeeding once built, not just a nice-to-know.
+7. ~~Is `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` provisioned in the
+   worker's real runtime environment?~~ **Confirmed: this is the live
+   blocker**, per kpal002 — not yet set. `process_document` (PR #49) is
+   otherwise merge-ready; nothing succeeds until this is set in that
+   worker's actual deploy environment.
+8. **New, from PR #81 review — long transaction in `start_deal_verification`.**
+   Ingest + reconcile of every document in a deal runs inside one
+   transaction, pinning one PgBouncer backend connection for the run's
+   whole duration (unlike `start_deal_analysis`, which deliberately never
+   holds a transaction across its wait). kpal002's assessment: fine at
+   alpha scale, revisit if it becomes a real constraint (commit per
+   document, or chunk the transaction). Not fixed here — named for later.
 
 Everything under "What needs building — Alpha" is done (see the status note
 at the top). "What needs building — Services" has not been started by this
