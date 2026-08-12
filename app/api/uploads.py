@@ -83,9 +83,18 @@ async def create_presigned_url(
         body.deal_id, body.declared_sha256
     )
     if dedupe_candidate is not None:
+        # Structured, not a bare string: the frontend's upload pipeline
+        # (Simpero_AI_Gov_Web's documentUploadPipeline.ts) treats this as
+        # equivalent to a fresh successful upload -- the file is already
+        # accounted for -- and needs the existing row's id/status to do so
+        # without fabricating data.
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="A matching file has already been uploaded for this deal",
+            detail={
+                "message": "A matching file has already been uploaded for this deal",
+                "dataSourceId": str(dedupe_candidate.id),
+                "status": dedupe_candidate.status,
+            },
         )
 
     upload_id = uuid4()

@@ -1,6 +1,7 @@
 # Import all models here so Alembic's autogenerate can discover them via Base.metadata.
 # from app.models.audit_log import AuditLog
 from app.models.ai_audit_log import AiAuditLog
+from app.models.analysis_run import AnalysisRun
 from app.models.chunk import Chunk
 from app.models.claim import Claim
 from app.models.clerk_admin_user import AdminType, ClerkAdminUser
@@ -16,6 +17,7 @@ from app.models.session import Session
 __all__ = [
     "AdminType",
     "AiAuditLog",
+    "AnalysisRun",
     "Chunk",
     "Claim",
     "ClerkAdminUser",

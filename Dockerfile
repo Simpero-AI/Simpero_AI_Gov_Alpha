@@ -38,6 +38,14 @@ COPY app/ /app/app/
 COPY alembic.ini ./
 COPY alembic/ /app/alembic/
 
+# app/jobs/tasks/start_deal_verification.py reads
+# contracts/claims.schema.json at runtime (Path(__file__).parents[3], i.e.
+# /app/contracts/... from inside this image) to validate claims/edges before
+# ingest -- omitted here until caught by an actual local run of that job
+# (FileNotFoundError), since app/'s own test suite never exercises the built
+# image, only the source tree directly.
+COPY contracts/ /app/contracts/
+
 # Activate the virtualenv.
 ENV PATH="/app/.venv/bin:$PATH"
 
