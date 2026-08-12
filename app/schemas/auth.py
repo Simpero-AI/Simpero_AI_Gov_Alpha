@@ -26,3 +26,4 @@ class UserResponse(BaseModel):
     email: str | None
     role: str
     login_method: str
+    is_platform_admin: bool

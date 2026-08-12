@@ -5,7 +5,9 @@ from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dependencies import get_claims, get_db
+from app.models.clerk_admin_user import AdminType
 from app.models.organisation import Users
+from app.repo.AdminUserRepo import AdminUserRepo
 from app.repo.HumanAuditRepo import HumanAuditRepo
 from app.repo.UserRepo import UserRepo
 from app.schemas.auth import LogoutResponse, ProfileSyncRequest, ProfileSyncResponse, UserResponse
@@ -17,7 +19,7 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 async def me(
     claims: dict[str, Any] = Depends(get_claims),
     db: AsyncSession = Depends(get_db),
-) -> Users:
+) -> UserResponse:
     """The caller's own user row. get_db JIT-provisions it on first login,
     so a valid token always finds exactly one row here."""
     user = await UserRepo(db).get_by_clerk_id(claims["user_id"])
@@ -30,7 +32,19 @@ async def me(
             "event_type": "auth_login",
         }
     )
-    return user
+    admin = await AdminUserRepo(db).get_by_clerk_id(claims["user_id"])
+    is_platform_admin = (
+        admin is not None and admin.admin_type == AdminType.platform and admin.status == "active"
+    )
+    return UserResponse(
+        id=user.id,
+        org_id=user.org_id,
+        name=user.name,
+        email=user.email,
+        role=user.role,
+        login_method=user.login_method,
+        is_platform_admin=is_platform_admin,
+    )
 
 
 @router.post("/sync-profile", response_model=ProfileSyncResponse)
