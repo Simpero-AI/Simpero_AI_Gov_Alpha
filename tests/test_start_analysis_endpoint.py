@@ -166,7 +166,7 @@ def test_start_analysis_happy_path(client, owner_conn, seeded_org, seeded_deal, 
     body = resp.json()
     assert body["jobStatus"] == "queued"
     assert body["currentPhase"] is None
-    assert len(body["steps"]) == 9
+    assert len(body["steps"]) == 2
     assert all(step["status"] == "pending" for step in body["steps"])
 
     with owner_conn.cursor() as cur:
@@ -254,34 +254,34 @@ def test_status_in_progress_run(client, owner_conn, seeded_org, seeded_deal):
     body = client.get(f"/deals/{seeded_deal}/status").json()
     assert body["jobStatus"] == "processing"
     assert body["currentPhase"] == "parsing"
+    assert body["startedAt"] is not None
     steps = {step["phase"]: step["status"] for step in body["steps"]}
     assert steps["parsing"] == "current"
-    assert steps["classify"] == "pending"
+    assert steps["verification"] == "pending"
 
 
-def test_status_parsing_successful_run_maps_to_processing_pass2_not_complete(
+def test_status_parsing_successful_run_maps_to_processing_verification_not_complete(
     client, owner_conn, seeded_org, seeded_deal
 ):
     """docs/plans/analysis-pipeline-stage-chaining.md point 4: extraction +
     the binding audit now happen inside the combined parsing job itself, so
-    a successful parsing row points straight past pass1 to pass2 -- and
-    must never surface as "complete", since nothing downstream of pass2 has
-    run yet either."""
+    a successful parsing row points straight to verification -- and must never
+    surface as "complete", since nothing downstream of verification has run yet
+    either. Only "parsing"/"verification" are tracked steps at all (2026-08-12
+    reduction) -- no phantom "classify"/"pass1" entries marked "done" for
+    stages that never ran."""
     _seed_analysis_run(owner_conn, seeded_org["org_pk"], seeded_deal, "successful")
     _authed(seeded_org["clerk_org_id"], "user-1")
 
     body = client.get(f"/deals/{seeded_deal}/status").json()
     assert body["jobStatus"] == "processing"
-    assert body["currentPhase"] == "pass2"
+    assert body["currentPhase"] == "verification"
     steps = {step["phase"]: step["status"] for step in body["steps"]}
     assert steps["parsing"] == "done"
-    assert steps["classify"] == "done"
-    assert steps["pass1"] == "done"
-    assert steps["pass2"] == "current"
-    assert steps["governance"] == "pending"
+    assert steps["verification"] == "current"
 
 
-def test_status_verification_in_progress_maps_to_pass2_current(
+def test_status_verification_in_progress_maps_to_verification_current(
     client, owner_conn, seeded_org, seeded_deal
 ):
     _seed_analysis_run(
@@ -291,17 +291,19 @@ def test_status_verification_in_progress_maps_to_pass2_current(
 
     body = client.get(f"/deals/{seeded_deal}/status").json()
     assert body["jobStatus"] == "processing"
-    assert body["currentPhase"] == "pass2"
+    assert body["currentPhase"] == "verification"
     steps = {step["phase"]: step["status"] for step in body["steps"]}
-    assert steps["pass2"] == "current"
+    assert steps["verification"] == "current"
 
 
 def test_status_verification_successful_maps_to_governance_next(
     client, owner_conn, seeded_org, seeded_deal
 ):
-    """The 3a/3b pass succeeding moves currentPhase past pass2 to
+    """The 3a/3b pass succeeding moves currentPhase past verification to
     governance -- still never "complete", since nothing beyond governance
-    has a job behind it either."""
+    has a job behind it either. "governance" isn't a tracked step of its
+    own (nothing is actively running once it's reached) -- every tracked
+    step reports "done" instead of one reporting "current"."""
     _seed_analysis_run(
         owner_conn, seeded_org["org_pk"], seeded_deal, "successful", job_name="verification"
     )
@@ -311,11 +313,11 @@ def test_status_verification_successful_maps_to_governance_next(
     assert body["jobStatus"] == "processing"
     assert body["currentPhase"] == "governance"
     steps = {step["phase"]: step["status"] for step in body["steps"]}
-    assert steps["pass2"] == "done"
-    assert steps["governance"] == "current"
+    assert steps["parsing"] == "done"
+    assert steps["verification"] == "done"
 
 
-def test_status_verification_failed_maps_to_pass2_failed(
+def test_status_verification_failed_maps_to_verification_failed(
     client, owner_conn, seeded_org, seeded_deal
 ):
     _seed_analysis_run(
@@ -330,9 +332,94 @@ def test_status_verification_failed_maps_to_pass2_failed(
 
     body = client.get(f"/deals/{seeded_deal}/status").json()
     assert body["jobStatus"] == "error"
-    assert body["currentPhase"] == "pass2"
+    assert body["currentPhase"] == "verification"
     steps = {step["phase"]: step["status"] for step in body["steps"]}
-    assert steps["pass2"] == "failed"
+    assert steps["verification"] == "failed"
+
+
+def _seed_timed_run(
+    owner_conn,
+    org_pk: int,
+    deal_id: str,
+    job_name: str,
+    status: str,
+    started_at: str,
+    ended_at: str | None,
+) -> str:
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO analysis_run (org_id, deal_id, job_name, status, started_at, ended_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
+            (org_pk, deal_id, job_name, status, started_at, ended_at),
+        )
+        return str(cur.fetchone()[0])
+
+
+def test_status_verification_successful_includes_real_chain_timing(
+    client, owner_conn, seeded_org, seeded_deal
+):
+    """startedAt is the CHAIN's start (the parsing run's), not the
+    verification row's own started_at; stepDurations carries each step's
+    own real wall time, derived from each run's own started_at/ended_at --
+    nothing here is guessed or client-side."""
+    _seed_timed_run(
+        owner_conn,
+        seeded_org["org_pk"],
+        seeded_deal,
+        "parsing",
+        "successful",
+        "2026-08-12T07:00:00+00:00",
+        "2026-08-12T07:00:20+00:00",
+    )
+    _seed_timed_run(
+        owner_conn,
+        seeded_org["org_pk"],
+        seeded_deal,
+        "verification",
+        "successful",
+        "2026-08-12T07:00:25+00:00",
+        "2026-08-12T07:01:10+00:00",
+    )
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    body = client.get(f"/deals/{seeded_deal}/status").json()
+    assert body["currentPhase"] == "governance"
+    assert body["startedAt"] == "2026-08-12T07:00:00Z"
+    assert body["endedAt"] == "2026-08-12T07:01:10Z"
+    assert body["stepDurations"] == {"parsing": 20, "verification": 45}
+
+
+def test_status_verification_in_progress_omits_verification_duration(
+    client, owner_conn, seeded_org, seeded_deal
+):
+    """While the verification run itself hasn't ended yet, its step must
+    not appear in stepDurations at all -- there is no real duration to
+    report yet, and the endpoint must never guess one."""
+    _seed_timed_run(
+        owner_conn,
+        seeded_org["org_pk"],
+        seeded_deal,
+        "parsing",
+        "successful",
+        "2026-08-12T07:00:00+00:00",
+        "2026-08-12T07:00:20+00:00",
+    )
+    _seed_timed_run(
+        owner_conn,
+        seeded_org["org_pk"],
+        seeded_deal,
+        "verification",
+        "in_progress",
+        "2026-08-12T07:00:25+00:00",
+        None,
+    )
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    body = client.get(f"/deals/{seeded_deal}/status").json()
+    assert body["currentPhase"] == "verification"
+    assert body["startedAt"] == "2026-08-12T07:00:00Z"
+    assert body["endedAt"] is None
+    assert body["stepDurations"] == {"parsing": 20}
 
 
 def test_status_failed_run(client, owner_conn, seeded_org, seeded_deal):

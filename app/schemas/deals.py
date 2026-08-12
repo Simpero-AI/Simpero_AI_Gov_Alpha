@@ -31,7 +31,21 @@ class DealStatusResponse(CamelModel):
     job_status: Literal["queued", "processing", "complete", "error", "no_job"]
     current_phase: str | None
     steps: list[PipelineStepResponse]
-    phase_progress: dict[str, int] | None = None
+    # started_at is the CHAIN's start (the parsing run's own started_at, even
+    # while current_phase has since moved on to "verification"/"governance" and a
+    # different (verification) row is now the "latest" one) -- not simply
+    # "the latest run's own started_at" -- so the frontend's elapsed timer
+    # reads "since analysis began," not "since the current stage began."
+    # Null for the no_job shape (no run exists yet).
+    started_at: datetime | None = None
+    # The latest run's own ended_at -- null while it's still queued/running.
+    # Lets the frontend freeze the elapsed timer at a real value instead of
+    # ticking forever once nothing further will happen.
+    ended_at: datetime | None = None
+    # Real per-step wall time in seconds, keyed by the same phase strings as
+    # `steps` ("parsing"/"verification") -- present only once that step's own run
+    # has a real ended_at, i.e. only for a step that's actually finished.
+    step_durations: dict[str, int] = {}
     error_message: str | None = None
     # Only populated once a run reaches a terminal status (successful/failed)
     # -- null everywhere else, including no_job/queued/processing.

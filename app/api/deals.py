@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dependencies import get_claims, get_db
 from app.jobs.queue import get_queue
+from app.models.analysis_run import AnalysisRun
 from app.models.deal import Deal
 from app.repo.AnalysisRunRepo import AnalysisRunRepo
 from app.repo.DataSourceRepo import DataSourceRepo
@@ -51,9 +52,19 @@ def _steps_for_status(
     """D14 of docs/plans/start-analysis-flow-alpha.md: phases before
     `current_phase` are "done", `current_phase` itself is "current",
     `failed_phase` (if given) is "failed" and nothing after it is reachable —
-    everything else is "pending"."""
+    everything else is "pending".
+
+    `current_phase` can be a value past the tracked list (currently just
+    "governance", once verification succeeds) — nothing is actively running
+    at that point, so it's treated as past the end: every listed step
+    "done", none "current"."""
     phases = [step["phase"] for step in no_job_steps()]
-    current_index = phases.index(current_phase) if current_phase is not None else None
+    if current_phase is None:
+        current_index = None
+    elif current_phase in phases:
+        current_index = phases.index(current_phase)
+    else:
+        current_index = len(phases)
 
     steps = []
     for index, step in enumerate(no_job_steps()):
@@ -73,6 +84,15 @@ def _steps_for_status(
             )
         )
     return steps
+
+
+def _run_seconds(run: AnalysisRun) -> int | None:
+    """Real wall time for one analysis_run, from its own started_at/ended_at
+    -- None while it hasn't ended yet (never a guess at an in-progress
+    duration)."""
+    if run.ended_at is None:
+        return None
+    return int((run.ended_at - run.started_at).total_seconds())
 
 
 def _no_job_status() -> DealStatusResponse:
@@ -235,7 +255,7 @@ async def get_deal_status(
     docs/plans/analysis-pipeline-stage-chaining.md (point 4's combined
     per-document job folds extraction+the binding audit into `job_name
     == "parsing"` itself, so that row's `successful` now points straight
-    at `"pass2"` rather than `"classify"` — pass1's work already happened
+    at `"verification"` rather than `"classify"` — pass1's work already happened
     inside it). `job_name == "verification"` is the separate, deal-level
     3a/3b pass (`start_deal_verification`), which only ever runs after a
     `parsing` row succeeds. Neither ever maps to `"complete"` — the memo
@@ -248,28 +268,61 @@ async def get_deal_status(
     if run is None:
         return _no_job_status()
 
+    # started_at is the whole CHAIN's start (the parsing run's own
+    # started_at), not just this latest row's own started_at -- once the
+    # latest row is a verification run, its own started_at is well after
+    # the chain actually began. step_durations only ever gets an entry for
+    # a step whose own run has a real ended_at -- i.e. one that's actually
+    # finished, never a guess at one still in progress.
+    step_durations: dict[str, int] = {}
+    if run.job_name == "parsing":
+        chain_started_at = run.started_at
+        parsing_seconds = _run_seconds(run)
+        if parsing_seconds is not None:
+            step_durations["parsing"] = parsing_seconds
+    else:
+        parsing_run = await AnalysisRunRepo(db).latest_by_job_name(deal_id, "parsing")
+        chain_started_at = parsing_run.started_at if parsing_run is not None else run.started_at
+        parsing_seconds = _run_seconds(parsing_run) if parsing_run is not None else None
+        if parsing_seconds is not None:
+            step_durations["parsing"] = parsing_seconds
+        verification_seconds = _run_seconds(run)
+        if verification_seconds is not None:
+            step_durations["verification"] = verification_seconds
+    ended_at = run.ended_at
+
     if run.job_name == "parsing":
         if run.status == "queued":
             return DealStatusResponse(
-                job_status="queued", current_phase=None, steps=_steps_for_status(None)
+                job_status="queued",
+                current_phase=None,
+                steps=_steps_for_status(None),
+                started_at=chain_started_at,
             )
         if run.status == "in_progress":
             return DealStatusResponse(
                 job_status="processing",
                 current_phase="parsing",
                 steps=_steps_for_status("parsing"),
+                started_at=chain_started_at,
             )
         if run.status == "successful":
             return DealStatusResponse(
                 job_status="processing",
-                current_phase="pass2",
-                steps=_steps_for_status("pass2"),
+                current_phase="verification",
+                steps=_steps_for_status("verification"),
+                started_at=chain_started_at,
+                ended_at=ended_at,
+                step_durations=step_durations,
                 job_comments=run.job_comments,
             )
         return DealStatusResponse(
             job_status="error",
             current_phase="parsing",
             steps=_steps_for_status(None, failed_phase="parsing"),
+            started_at=chain_started_at,
+            ended_at=ended_at,
+            step_durations=step_durations,
             error_message=run.error_message,
             job_comments=run.job_comments,
         )
@@ -278,20 +331,28 @@ async def get_deal_status(
     if run.status in ("queued", "in_progress"):
         return DealStatusResponse(
             job_status="queued" if run.status == "queued" else "processing",
-            current_phase="pass2",
-            steps=_steps_for_status("pass2"),
+            current_phase="verification",
+            steps=_steps_for_status("verification"),
+            started_at=chain_started_at,
+            step_durations=step_durations,
         )
     if run.status == "successful":
         return DealStatusResponse(
             job_status="processing",
             current_phase="governance",
             steps=_steps_for_status("governance"),
+            started_at=chain_started_at,
+            ended_at=ended_at,
+            step_durations=step_durations,
             job_comments=run.job_comments,
         )
     return DealStatusResponse(
         job_status="error",
-        current_phase="pass2",
-        steps=_steps_for_status(None, failed_phase="pass2"),
+        current_phase="verification",
+        steps=_steps_for_status(None, failed_phase="verification"),
+        started_at=chain_started_at,
+        ended_at=ended_at,
+        step_durations=step_durations,
         error_message=run.error_message,
         job_comments=run.job_comments,
     )
@@ -387,5 +448,8 @@ async def start_analysis(
     )
 
     return DealStatusResponse(
-        job_status="queued", current_phase=None, steps=_steps_for_status(None)
+        job_status="queued",
+        current_phase=None,
+        steps=_steps_for_status(None),
+        started_at=run.started_at,
     )

@@ -17,6 +17,14 @@ dependencies = [
     "saq[redis,web]>=0.26.4",
     "pgvector>=0.5.0",
     "email-validator>=2.3.0",
+    # Real production dependency, not dev-only: app/jobs/tasks/
+    # start_deal_verification.py imports it to validate claims/edges against
+    # contracts/claims.schema.json inside the actual worker job, not just in
+    # scripts/tests. Was previously only in [dependency-groups].dev, which
+    # `docker build` never installs (Dockerfile's `uv sync --frozen --no-dev`)
+    # -- masked locally because a plain `uv sync` installs dev deps too, only
+    # surfaced as ModuleNotFoundError inside the real worker container.
+    "jsonschema>=4.0.0",
 ]
 # Docling/pypdf/openpyxl (the parse-service-only deps) left with
 # services/parser + tests/parser in the Simpero_Gov_AI_Services split
@@ -31,7 +39,6 @@ dev = [
     "httpx>=0.27.0",
     "pyright>=1.1.411",
     "ruff>=0.6.0",
-    "jsonschema>=4.0.0",
     "pre-commit>=3.8.0",
 ]
 

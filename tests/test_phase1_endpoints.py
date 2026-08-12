@@ -175,7 +175,7 @@ def test_get_deal_status_no_job_shape(client, owner_conn, seeded_org):
     body = resp.json()
     assert body["jobStatus"] == "no_job"
     assert body["currentPhase"] is None
-    assert len(body["steps"]) == 9
+    assert len(body["steps"]) == 2
     assert all(step["status"] == "pending" for step in body["steps"])
 
 

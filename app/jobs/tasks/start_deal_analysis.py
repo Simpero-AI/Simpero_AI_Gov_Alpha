@@ -208,6 +208,7 @@ async def start_deal_analysis(
     # wait (D10).
     loop = asyncio.get_event_loop()
     deadline = loop.time() + _DEADLINE_SECONDS
+    verification_run_id: UUID | None = None
     while True:
         async with AsyncSessionLocal() as session, session.begin():
             await _set_org(session, clerk_org_id)
@@ -276,7 +277,17 @@ async def start_deal_analysis(
                     # row, since extraction already happened inside this job's own
                     # per-document calls (point 4). Inline, same worker, same
                     # pattern as the fan-out above -- no reconciler (D9/D2 of the
-                    # stage-chaining plan).
+                    # stage-chaining plan). The row is created here (inside this
+                    # transaction, so it's covered by the same commit as
+                    # everything else above); the actual queue enqueue is
+                    # deliberately deferred until *after* this transaction
+                    # commits (see below, outside the `async with`) -- enqueuing
+                    # here would let another worker dequeue and start
+                    # start_deal_verification, doing its own SELECT for this
+                    # row, before this transaction's INSERT is even durable
+                    # (real bug hit in local testing: "analysis_run ... not
+                    # found" because the SAQ dequeue outraced the Postgres
+                    # commit).
                     verification_run_id = uuid4()
                     verification_repo = AnalysisRunRepo(session)
                     await verification_repo.create(
@@ -287,15 +298,6 @@ async def start_deal_analysis(
                             "job_name": "verification",
                             "status": "queued",
                         }
-                    )
-                    await get_queue().enqueue(
-                        "start_deal_verification",
-                        analysis_run_id=str(verification_run_id),
-                        parsing_run_id=analysis_run_id,
-                        clerk_org_id=clerk_org_id,
-                        timeout=7200,
-                        retries=1,
-                        ttl=86400,
                     )
                     await HumanAuditRepo(session).append(
                         {
@@ -310,8 +312,22 @@ async def start_deal_analysis(
                             },
                         }
                     )
-                return
+                break
 
             await run_repo.update_progress(run_id, parse_jobs=parse_jobs)
 
         await asyncio.sleep(_POLL_INTERVAL_SECONDS)
+
+    # Outside the transaction -- verification_run_id's row (if any) is now
+    # durably committed, so a worker that dequeues this immediately is
+    # guaranteed to find it.
+    if verification_run_id is not None:
+        await get_queue().enqueue(
+            "start_deal_verification",
+            analysis_run_id=str(verification_run_id),
+            parsing_run_id=analysis_run_id,
+            clerk_org_id=clerk_org_id,
+            timeout=7200,
+            retries=1,
+            ttl=86400,
+        )

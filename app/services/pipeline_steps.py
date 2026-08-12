@@ -1,54 +1,28 @@
-# Ported from Simpero_AI_Gov_Web's src/shared/pipelineSteps.ts — must stay in
-# sync with that file's PIPELINE_STEPS list and AnalysisJobPhase union.
-# Phase 1 has no job model yet, so the only caller here is the "no_job" shape
-# (computeStepStatuses(None, False) equivalent, i.e. every step "pending").
-# Phase 2's real job model reuses this list once `phase` values start moving.
+# Ported from Simpero_AI_Gov_Web's src/shared/pipelineSteps.ts -- must stay
+# in sync with that file's PIPELINE_STEPS list.
+#
+# Reduced (2026-08-12) to the two phases `current_phase` can actually ever
+# report -- "parsing" (start_deal_analysis) and "verification" (parsing successful /
+# start_deal_verification running). The previous 9-entry list included
+# phases ("classify", "pass1", "ofac", "pass3_compose", "pass4_score",
+# "finalize") no job has ever set, so _steps_for_status's index-based status
+# assignment marked them "done" whenever current_phase moved past their
+# position -- a real bug, not just noise, since it told the user stages ran
+# that never did. "governance" (verification successful) is intentionally
+# NOT a list entry either: nothing is actively running once it's reached,
+# so it's represented as every listed step being "done", not as a step of
+# its own -- see _steps_for_status in app/api/deals.py.
 
 PIPELINE_STEPS: list[dict[str, str]] = [
     {
         "phase": "parsing",
-        "title": "Parsing document",
-        "detail": "Reading structure and extracting text",
+        "title": "Parsing & extracting",
+        "detail": "Reading the document and extracting claims",
     },
     {
-        "phase": "classify",
-        "title": "Classifying document",
-        "detail": "Identifying document type and sections",
-    },
-    {
-        "phase": "pass1",
+        "phase": "verification",
         "title": "Verifying claims",
-        "detail": "Extracting and verifying claims against the source",
-    },
-    {
-        "phase": "pass2",
-        "title": "Cross-checking sources",
-        "detail": "Deeper source verification for unresolved claims",
-    },
-    {
-        "phase": "governance",
-        "title": "Governance review",
-        "detail": "Checking compliance flags and policy signals",
-    },
-    {
-        "phase": "ofac",
-        "title": "OFAC screening",
-        "detail": "Sanctions and watchlist checks",
-    },
-    {
-        "phase": "pass3_compose",
-        "title": "Drafting analysis",
-        "detail": "Composing memo sections from verified evidence",
-    },
-    {
-        "phase": "pass4_score",
-        "title": "Scoring deal",
-        "detail": "Running mandate fit and investment scoring",
-    },
-    {
-        "phase": "finalize",
-        "title": "Finalising",
-        "detail": "Saving the analysis and memo",
+        "detail": "Cross-checking and reconciling extracted claims against the source",
     },
 ]
 

@@ -31,6 +31,21 @@ class AnalysisRunRepo(BaseRepo[AnalysisRun, dict]):
         )
         return result.scalars().first()
 
+    async def latest_by_job_name(self, deal_id: uuid.UUID, job_name: str) -> AnalysisRun | None:
+        """Most recent run of one job_name for a deal -- used by the status
+        endpoint to find the parsing run a verification run chained from
+        (they're different rows; a verification row carries no FK back to
+        it), so each step's own real started_at/ended_at can be shown
+        without fabricating anything."""
+        result = await self.session.execute(
+            select(AnalysisRun)
+            .where(AnalysisRun.deal_id == deal_id)
+            .where(AnalysisRun.job_name == job_name)
+            .order_by(AnalysisRun.started_at.desc())
+            .limit(1)
+        )
+        return result.scalars().first()
+
     async def active_for_deal(self, deal_id: uuid.UUID) -> AnalysisRun | None:
         """Fast-path check for a friendly 409 -- uq_analysis_run_active (the
         partial unique index) is the actual double-submit guarantee; this
