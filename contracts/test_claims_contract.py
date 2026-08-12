@@ -62,6 +62,7 @@ CANONICAL_ATTRIBUTES: frozenset[str] = frozenset(
         "operating_cash_flow",
         "free_cash_flow",
         "operating_metric",
+        "core_unmapped",
     }
 )
 
@@ -401,6 +402,21 @@ def test_operating_metric_bucket_accepted_once_e2_has_run(
         "attribute_raw": "Same-store sales growth",
     }
     assert not list(validator.iter_errors(ok)), "operating_metric must validate once E2 has run"
+
+
+def test_core_unmapped_bucket_accepted_once_e2_has_run(
+    validator: Draft202012Validator,
+) -> None:
+    # SIM-384: core_unmapped is E2's OTHER catch-all -- "financial but
+    # unplaceable", split from operating_metric so the two don't collapse
+    # into one bucket 3a can't group. Also a real, E2-processed claim, not a
+    # failure case.
+    ok = {
+        **VALID_PDF_CLAIM,
+        "attribute": "core_unmapped",
+        "attribute_raw": "Aggregate purchase price adjustment",
+    }
+    assert not list(validator.iter_errors(ok)), "core_unmapped must validate once E2 has run"
 
 
 def test_attribute_unconstrained_when_attribute_raw_is_null(
