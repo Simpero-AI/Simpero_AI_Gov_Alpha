@@ -34,7 +34,9 @@
         "inventory",
         "operating_cash_flow",
         "free_cash_flow",
-        "operating_metric"
+        "operating_metric",
+        "customer_concentration",
+        "monthly_burn"
       ]
     },
     "edge": {

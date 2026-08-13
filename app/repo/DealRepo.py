@@ -1,6 +1,7 @@
+import uuid
 from datetime import datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.deal import Deal
@@ -18,6 +19,18 @@ class DealRepo(BaseRepo[Deal, dict]):
 
     async def get_by_id(self, id: object) -> Deal | None:
         return await self.session.get(Deal, id)
+
+    async def update(self, id: uuid.UUID, data: dict) -> Deal | None:
+        """Partial update -- `data` is expected to already be pre-filtered
+        (e.g. via Pydantic's `exclude_unset=True`) to only the columns the
+        caller actually wants to change. One round trip, RLS-scoped like
+        every other query here -- no WHERE org_id needed."""
+        if not data:
+            return await self.get_by_id(id)
+        result = await self.session.execute(
+            update(Deal).where(Deal.id == id).values(**data).returning(Deal)
+        )
+        return result.scalar_one_or_none()
 
     async def list(self) -> list[Deal]:
         """RLS scopes this to the request's org — no WHERE org_id here."""

@@ -33,6 +33,21 @@ def owner_conn() -> Iterator["psycopg2.extensions.connection"]:
 
 
 @pytest.fixture
+def org_a_id(owner_conn, test_org_id) -> int:
+    """The organisation backing the test session's own app.org_id. Moved
+    here from tests/test_deals_rls.py (its original home) since more than
+    one test module now needs it -- e.g. tests/test_workspace_config.py."""
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO organisation (clerk_org_id, name, created_at) VALUES (%s, %s, now()) "
+            "ON CONFLICT (clerk_org_id) DO NOTHING",
+            (test_org_id, "Org A"),
+        )
+        cur.execute("SELECT id FROM organisation WHERE clerk_org_id = %s", (test_org_id,))
+        return cur.fetchone()[0]
+
+
+@pytest.fixture
 async def db_session(test_org_id: str) -> AsyncGenerator[AsyncSession, None]:
     """
     Test DB session fixture that replicates the production get_db pattern exactly.

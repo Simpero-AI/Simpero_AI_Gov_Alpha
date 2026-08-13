@@ -201,6 +201,101 @@ def test_list_pipeline_and_dashboard_stats_shapes(client, owner_conn, seeded_org
     assert stats["ddCompletionPct"]["value"] == 0
 
 
+def test_create_deal_with_screening_fields_round_trips(client, seeded_org):
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    create_resp = client.post(
+        "/deals",
+        json={
+            "name": "Screened Co",
+            "gpSource": None,
+            "dealSizeMinUsd": None,
+            "dealSizeMaxUsd": None,
+            "sectorTags": None,
+            "sector": "saas",
+            "hqGeography": "US",
+            "founderEquityPostClosePct": 0.42,
+        },
+    )
+    assert create_resp.status_code == 201
+    deal_id = create_resp.json()["id"]
+
+    get_resp = client.get(f"/deals/{deal_id}")
+    assert get_resp.status_code == 200
+    deal = get_resp.json()["deal"]
+    assert deal["sector"] == "saas"
+    assert deal["hqGeography"] == "US"
+    assert deal["founderEquityPostClosePct"] == pytest.approx(0.42)
+
+
+def test_patch_deal_sets_one_field_leaves_others_untouched(client, owner_conn, seeded_org):
+    deal_id = _seed_deal(owner_conn, seeded_org["org_pk"], sector="fintech")
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    resp = client.patch(f"/deals/{deal_id}", json={"hqGeography": "CA"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["hqGeography"] == "CA"
+    assert body["sector"] == "fintech"
+    assert body["founderEquityPostClosePct"] is None
+
+
+def test_patch_deal_explicit_null_clears_field(client, owner_conn, seeded_org):
+    deal_id = _seed_deal(owner_conn, seeded_org["org_pk"], sector="fintech")
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    resp = client.patch(f"/deals/{deal_id}", json={"sector": None})
+    assert resp.status_code == 200
+    assert resp.json()["sector"] is None
+
+
+def test_patch_deal_404_when_missing(client, seeded_org):
+    _authed(seeded_org["clerk_org_id"], "user-1")
+    resp = client.patch(f"/deals/{uuid.uuid4()}", json={"sector": "fintech"})
+    assert resp.status_code == 404
+
+
+def test_patch_deal_404_for_other_org_deal(client, owner_conn, seeded_org):
+    """RLS hides the row -- same 404-not-permission-error pattern as get_deal."""
+    other_clerk_org_id = f"test-tenant-{uuid.uuid4().hex[:8]}"
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO organisation (clerk_org_id, name, created_at) VALUES (%s, %s, now()) "
+            "RETURNING id",
+            (other_clerk_org_id, "Other Org"),
+        )
+        other_org_pk = cur.fetchone()[0]
+    other_deal_id = _seed_deal(owner_conn, other_org_pk)
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    resp = client.patch(f"/deals/{other_deal_id}", json={"sector": "fintech"})
+    assert resp.status_code == 404
+
+    with owner_conn.cursor() as cur:
+        cur.execute("DELETE FROM deals WHERE id = %s", (other_deal_id,))
+        cur.execute("DELETE FROM organisation WHERE id = %s", (other_org_pk,))
+
+
+def test_patch_deal_audits_deal_updated(client, owner_conn, seeded_org):
+    deal_id = _seed_deal(owner_conn, seeded_org["org_pk"])
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    resp = client.patch(f"/deals/{deal_id}", json={"sector": "fintech", "hqGeography": "US"})
+    assert resp.status_code == 200
+
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "SELECT actor_id, event_type, payload FROM human_audit_log "
+            "WHERE org_id = %s AND deal_id = %s AND event_type = 'deal_updated'",
+            (seeded_org["org_pk"], deal_id),
+        )
+        rows = cur.fetchall()
+        assert len(rows) == 1
+        actor_id, event_type, payload = rows[0]
+        assert actor_id == "user-1"
+        assert set(payload["fields"]) == {"sector", "hq_geography"}
+
+
 # --- history -------------------------------------------------------------
 
 

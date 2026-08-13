@@ -30,6 +30,7 @@ from app.schemas.deals import (
     PipelineStepResponse,
     PipelineValueStat,
     StartAnalysisRequest,
+    UpdateDealRequest,
     ValueDelta,
 )
 from app.services.dashboard_stats import compute_month_bounds, compute_pipeline_value_delta
@@ -113,6 +114,9 @@ def _deal_row_response(deal: Deal) -> DealRowResponse:
         # (parseSectorTags on the frontend) — not the real array `listPipeline`
         # returns for the same column.
         sector_tags=json.dumps(deal.sector_tags or []),
+        sector=deal.sector,
+        hq_geography=deal.hq_geography,
+        founder_equity_post_close_pct=deal.founder_equity_post_close_pct,
         state=deal.status,
         created_at=deal.created_at,
         updated_at=deal.updated_at,
@@ -138,6 +142,9 @@ async def create_deal(
             "deal_size_min_usd": body.deal_size_min_usd,
             "deal_size_max_usd": body.deal_size_max_usd,
             "sector_tags": body.sector_tags,
+            "sector": body.sector,
+            "hq_geography": body.hq_geography,
+            "founder_equity_post_close_pct": body.founder_equity_post_close_pct,
         }
     )
     await HumanAuditRepo(db).append(
@@ -244,6 +251,42 @@ async def get_deal(
     return DealWithLatestMemoResponse(
         deal=_deal_row_response(deal), latest_memo_session=latest_memo_session
     )
+
+
+@router.patch("/{deal_id}", response_model=DealRowResponse)
+async def update_deal(
+    deal_id: uuid.UUID,
+    body: UpdateDealRequest,
+    claims: dict[str, Any] = Depends(get_claims),
+    db: AsyncSession = Depends(get_db),
+) -> DealRowResponse:
+    """deals.update -- sets sector/hq_geography/founder_equity_post_close_pct
+    on an already-created deal. Needed for legacy deals with none of these
+    set, and because founder_equity_post_close is typically decided during
+    deal structuring, after intake, not at creation. `exclude_unset=True`
+    gives true partial-update semantics: a field the client omits entirely
+    is left untouched, while an explicit `null` clears it."""
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    updates = body.model_dump(exclude_unset=True)
+    updated = await DealRepo(db).update(deal_id, updates)
+    assert updated is not None  # just confirmed the row exists, above
+
+    org_id, actor_id, actor_email = await _actor(db, claims)
+    await HumanAuditRepo(db).append(
+        {
+            "org_id": org_id,
+            "actor_id": actor_id,
+            "actor_email": actor_email,
+            "event_type": "deal_updated",
+            "deal_id": deal_id,
+            "payload": {"fields": list(updates.keys())},
+        }
+    )
+
+    return _deal_row_response(updated)
 
 
 @router.get("/{deal_id}/status", response_model=DealStatusResponse)
