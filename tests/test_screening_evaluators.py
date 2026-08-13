@@ -77,7 +77,9 @@ async def _evaluate(rule_id: str, session, deal):
 
 async def test_gs_03_y_when_revenue_positive(db_session, org_a_id):
     deal = await _seed_deal(db_session, org_a_id)
-    db_session.add(_claim(org_id=org_a_id, deal_id=deal.id, attribute="revenue", normalized=100_000))
+    db_session.add(
+        _claim(org_id=org_a_id, deal_id=deal.id, attribute="revenue", normalized=100_000)
+    )
     await db_session.flush()
 
     result = await _evaluate("gs_03", db_session, deal)
@@ -309,7 +311,9 @@ async def test_db_01_unknown_when_no_revenue_claim(db_session, org_a_id):
 async def test_db_02_n_when_runway_at_least_six_months(db_session, org_a_id):
     deal = await _seed_deal(db_session, org_a_id)
     db_session.add(
-        _claim(org_id=org_a_id, deal_id=deal.id, attribute="cash_and_equivalents", normalized=600_000)
+        _claim(
+            org_id=org_a_id, deal_id=deal.id, attribute="cash_and_equivalents", normalized=600_000
+        )
     )
     db_session.add(
         _claim(org_id=org_a_id, deal_id=deal.id, attribute="monthly_burn", normalized=100_000)
@@ -323,7 +327,9 @@ async def test_db_02_n_when_runway_at_least_six_months(db_session, org_a_id):
 async def test_db_02_unknown_deferred_when_runway_short(db_session, org_a_id):
     deal = await _seed_deal(db_session, org_a_id)
     db_session.add(
-        _claim(org_id=org_a_id, deal_id=deal.id, attribute="cash_and_equivalents", normalized=200_000)
+        _claim(
+            org_id=org_a_id, deal_id=deal.id, attribute="cash_and_equivalents", normalized=200_000
+        )
     )
     db_session.add(
         _claim(org_id=org_a_id, deal_id=deal.id, attribute="monthly_burn", normalized=100_000)
@@ -350,7 +356,9 @@ async def test_db_02_unknown_when_cash_missing(db_session, org_a_id):
 async def test_db_02_unknown_when_burn_missing(db_session, org_a_id):
     deal = await _seed_deal(db_session, org_a_id)
     db_session.add(
-        _claim(org_id=org_a_id, deal_id=deal.id, attribute="cash_and_equivalents", normalized=600_000)
+        _claim(
+            org_id=org_a_id, deal_id=deal.id, attribute="cash_and_equivalents", normalized=600_000
+        )
     )
     await db_session.flush()
 
@@ -362,7 +370,9 @@ async def test_db_02_unknown_when_burn_missing(db_session, org_a_id):
 async def test_db_02_unknown_when_burn_is_zero(db_session, org_a_id):
     deal = await _seed_deal(db_session, org_a_id)
     db_session.add(
-        _claim(org_id=org_a_id, deal_id=deal.id, attribute="cash_and_equivalents", normalized=600_000)
+        _claim(
+            org_id=org_a_id, deal_id=deal.id, attribute="cash_and_equivalents", normalized=600_000
+        )
     )
     db_session.add(_claim(org_id=org_a_id, deal_id=deal.id, attribute="monthly_burn", normalized=0))
     await db_session.flush()

@@ -55,7 +55,9 @@ def test_db_04_prohibited_sectors_come_from_the_rulebook() -> None:
     Python constant, or the two would be able to drift."""
     rulebook = load_rulebook()
     rule = rulebook.by_id["db_04"]
-    assert rule.threshold == {"in": ["cannabis", "gambling", "crypto_native", "defense_manufacturing"]}
+    assert rule.threshold == {
+        "in": ["cannabis", "gambling", "crypto_native", "defense_manufacturing"]
+    }
 
 
 def test_gs_04_and_db_07_share_customer_concentration() -> None:
@@ -79,7 +81,7 @@ def test_gs_04_and_db_07_share_customer_concentration() -> None:
         (
             "version: track_b.v1\ntrack: B\nrules:\n"
             '  - id: gs_01\n    kind: green_signal\n    question: "q"\n'
-            '    evaluator: not_a_real_evaluator\n    evidence: {claim: revenue}\n'
+            "    evaluator: not_a_real_evaluator\n    evidence: {claim: revenue}\n"
             + "\n".join(
                 f'  - id: {rid}\n    kind: green_signal\n    question: "q"\n'
                 f"    evaluator: deterministic\n    evidence: {{claim: revenue}}"
