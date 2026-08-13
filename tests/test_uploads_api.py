@@ -404,12 +404,14 @@ def test_complete_happy_path_creates_row_enqueues_one_job_writes_one_audit_row(
     assert len(mocked_complete["enqueue_calls"]) == 1
     job_name, kwargs = mocked_complete["enqueue_calls"][0]
     assert job_name == "ingest_data_source"
-    assert kwargs == {
-        "data_source_id": upload_id,
-        "clerk_org_id": seeded_org["clerk_org_id"],
-        "storage_key": row[1],
-        "declared_sha256": "1" * 64,
-    }
+    assert kwargs["data_source_id"] == upload_id
+    assert kwargs["clerk_org_id"] == seeded_org["clerk_org_id"]
+    assert kwargs["storage_key"] == row[1]
+    assert kwargs["declared_sha256"] == "1" * 64
+    # SAQ's 10s default timeout is shorter than stream_and_hash's real round
+    # trip to Spaces -- see app/api/uploads.py's enqueue call.
+    assert kwargs["timeout"] == 120
+    assert kwargs["retries"] == 2
 
     # Exactly one human_audit_log row.
     assert _count_audit_rows(owner_conn, seeded_org["org_pk"]) == 1
