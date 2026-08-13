@@ -81,20 +81,15 @@ async def start_deal_screening(
             decision, org_id=org_id, deal_id=deal_uuid, analysis_run_id=run_id
         )
 
-        # Frontend-facing summary, same camelCase shape as the other stages'
-        # job_comments. One entry, not one per document: screening is a
-        # deal-level judgment, not a per-document one.
-        summary = _summarize(decision)
-        await run_repo.update_progress(
-            run_id,
-            status="successful",
-            job_comments=[
-                {
-                    "status": decision.recommendation,
-                    "comment": summary,
-                }
-            ],
-        )
+        # Deliberately NO job_comments. That column's shape is per-DOCUMENT
+        # (JobCommentResponse: dataSourceId/fileName/status/comment) and
+        # screening is a deal-level judgment with no document to attribute a
+        # verdict to. Writing a deal-level entry there made
+        # GET /deals/{id}/status fail response validation outright once a
+        # screening row became the deal's latest run. The screening outcome
+        # belongs to screening_result and the audit payload below; the
+        # status endpoint keeps showing the verification run's comments.
+        await run_repo.update_progress(run_id, status="successful")
         await HumanAuditRepo(session).append(
             {
                 "org_id": org_id,
@@ -107,6 +102,7 @@ async def start_deal_screening(
                     "status": "successful",
                     "recommendation": decision.recommendation,
                     "rulebook_version": decision.rulebook_version,
+                    "summary": _summarize(decision),
                     # Full per-rule detail, so the append-only trail carries
                     # the evidence independently of the mutable-by-DDL
                     # screening_result table.

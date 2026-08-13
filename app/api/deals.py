@@ -363,6 +363,11 @@ async def get_deal_status(
     # a step whose own run has a real ended_at -- i.e. one that's actually
     # finished, never a guess at one still in progress.
     step_durations: dict[str, int] = {}
+    # Bound here, not only in the else-branch below: the screening branch
+    # reads it, and while that branch is only reachable when job_name is not
+    # "parsing", relying on that coupling would break the moment either
+    # condition moved.
+    verification_run: AnalysisRun | None = None
     if run.job_name == "parsing":
         chain_started_at = run.started_at
         parsing_seconds = _run_seconds(run)
@@ -374,7 +379,16 @@ async def get_deal_status(
         parsing_seconds = _run_seconds(parsing_run) if parsing_run is not None else None
         if parsing_seconds is not None:
             step_durations["parsing"] = parsing_seconds
-        verification_seconds = _run_seconds(run)
+        # The verification duration must come from the VERIFICATION row, not
+        # from `run` -- once screening became the latest row (SIM-404),
+        # `_run_seconds(run)` would file screening's own elapsed time under
+        # step_durations["verification"] and misreport it.
+        verification_run = (
+            run
+            if run.job_name == "verification"
+            else await AnalysisRunRepo(db).latest_by_job_name(deal_id, "verification")
+        )
+        verification_seconds = _run_seconds(verification_run) if verification_run else None
         if verification_seconds is not None:
             step_durations["verification"] = verification_seconds
     ended_at = run.ended_at
@@ -413,6 +427,43 @@ async def get_deal_status(
             step_durations=step_durations,
             error_message=run.error_message,
             job_comments=run.job_comments,
+        )
+
+    if run.job_name == "screening":
+        # SIM-404. Both TRACKED steps (parsing, verification) are already
+        # done by the time a screening row exists, so every listed step is
+        # "done" and current_phase is past the end -- the same
+        # "governance" shape verification-successful returns. No screening
+        # step is added to PIPELINE_STEPS on purpose: that list is ported
+        # from Simpero_AI_Gov_Web's pipelineSteps.ts and must stay in sync
+        # with it.
+        #
+        # job_comments deliberately comes from the VERIFICATION run, not
+        # this one. JobCommentResponse is a per-DOCUMENT shape
+        # (dataSourceId/fileName), and screening is a deal-level judgment
+        # with no document to attribute -- passing a screening row's own
+        # comments here fails response validation outright. The screening
+        # outcome is read from GET /deals/{deal_id}/screening instead.
+        verification_comments = verification_run.job_comments if verification_run else None
+        if run.status == "failed":
+            return DealStatusResponse(
+                job_status="error",
+                current_phase="governance",
+                steps=_steps_for_status("governance"),
+                started_at=chain_started_at,
+                ended_at=ended_at,
+                step_durations=step_durations,
+                error_message=run.error_message,
+                job_comments=verification_comments,
+            )
+        return DealStatusResponse(
+            job_status="processing",
+            current_phase="governance",
+            steps=_steps_for_status("governance"),
+            started_at=chain_started_at,
+            ended_at=ended_at,
+            step_durations=step_durations,
+            job_comments=verification_comments,
         )
 
     # job_name == "verification"

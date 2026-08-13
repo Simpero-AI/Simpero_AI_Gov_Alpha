@@ -124,8 +124,11 @@ async def test_prohibited_sector_writes_an_auto_decline_result(owner_conn, seede
     assert fired["evidence_ref"] == {"kind": "deal_field", "field": "sector", "value": "cannabis"}
 
     assert "analysis_screening_completed" in _audit_events(owner_conn, seeded_org["org_pk"])
-    assert "db_04" in run["job_comments"][0]["comment"]
-    assert run["job_comments"][0]["status"] == "auto_decline"
+
+    # No job_comments: that column is a per-DOCUMENT shape and screening is
+    # deal-level. Writing one broke GET /deals/{id}/status response
+    # validation -- see test_deal_status_survives_a_screening_run.
+    assert run["job_comments"] is None
 
 
 async def test_a_bare_deal_reaches_human_review(owner_conn, seeded_org):
@@ -169,6 +172,37 @@ async def test_the_audit_payload_carries_the_full_per_rule_detail(owner_conn, se
     assert payload["recommendation"] == "auto_decline"
     assert payload["rulebook_version"] == "track_b.v1"
     assert payload["rule_results"][-1]["rule_id"] == "db_04"
+    # The human-readable line lives here now, not in job_comments.
+    assert "db_04" in payload["summary"]
+
+
+async def test_deal_status_survives_a_screening_run(owner_conn, seeded_org):
+    """Regression: once screening became the deal's LATEST analysis_run, the
+    status endpoint's `job_name == "verification"` block was a fallthrough
+    that caught it, and passed the screening row's deal-level job_comments
+    into JobCommentResponse (a per-document shape). That raised a
+    ValidationError -- a 500 on GET /deals/{id}/status for every deal that
+    finished screening. Builds the response the same way the handler does.
+    """
+    from app.schemas.deals import DealStatusResponse
+    from app.services.pipeline_steps import no_job_steps
+
+    deal_id = _seed_deal(owner_conn, seeded_org["org_pk"], sector="cannabis")
+    run_id = _seed_screening_run(owner_conn, seeded_org["org_pk"], deal_id)
+    await job_module.start_deal_screening(
+        {}, analysis_run_id=run_id, clerk_org_id=seeded_org["clerk_org_id"]
+    )
+
+    run = _fetch_run(owner_conn, run_id)
+    # The exact hand-off that used to blow up.
+    response = DealStatusResponse(
+        job_status="processing",
+        current_phase="governance",
+        steps=[{**s, "status": "done"} for s in no_job_steps()],
+        job_comments=run["job_comments"],
+    )
+    assert response.job_comments is None
+    assert response.current_phase == "governance"
 
 
 # --- failure and redelivery -------------------------------------------------
