@@ -12,6 +12,7 @@ from app.models.edge import Edge
 from app.models.human_audit_log import HumanAuditLog
 from app.models.investment_profile import InvestmentProfile
 from app.models.organisation import Funds, Organisation, Users
+from app.models.screening_result import ScreeningResult
 from app.models.session import Session
 
 __all__ = [
@@ -27,6 +28,7 @@ __all__ = [
     "Edge",
     "HumanAuditLog",
     "InvestmentProfile",
+    "ScreeningResult",
     "Session",
     "Organisation",
     "Funds",

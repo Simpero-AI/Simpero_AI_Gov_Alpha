@@ -21,6 +21,22 @@ job_module = importlib.import_module("app.jobs.tasks.start_deal_verification")
 
 
 @pytest.fixture
+def mocked_screening_enqueue(monkeypatch: pytest.MonkeyPatch):
+    """Mocks this module's own get_queue so a successful run's chain into
+    start_deal_screening (SIM-404) doesn't need a live Valkey. Same
+    _FakeQueue idiom as test_start_deal_analysis_job.py's
+    mocked_verification_enqueue, one stage further along the chain."""
+    enqueue_calls: list[tuple[str, dict[str, Any]]] = []
+
+    class _FakeQueue:
+        async def enqueue(self, job_name: str, **kwargs: Any) -> None:
+            enqueue_calls.append((job_name, kwargs))
+
+    monkeypatch.setattr(job_module, "get_queue", lambda: _FakeQueue())
+    return enqueue_calls
+
+
+@pytest.fixture
 def seeded_org(owner_conn) -> Iterator[dict[str, Any]]:
     clerk_org_id = f"test-tenant-{uuid.uuid4().hex[:8]}"
     with owner_conn.cursor() as cur:
@@ -125,7 +141,7 @@ def _fetch_edges(owner_conn, org_pk: int) -> list[tuple[str, str]]:
 
 
 async def test_ingests_claims_and_reconciles_same_page_fact(
-    owner_conn, seeded_org, seeded_deal, monkeypatch
+    owner_conn, seeded_org, seeded_deal, monkeypatch, mocked_screening_enqueue
 ):
     data_source_id = _seed_data_source(owner_conn, seeded_org["org_pk"], seeded_deal, "cim.pdf")
     parse_jobs = [
@@ -180,6 +196,27 @@ async def test_ingests_claims_and_reconciles_same_page_fact(
     assert run["job_comments"][0]["status"] == "verified"
     assert "2 claim(s) ingested" in run["job_comments"][0]["comment"]
     assert "1 same_fact" in run["job_comments"][0]["comment"]
+
+    # SIM-404: chains into a job_name="screening" row + enqueue. The row is
+    # created inside the job's transaction (uq_analysis_run_active is per
+    # DEAL, not per job_name, so it can only exist once this run is
+    # terminal), while the enqueue happens after the commit -- so by the time
+    # the enqueue is recorded the row must already be readable.
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, status FROM analysis_run WHERE deal_id = %s AND job_name = 'screening'",
+            (seeded_deal,),
+        )
+        screening_rows = cur.fetchall()
+    assert len(screening_rows) == 1
+    screening_run_id, screening_status = screening_rows[0]
+    assert screening_status == "queued"
+
+    assert len(mocked_screening_enqueue) == 1
+    job_name, kwargs = mocked_screening_enqueue[0]
+    assert job_name == "start_deal_screening"
+    assert kwargs["analysis_run_id"] == str(screening_run_id)
+    assert kwargs["clerk_org_id"] == seeded_org["clerk_org_id"]
 
 
 async def test_no_usable_documents_marks_run_failed(owner_conn, seeded_org, seeded_deal):

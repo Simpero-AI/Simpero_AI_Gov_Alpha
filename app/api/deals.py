@@ -14,6 +14,7 @@ from app.repo.AnalysisRunRepo import AnalysisRunRepo
 from app.repo.DataSourceRepo import DataSourceRepo
 from app.repo.DealRepo import DealRepo
 from app.repo.HumanAuditRepo import HumanAuditRepo
+from app.repo.ScreeningResultRepo import ScreeningResultRepo
 from app.repo.SessionRepo import SessionRepo
 from app.repo.UserRepo import UserRepo
 from app.schemas.deals import (
@@ -29,6 +30,7 @@ from app.schemas.deals import (
     LivePipelineRowResponse,
     PipelineStepResponse,
     PipelineValueStat,
+    ScreeningResultResponse,
     StartAnalysisRequest,
     UpdateDealRequest,
     ValueDelta,
@@ -287,6 +289,49 @@ async def update_deal(
     )
 
     return _deal_row_response(updated)
+
+
+@router.get("/{deal_id}/screening", response_model=ScreeningResultResponse)
+async def get_deal_screening(
+    deal_id: uuid.UUID, db: AsyncSession = Depends(get_db)
+) -> ScreeningResultResponse:
+    """SIM-404: the deal's most recent screening pass -- recommendation,
+    rulebook version, and every rule's verdict with its evidence.
+
+    Deliberately its own endpoint rather than a new phase on
+    `GET /{deal_id}/status`: that response's `steps` list is ported from
+    Simpero_AI_Gov_Web's src/shared/pipelineSteps.ts and must stay in sync
+    with it (app/services/pipeline_steps.py), so adding a step there is a
+    cross-repo change. It also carries a known trap -- a listed phase no job
+    sets gets marked "done" once current_phase moves past its index, which
+    told users stages had run that never did. Screening reads cleanly as its
+    own resource, so nothing about the frontend contract has to move for it.
+
+    404 distinguishes the two real cases in its detail: no such deal, versus
+    a deal that simply has not been screened yet.
+    """
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    result = await ScreeningResultRepo(db).latest_for_deal(deal_id)
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="This deal has not been screened yet",
+        )
+
+    return ScreeningResultResponse(
+        id=str(result.id),
+        deal_id=str(result.deal_id),
+        analysis_run_id=str(result.analysis_run_id) if result.analysis_run_id else None,
+        rulebook_version=result.rulebook_version,
+        recommendation=result.recommendation,
+        # Stored shape == wire shape (RuleResult.to_json), so this validates
+        # the persisted rows rather than rebuilding them field by field.
+        rule_results=result.rule_results,
+        created_at=result.created_at,
+    )
 
 
 @router.get("/{deal_id}/status", response_model=DealStatusResponse)
