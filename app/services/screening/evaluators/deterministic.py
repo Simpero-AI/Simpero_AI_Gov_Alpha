@@ -23,6 +23,7 @@ from app.services.screening.claims_lookup import (
     claim_ref,
     customer_concentration_claim,
     select_claim,
+    share_as_fraction,
 )
 from app.services.screening.rulebook import Rulebook
 from app.services.screening.types import DealField, RuleResult
@@ -55,7 +56,20 @@ async def evaluate_gs_04(session: AsyncSession, deal: Deal, rulebook: Rulebook) 
             "deterministic",
             reason="customer_concentration not extracted",
         )
-    verdict = "Y" if claim.value["normalized"] <= rule.threshold["max_customer_share_lte"] else "N"
+    share = share_as_fraction(claim)
+    if share is None:
+        return RuleResult(
+            "gs_04",
+            "unknown",
+            claim_ref(claim),
+            "deterministic",
+            reason=(
+                "customer_concentration is not readable as a 0-1 share "
+                f"(value={claim.value.get('normalized')!r}, "
+                f"unit={claim.value.get('unit')!r})"
+            ),
+        )
+    verdict = "Y" if share <= rule.threshold["max_customer_share_lte"] else "N"
     return RuleResult("gs_04", verdict, claim_ref(claim), "deterministic")
 
 
@@ -73,7 +87,23 @@ async def evaluate_db_07(session: AsyncSession, deal: Deal, rulebook: Rulebook) 
             "deterministic",
             reason="customer_concentration not extracted",
         )
-    verdict = "Y" if claim.value["normalized"] > rule.threshold["max_customer_share_gt"] else "N"
+    share = share_as_fraction(claim)
+    if share is None:
+        # Deliberately `unknown`, not N: this is the auto-decline path, and a
+        # figure we cannot read in known units must reach a human rather than
+        # silently clearing the deal-breaker.
+        return RuleResult(
+            "db_07",
+            "unknown",
+            claim_ref(claim),
+            "deterministic",
+            reason=(
+                "customer_concentration is not readable as a 0-1 share "
+                f"(value={claim.value.get('normalized')!r}, "
+                f"unit={claim.value.get('unit')!r})"
+            ),
+        )
+    verdict = "Y" if share > rule.threshold["max_customer_share_gt"] else "N"
     return RuleResult("db_07", verdict, claim_ref(claim), "deterministic")
 
 

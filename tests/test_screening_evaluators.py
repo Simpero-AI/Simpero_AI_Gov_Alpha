@@ -43,7 +43,14 @@ def _claim(
     status: str = "verified",
     verification_method: str | None = "human_review",
     flags: list[str] | None = None,
+    unit: str | None = "USD",
+    value_type: str = "currency",
 ) -> Claim:
+    """`unit`/`value_type` default to the currency shape most rules read, but
+    are overridable: customer_concentration arrives from the parser as a
+    PERCENT at face value (normalized=62.0, unit="%"), not a fraction, and
+    seeding it as currency-0.62 is what hid the units bug these tests now
+    cover -- see test_gs_04_reads_a_percent_claim_as_a_fraction."""
     return Claim(
         org_id=org_id,
         deal_id=deal_id,
@@ -53,10 +60,10 @@ def _claim(
         value={
             "raw": str(normalized),
             "normalized": normalized,
-            "unit": "USD",
+            "unit": unit,
             "scale_multiplier": 1,
             "scale_source": "explicit_in_value",
-            "value_type": "currency",
+            "value_type": value_type,
         },
         kind="pdf",
         page=1,
@@ -117,14 +124,24 @@ async def test_gs_03_untrusted_claim_status_treated_as_absent(db_session, org_a_
 # --- gs_04 / db_07: shared customer_concentration, independent thresholds --
 
 
+def _concentration(*, org_id: int, deal_id: uuid.UUID, percent: float) -> Claim:
+    """A customer_concentration claim in the shape the parser really emits:
+    a percent read at FACE VALUE (75% -> normalized 75.0, unit "%"), per
+    parser_service/scale.py::_self_scaling."""
+    return _claim(
+        org_id=org_id,
+        deal_id=deal_id,
+        attribute="customer_concentration",
+        normalized=percent,
+        unit="%",
+        value_type="percent",
+    )
+
+
 async def test_gs_04_and_db_07_share_one_claim_different_verdicts(db_session, org_a_id):
     deal = await _seed_deal(db_session, org_a_id)
-    # 0.75 trips db_07's >0.70 breaker but fails gs_04's <=0.50 green signal.
-    db_session.add(
-        _claim(
-            org_id=org_a_id, deal_id=deal.id, attribute="customer_concentration", normalized=0.75
-        )
-    )
+    # 75% trips db_07's >0.70 breaker and fails gs_04's <=0.50 green signal.
+    db_session.add(_concentration(org_id=org_a_id, deal_id=deal.id, percent=75.0))
     await db_session.flush()
 
     gs_04 = await _evaluate("gs_04", db_session, deal)
@@ -138,15 +155,102 @@ async def test_gs_04_and_db_07_share_one_claim_different_verdicts(db_session, or
 
 async def test_gs_04_y_when_concentration_low(db_session, org_a_id):
     deal = await _seed_deal(db_session, org_a_id)
-    db_session.add(
-        _claim(
-            org_id=org_a_id, deal_id=deal.id, attribute="customer_concentration", normalized=0.30
-        )
-    )
+    db_session.add(_concentration(org_id=org_a_id, deal_id=deal.id, percent=30.0))
     await db_session.flush()
 
     result = await _evaluate("gs_04", db_session, deal)
     assert result.verdict == "Y"
+
+
+async def test_gs_04_reads_a_percent_claim_as_a_fraction(db_session, org_a_id):
+    """Regression: the parser emits a percent at face value, the rulebook's
+    thresholds are fractions. Comparing 30.0 against 0.50 directly made a
+    HEALTHY 30% concentration fail gs_04's must-have."""
+    deal = await _seed_deal(db_session, org_a_id)
+    db_session.add(_concentration(org_id=org_a_id, deal_id=deal.id, percent=30.0))
+    await db_session.flush()
+
+    assert (await _evaluate("gs_04", db_session, deal)).verdict == "Y"
+
+
+async def test_db_07_does_not_auto_decline_a_healthy_concentration(db_session, org_a_id):
+    """Regression, the severe half: 30.0 > 0.70 was True, so a company whose
+    largest customer is 30% of revenue was AUTO-DECLINED by the deal-breaker.
+    A 30% concentration is nowhere near db_07's 70% bar."""
+    deal = await _seed_deal(db_session, org_a_id)
+    db_session.add(_concentration(org_id=org_a_id, deal_id=deal.id, percent=30.0))
+    await db_session.flush()
+
+    assert (await _evaluate("db_07", db_session, deal)).verdict == "N"
+
+
+async def test_concentration_boundary_is_exact_at_the_threshold(db_session, org_a_id):
+    """50.0% is `<= 0.50` (gs_04 Y) and 70.0% is not `> 0.70` (db_07 N) --
+    the two thresholds are inclusive/exclusive respectively, and float
+    division by 100 must not push either off its own boundary."""
+    deal_50 = await _seed_deal(db_session, org_a_id)
+    db_session.add(_concentration(org_id=org_a_id, deal_id=deal_50.id, percent=50.0))
+    deal_70 = await _seed_deal(db_session, org_a_id)
+    db_session.add(_concentration(org_id=org_a_id, deal_id=deal_70.id, percent=70.0))
+    await db_session.flush()
+
+    assert (await _evaluate("gs_04", db_session, deal_50)).verdict == "Y"
+    assert (await _evaluate("db_07", db_session, deal_70)).verdict == "N"
+
+
+async def test_concentration_as_a_ratio_claim_is_read_directly(db_session, org_a_id):
+    """The other legitimate shape: unit "ratio", already 0-1, no division."""
+    deal = await _seed_deal(db_session, org_a_id)
+    db_session.add(
+        _claim(
+            org_id=org_a_id,
+            deal_id=deal.id,
+            attribute="customer_concentration",
+            normalized=0.75,
+            unit="ratio",
+            value_type="ratio",
+        )
+    )
+    await db_session.flush()
+
+    assert (await _evaluate("gs_04", db_session, deal)).verdict == "N"
+    assert (await _evaluate("db_07", db_session, deal)).verdict == "Y"
+
+
+async def test_concentration_in_unreadable_units_is_unknown_not_a_verdict(db_session, org_a_id):
+    """A concentration claim carrying a currency unit is a figure we cannot
+    interpret as a share. It must reach a human -- crucially db_07 must NOT
+    fall through to N, which would silently clear an auto-decline."""
+    deal = await _seed_deal(db_session, org_a_id)
+    db_session.add(
+        _claim(
+            org_id=org_a_id,
+            deal_id=deal.id,
+            attribute="customer_concentration",
+            normalized=0.75,
+            unit="USD",
+            value_type="currency",
+        )
+    )
+    await db_session.flush()
+
+    gs_04 = await _evaluate("gs_04", db_session, deal)
+    db_07 = await _evaluate("db_07", db_session, deal)
+    assert gs_04.verdict == "unknown"
+    assert db_07.verdict == "unknown"
+    assert "0-1 share" in _reason(db_07)
+    # Evidence still points at the offending claim so a human can go look.
+    assert isinstance(db_07.evidence, ClaimRef)
+
+
+async def test_concentration_out_of_range_is_unknown(db_session, org_a_id):
+    """620% is a mis-scaled figure, not a real concentration. Fail closed."""
+    deal = await _seed_deal(db_session, org_a_id)
+    db_session.add(_concentration(org_id=org_a_id, deal_id=deal.id, percent=620.0))
+    await db_session.flush()
+
+    assert (await _evaluate("gs_04", db_session, deal)).verdict == "unknown"
+    assert (await _evaluate("db_07", db_session, deal)).verdict == "unknown"
 
 
 async def test_gs_04_unknown_when_not_extracted(db_session, org_a_id):

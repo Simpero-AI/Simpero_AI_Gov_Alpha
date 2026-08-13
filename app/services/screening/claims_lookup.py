@@ -89,5 +89,40 @@ async def customer_concentration_claim(
     )
 
 
+def share_as_fraction(claim: Claim) -> float | None:
+    """A claim's value as a 0-1 fraction, or None if it cannot be converted.
+
+    The parser reads a percent AT FACE VALUE -- "62%" emits
+    normalized=62.0, unit="%" (parser_service/scale.py::_self_scaling: a
+    percent "carries a unit mark, not a scale mark"). The rulebook's
+    thresholds are fractions (max_customer_share_lte: 0.50). Comparing the
+    two directly is a units bug with an inverted, auto-declining failure
+    mode: a healthy 30% concentration reads as 30.0, which is BOTH `> 0.50`
+    (gs_04 -> N, must-have wrongly failed) and `> 0.70` (db_07 -> Y, deal
+    wrongly auto-declined). Every unit conversion for a screening threshold
+    goes through here rather than being open-coded per evaluator.
+
+    Returns None -- never a guess -- when the unit is one this cannot
+    convert, or when the result falls outside 0-1 (a "share" of 620% is a
+    mis-scaled figure, not a real concentration). The caller turns that into
+    `unknown` with a reason, same fail-closed posture as the rest of this
+    module: a figure we cannot read in known units must reach a human, not a
+    binary verdict.
+    """
+    normalized = claim.value.get("normalized")
+    if normalized is None:
+        return None
+
+    value_type, unit = claim.value.get("value_type"), claim.value.get("unit")
+    if value_type == "percent" or unit == "%":
+        fraction = normalized / 100.0
+    elif value_type == "ratio" or unit == "ratio":
+        fraction = normalized
+    else:
+        return None
+
+    return fraction if 0.0 <= fraction <= 1.0 else None
+
+
 def claim_ref(claim: Claim) -> ClaimRef:
     return ClaimRef(claim_id=claim.id, attribute=claim.attribute, period_year=claim.period_year)
