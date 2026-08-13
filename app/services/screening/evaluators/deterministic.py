@@ -1,0 +1,247 @@
+"""Screening #2: pure-code evaluators for the deterministic Track B rules.
+
+No model calls anywhere in this module -- deterministic means deterministic
+(see tests/test_screening_no_llm_client.py's guard). Thresholds always come
+from the loaded rulebook (#1), never hardcoded here -- including db_04's
+prohibited-sector list, which already lives in track_b.yaml's own
+`threshold.in`; duplicating it in Python would create two sources of truth
+for the same policy. Python only owns the comparison logic YAML can't
+express (>, <=, "is in", the runway division, ...).
+
+`unknown` is mandatory whenever a required figure is absent -- never a
+default guess at Y or N.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Awaitable, Callable
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.deal import Deal
+from app.services.screening.claims_lookup import (
+    claim_ref,
+    customer_concentration_claim,
+    select_claim,
+)
+from app.services.screening.rulebook import Rulebook
+from app.services.screening.types import DealField, RuleResult
+from app.services.screening.workspace_config import load_workspace_config
+
+
+async def evaluate_gs_03(session: AsyncSession, deal: Deal, rulebook: Rulebook) -> RuleResult:
+    """Company has a paying customer (any revenue)."""
+    rule = rulebook.by_id["gs_03"]
+    assert rule.threshold is not None  # gs_03 always carries a threshold in track_b.yaml
+    claim = await select_claim(session, deal.id, "revenue")
+    if claim is None:
+        return RuleResult(
+            "gs_03", "unknown", None, "deterministic", reason="no revenue claim on the deal"
+        )
+    verdict = "Y" if claim.value["normalized"] > rule.threshold["revenue_gt"] else "N"
+    return RuleResult("gs_03", verdict, claim_ref(claim), "deterministic")
+
+
+async def evaluate_gs_04(session: AsyncSession, deal: Deal, rulebook: Rulebook) -> RuleResult:
+    """No single customer >50% of revenue."""
+    rule = rulebook.by_id["gs_04"]
+    assert rule.threshold is not None
+    claim = await customer_concentration_claim(session, deal.id)
+    if claim is None:
+        return RuleResult(
+            "gs_04",
+            "unknown",
+            None,
+            "deterministic",
+            reason="customer_concentration not extracted",
+        )
+    verdict = "Y" if claim.value["normalized"] <= rule.threshold["max_customer_share_lte"] else "N"
+    return RuleResult("gs_04", verdict, claim_ref(claim), "deterministic")
+
+
+async def evaluate_db_07(session: AsyncSession, deal: Deal, rulebook: Rulebook) -> RuleResult:
+    """Single customer >70% of revenue (deal-breaker). Reads the same
+    customer_concentration figure as gs_04, its own threshold."""
+    rule = rulebook.by_id["db_07"]
+    assert rule.threshold is not None
+    claim = await customer_concentration_claim(session, deal.id)
+    if claim is None:
+        return RuleResult(
+            "db_07",
+            "unknown",
+            None,
+            "deterministic",
+            reason="customer_concentration not extracted",
+        )
+    verdict = "Y" if claim.value["normalized"] > rule.threshold["max_customer_share_gt"] else "N"
+    return RuleResult("db_07", verdict, claim_ref(claim), "deterministic")
+
+
+async def evaluate_gs_06(session: AsyncSession, deal: Deal, rulebook: Rulebook) -> RuleResult:
+    """Founder retains >=10% equity post-close.
+
+    Sourced from Deal.founder_equity_post_close_pct (a structured deal
+    field, ticket #3's design decision), not a Claim -- post-close ownership
+    depends on the deal's proposed structure, which no extraction pipeline
+    computes today. The rulebook's `evidence: {claim: ...}` tag predates that
+    decision; deal_field is the real source.
+    """
+    rule = rulebook.by_id["gs_06"]
+    assert rule.threshold is not None
+    value = deal.founder_equity_post_close_pct
+    if value is None:
+        return RuleResult(
+            "gs_06",
+            "unknown",
+            None,
+            "deterministic",
+            reason="founder_equity_post_close_pct not set on the deal",
+        )
+    verdict = "Y" if value >= rule.threshold["founder_equity_gte"] else "N"
+    return RuleResult(
+        "gs_06", verdict, DealField("founder_equity_post_close_pct", value), "deterministic"
+    )
+
+
+async def evaluate_gs_07(session: AsyncSession, deal: Deal, rulebook: Rulebook) -> RuleResult:
+    """HQ in approved geography."""
+    if deal.hq_geography is None:
+        return RuleResult(
+            "gs_07", "unknown", None, "deterministic", reason="hq_geography not set on the deal"
+        )
+    config = await load_workspace_config(session)
+    if config.approved_geographies is None:
+        return RuleResult(
+            "gs_07",
+            "unknown",
+            None,
+            "deterministic",
+            reason="approved_geographies not configured for this workspace",
+        )
+    verdict = "Y" if deal.hq_geography in config.approved_geographies else "N"
+    return RuleResult(
+        "gs_07", verdict, DealField("hq_geography", deal.hq_geography), "deterministic"
+    )
+
+
+async def evaluate_gs_08(session: AsyncSession, deal: Deal, rulebook: Rulebook) -> RuleResult:
+    """Operates in approved sector."""
+    if deal.sector is None:
+        return RuleResult(
+            "gs_08", "unknown", None, "deterministic", reason="sector not set on the deal"
+        )
+    config = await load_workspace_config(session)
+    if config.approved_sectors is None:
+        return RuleResult(
+            "gs_08",
+            "unknown",
+            None,
+            "deterministic",
+            reason="approved_sectors not configured for this workspace",
+        )
+    verdict = "Y" if deal.sector in config.approved_sectors else "N"
+    return RuleResult("gs_08", verdict, DealField("sector", deal.sector), "deterministic")
+
+
+async def evaluate_db_04(session: AsyncSession, deal: Deal, rulebook: Rulebook) -> RuleResult:
+    """Sector is prohibited (cannabis/gambling/crypto-native/defense
+    manufacturing). The prohibited list is fixed/global -- read straight off
+    the rulebook's own threshold, not workspace config (unlike gs_08's
+    approved list, which is genuinely per-org)."""
+    rule = rulebook.by_id["db_04"]
+    assert rule.threshold is not None
+    if deal.sector is None:
+        return RuleResult(
+            "db_04", "unknown", None, "deterministic", reason="sector not set on the deal"
+        )
+    verdict = "Y" if deal.sector in rule.threshold["in"] else "N"
+    return RuleResult("db_04", verdict, DealField("sector", deal.sector), "deterministic")
+
+
+async def evaluate_db_01_gate(session: AsyncSession, deal: Deal, rulebook: Rulebook) -> RuleResult:
+    """No paying customers and no signed LOIs/pilots -- deterministic gate
+    only. This evaluator never returns Y: a full Y verdict needs the LLM
+    LOI/pilot check ticket #5 supplies. revenue > 0 clears the gate (N, no
+    model call needed); revenue == 0 defers to #5 and stays `unknown` here,
+    distinguished by its reason from the missing-claim case."""
+    rule = rulebook.by_id["db_01"]
+    assert rule.threshold is not None
+    claim = await select_claim(session, deal.id, "revenue")
+    if claim is None:
+        return RuleResult(
+            "db_01", "unknown", None, "deterministic", reason="no revenue claim on the deal"
+        )
+    if claim.value["normalized"] > rule.threshold["revenue_eq"]:
+        return RuleResult("db_01", "N", claim_ref(claim), "deterministic")
+    return RuleResult(
+        "db_01",
+        "unknown",
+        claim_ref(claim),
+        "deterministic",
+        reason=(
+            "revenue == 0 -- gate cleared for the LLM LOI/pilot check "
+            "(ticket #5), not resolved here"
+        ),
+    )
+
+
+async def evaluate_db_02_gate(session: AsyncSession, deal: Deal, rulebook: Rulebook) -> RuleResult:
+    """Runway <6 months with no active raise -- deterministic gate only.
+    runway = cash_and_equivalents / monthly_burn, computed here (not an
+    extracted figure). Both claims must resolve, and burn must be nonzero,
+    or the result is `unknown` -- a zero burn is a data-quality case this
+    evaluator can't respectably resolve either way, not a real green signal.
+    runway >= 6mo clears the gate (N, no model call needed); runway < 6mo
+    defers to #5's active-raise check and stays `unknown` here."""
+    rule = rulebook.by_id["db_02"]
+    assert rule.threshold is not None
+    cash = await select_claim(session, deal.id, "cash_and_equivalents")
+    burn = await select_claim(session, deal.id, "monthly_burn")
+    if cash is None or burn is None:
+        missing = [
+            name
+            for name, claim in (("cash_and_equivalents", cash), ("monthly_burn", burn))
+            if claim is None
+        ]
+        return RuleResult(
+            "db_02",
+            "unknown",
+            None,
+            "deterministic",
+            reason=f"{' and '.join(missing)} claim not available",
+        )
+    burn_value = burn.value["normalized"]
+    if burn_value == 0:
+        return RuleResult(
+            "db_02",
+            "unknown",
+            claim_ref(burn),
+            "deterministic",
+            reason="monthly_burn is zero -- runway undefined",
+        )
+    runway_months = cash.value["normalized"] / burn_value
+    if runway_months >= rule.threshold["runway_months_lt"]:
+        return RuleResult("db_02", "N", claim_ref(cash), "deterministic")
+    return RuleResult(
+        "db_02",
+        "unknown",
+        claim_ref(cash),
+        "deterministic",
+        reason=(
+            "runway < 6 months -- gate cleared for the LLM active-raise check "
+            "(ticket #5), not resolved here"
+        ),
+    )
+
+
+EVALUATORS: dict[str, Callable[[AsyncSession, Deal, Rulebook], Awaitable[RuleResult]]] = {
+    "gs_03": evaluate_gs_03,
+    "gs_04": evaluate_gs_04,
+    "gs_06": evaluate_gs_06,
+    "gs_07": evaluate_gs_07,
+    "gs_08": evaluate_gs_08,
+    "db_01": evaluate_db_01_gate,
+    "db_02": evaluate_db_02_gate,
+    "db_04": evaluate_db_04,
+    "db_07": evaluate_db_07,
+}
