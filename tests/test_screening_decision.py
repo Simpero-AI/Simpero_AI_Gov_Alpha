@@ -13,26 +13,38 @@ claims: they prove the engine and the evaluators actually compose.
 from __future__ import annotations
 
 import uuid
+from typing import cast
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.deal import Deal
 from app.repo.DealRepo import DealRepo
 from app.services.screening import decision as decision_module
 from app.services.screening.decision import ScreeningDecision, ordered_rule_ids, screen_deal
 from app.services.screening.rulebook import load_rulebook
-from app.services.screening.types import ClaimRef, DealField, RuleResult
+from app.services.screening.types import ClaimRef, DealField, RuleResult, Verdict
 
 RULEBOOK = load_rulebook()
 
 _GREEN_IDS = [r.id for r in RULEBOOK.rules if r.kind == "green_signal"]
 _BREAKER_IDS = [r.id for r in RULEBOOK.rules if r.kind == "deal_breaker"]
 
+# The stubbed-evaluator tests below drive the engine's DECISION logic only:
+# _stub_evaluators replaces evaluate_rule wholesale, so neither the session
+# nor the deal is ever dereferenced on those paths. Casting None is the
+# honest way to say "unused here" -- a real Deal()/AsyncSession would imply
+# these tests exercise them, which is what the DB-backed cases at the bottom
+# of this module are for.
+_UNUSED_SESSION = cast(AsyncSession, None)
+_UNUSED_DEAL = cast(Deal, None)
+
 
 def _evidence(rule_id: str) -> DealField:
     return DealField(f"{rule_id}_field", "seeded")
 
 
-def _stub_evaluators(monkeypatch, verdicts: dict[str, str], *, calls: list[str] | None = None):
+def _stub_evaluators(monkeypatch, verdicts: dict[str, Verdict], *, calls: list[str] | None = None):
     """Drive the engine with a fixed verdict per rule id, so a test states
     only the rules it cares about.
 
@@ -48,8 +60,8 @@ def _stub_evaluators(monkeypatch, verdicts: dict[str, str], *, calls: list[str] 
     async def fake_evaluate_rule(rule_id, session, deal, rulebook):
         if calls is not None:
             calls.append(rule_id)
-        passing = "Y" if rulebook.by_id[rule_id].kind == "green_signal" else "N"
-        verdict = verdicts.get(rule_id, passing)
+        passing: Verdict = "Y" if rulebook.by_id[rule_id].kind == "green_signal" else "N"
+        verdict: Verdict = verdicts.get(rule_id, passing)
         return RuleResult(
             rule_id,
             verdict,
@@ -78,7 +90,7 @@ def test_deal_breakers_are_ordered_before_green_signals():
 
 async def test_deal_breaker_auto_declines_and_cites_the_rule(monkeypatch):
     _stub_evaluators(monkeypatch, {"db_04": "Y"})
-    result = await screen_deal(None, None, RULEBOOK)
+    result = await screen_deal(_UNUSED_SESSION, _UNUSED_DEAL, RULEBOOK)
 
     assert result.recommendation == "auto_decline"
     assert result.triggered_by is not None
@@ -93,7 +105,7 @@ async def test_auto_decline_stops_evaluating(monkeypatch):
     ignored' is materially different from 'not evaluated'."""
     calls: list[str] = []
     _stub_evaluators(monkeypatch, {"db_01": "Y"}, calls=calls)
-    result = await screen_deal(None, None, RULEBOOK)
+    result = await screen_deal(_UNUSED_SESSION, _UNUSED_DEAL, RULEBOOK)
 
     assert result.recommendation == "auto_decline"
     assert calls == ["db_01"], "db_01 is the first breaker; nothing after it should run"
@@ -105,7 +117,7 @@ async def test_auto_decline_stops_evaluating(monkeypatch):
 async def test_first_breaker_in_order_wins(monkeypatch):
     calls: list[str] = []
     _stub_evaluators(monkeypatch, {"db_04": "Y", "db_07": "Y"}, calls=calls)
-    result = await screen_deal(None, None, RULEBOOK)
+    result = await screen_deal(_UNUSED_SESSION, _UNUSED_DEAL, RULEBOOK)
 
     assert result.triggered_by is not None
     assert result.triggered_by.rule_id == "db_04"
@@ -116,7 +128,7 @@ async def test_unknown_deal_breaker_does_not_auto_decline(monkeypatch):
     """The core safety property: `unknown` never auto-declines. A breaker we
     could not evaluate must reach a human, not decline the deal."""
     _stub_evaluators(monkeypatch, {"db_09": "unknown"})
-    result = await screen_deal(None, None, RULEBOOK)
+    result = await screen_deal(_UNUSED_SESSION, _UNUSED_DEAL, RULEBOOK)
 
     assert result.recommendation == "human_review"
     assert result.triggered_by is None
@@ -128,7 +140,7 @@ async def test_unknown_deal_breaker_also_blocks_green(monkeypatch):
     still be Y. Treating an unresolved breaker as "no breaker found" would
     recommend GREEN on a deal whose sanctions check never ran."""
     _stub_evaluators(monkeypatch, {"db_09": "unknown"})
-    result = await screen_deal(None, None, RULEBOOK)
+    result = await screen_deal(_UNUSED_SESSION, _UNUSED_DEAL, RULEBOOK)
 
     assert result.recommendation == "human_review"
     assert [r.rule_id for r in result.blocking] == ["db_09"]
@@ -138,10 +150,12 @@ async def test_a_breaker_only_clears_green_on_a_definite_n(monkeypatch):
     """N clears it, `unknown` does not -- the distinction the fail-closed
     posture rests on."""
     _stub_evaluators(monkeypatch, {"db_05": "N"})
-    assert (await screen_deal(None, None, RULEBOOK)).recommendation == "green"
+    assert (await screen_deal(_UNUSED_SESSION, _UNUSED_DEAL, RULEBOOK)).recommendation == "green"
 
     _stub_evaluators(monkeypatch, {"db_05": "unknown"})
-    assert (await screen_deal(None, None, RULEBOOK)).recommendation == "human_review"
+    assert (
+        await screen_deal(_UNUSED_SESSION, _UNUSED_DEAL, RULEBOOK)
+    ).recommendation == "human_review"
 
 
 # --- green / human_review ---------------------------------------------------
@@ -149,7 +163,7 @@ async def test_a_breaker_only_clears_green_on_a_definite_n(monkeypatch):
 
 async def test_all_green_signals_y_and_no_breaker_is_green(monkeypatch):
     _stub_evaluators(monkeypatch, {})  # everything Y
-    result = await screen_deal(None, None, RULEBOOK)
+    result = await screen_deal(_UNUSED_SESSION, _UNUSED_DEAL, RULEBOOK)
 
     assert result.recommendation == "green"
     assert result.blocking == ()
@@ -161,7 +175,7 @@ async def test_a_single_missing_must_have_blocks_green(monkeypatch, blocking_ver
     """Both an explicit N and an `unknown` block green -- neither satisfies a
     must-have -- and the result must say WHICH rule and why."""
     _stub_evaluators(monkeypatch, {"gs_05": blocking_verdict})
-    result = await screen_deal(None, None, RULEBOOK)
+    result = await screen_deal(_UNUSED_SESSION, _UNUSED_DEAL, RULEBOOK)
 
     assert result.recommendation == "human_review"
     assert [r.rule_id for r in result.blocking] == ["gs_05"]
@@ -170,7 +184,7 @@ async def test_a_single_missing_must_have_blocks_green(monkeypatch, blocking_ver
 
 async def test_blocking_lists_every_unsatisfied_must_have(monkeypatch):
     _stub_evaluators(monkeypatch, {"gs_01": "N", "gs_09": "unknown", "gs_11": "unknown"})
-    result = await screen_deal(None, None, RULEBOOK)
+    result = await screen_deal(_UNUSED_SESSION, _UNUSED_DEAL, RULEBOOK)
 
     assert result.recommendation == "human_review"
     assert [r.rule_id for r in result.blocking] == ["gs_01", "gs_09", "gs_11"]
@@ -182,7 +196,7 @@ async def test_a_failing_deal_breaker_n_does_not_block_green(monkeypatch):
     """N on a deal-breaker is the GOOD outcome ("this deal-breaker does not
     apply") -- it must not be counted as a missing must-have."""
     _stub_evaluators(monkeypatch, {rid: "N" for rid in _BREAKER_IDS})
-    result = await screen_deal(None, None, RULEBOOK)
+    result = await screen_deal(_UNUSED_SESSION, _UNUSED_DEAL, RULEBOOK)
 
     assert result.recommendation == "green"
     assert result.blocking == ()
@@ -193,7 +207,7 @@ async def test_a_failing_deal_breaker_n_does_not_block_green(monkeypatch):
 
 async def test_every_non_unknown_result_carries_evidence(monkeypatch):
     _stub_evaluators(monkeypatch, {"gs_02": "unknown"})
-    result = await screen_deal(None, None, RULEBOOK)
+    result = await screen_deal(_UNUSED_SESSION, _UNUSED_DEAL, RULEBOOK)
 
     for rule_result in result.results:
         if rule_result.verdict == "unknown":
@@ -207,7 +221,7 @@ async def test_unknown_results_carry_zero_confidence(monkeypatch):
     """An `unknown` is the absence of a verdict. Letting it inherit the 1.0
     default would tell the audit trail we were certain."""
     _stub_evaluators(monkeypatch, {"gs_02": "unknown"})
-    result = await screen_deal(None, None, RULEBOOK)
+    result = await screen_deal(_UNUSED_SESSION, _UNUSED_DEAL, RULEBOOK)
 
     by_id = {r.rule_id: r for r in result.results}
     assert by_id["gs_02"].confidence == 0.0

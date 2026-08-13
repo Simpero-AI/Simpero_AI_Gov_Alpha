@@ -184,7 +184,7 @@ async def test_deal_status_survives_a_screening_run(owner_conn, seeded_org):
     ValidationError -- a 500 on GET /deals/{id}/status for every deal that
     finished screening. Builds the response the same way the handler does.
     """
-    from app.schemas.deals import DealStatusResponse
+    from app.schemas.deals import DealStatusResponse, PipelineStepResponse
     from app.services.pipeline_steps import no_job_steps
 
     deal_id = _seed_deal(owner_conn, seeded_org["org_pk"], sector="cannabis")
@@ -198,7 +198,12 @@ async def test_deal_status_survives_a_screening_run(owner_conn, seeded_org):
     response = DealStatusResponse(
         job_status="processing",
         current_phase="governance",
-        steps=[{**s, "status": "done"} for s in no_job_steps()],
+        steps=[
+            PipelineStepResponse(
+                phase=s["phase"], title=s["title"], detail=s["detail"], status="done"
+            )
+            for s in no_job_steps()
+        ],
         job_comments=run["job_comments"],
     )
     assert response.job_comments is None
