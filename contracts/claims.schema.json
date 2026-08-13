@@ -35,6 +35,7 @@
         "operating_cash_flow",
         "free_cash_flow",
         "operating_metric",
+        "core_unmapped",
         "customer_concentration",
         "monthly_burn"
       ]

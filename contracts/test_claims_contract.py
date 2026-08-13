@@ -62,6 +62,7 @@ CANONICAL_ATTRIBUTES: frozenset[str] = frozenset(
         "operating_cash_flow",
         "free_cash_flow",
         "operating_metric",
+        "core_unmapped",
         "customer_concentration",
         "monthly_burn",
     }
@@ -429,6 +430,22 @@ def test_monthly_burn_accepted_once_e2_has_run(validator: Draft202012Validator) 
         "attribute_raw": "Monthly cash burn",
     }
     assert not list(validator.iter_errors(ok)), "monthly_burn must validate once E2 has run"
+
+
+def test_core_unmapped_accepted_once_e2_has_run(validator: Draft202012Validator) -> None:
+    # SIM-384's catch-all, and the reason this test exists: the parser really
+    # emits core_unmapped (it is in emit.CANONICAL_ATTRIBUTES), but this
+    # repo's copy of the enum was missing it. Since
+    # app/jobs/tasks/start_deal_verification.py::_validate_claims RAISES on
+    # the first contract violation, one core_unmapped claim in a real parse
+    # failed the deal's ENTIRE verification run -- not just that claim. This
+    # test is the regression guard for that, not a vocabulary formality.
+    ok = {
+        **VALID_PDF_CLAIM,
+        "attribute": "core_unmapped",
+        "attribute_raw": "Adjusted contribution margin (pre-allocation)",
+    }
+    assert not list(validator.iter_errors(ok)), "core_unmapped must validate once E2 has run"
 
 
 def test_attribute_unconstrained_when_attribute_raw_is_null(
