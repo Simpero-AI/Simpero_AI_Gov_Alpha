@@ -154,12 +154,18 @@ async def complete_upload(
     # "simpero" queue -- this app's own SAQ worker. Never get_parse_queue()'s
     # "parse" queue, which targets a different service's worker that doesn't
     # consume this job name; getting this backwards silently drops the job.
+    # Explicit timeout: SAQ's default is 10s, and stream_and_hash's round trip
+    # to Spaces for a real document routinely runs longer than that -- a job
+    # cancelled by SAQ mid-UPDATE rolls back, leaving the row stuck "pending"
+    # with no automatic retry (default retries=1 doesn't cover a timeout kill).
     await get_queue().enqueue(
         "ingest_data_source",
         data_source_id=str(upload_id),
         clerk_org_id=claims["tenant_id"],
         storage_key=storage_key,
         declared_sha256=body.declared_sha256,
+        timeout=120,
+        retries=2,
     )
 
     org_id, actor_id, actor_email = await _actor(db, claims)
