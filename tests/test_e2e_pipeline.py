@@ -32,7 +32,7 @@ import pytest
 from sqlalchemy import func, select, text
 
 from app.core.database import AsyncSessionLocal
-from app.models import Chunk, Claim, Organisation
+from app.models import Chunk, Claim, Deal, Organisation
 from app.models.chunk import EMBEDDING_DIM
 from app.models.organisation import OrgType
 from app.services.retrieval import hybrid_search
@@ -102,7 +102,7 @@ def _load(name: str) -> dict:
 def _delete_org(org_key: str) -> None:
     conn = _owner_conn()
     cur = conn.cursor()
-    for table in ("chunks", "claims"):
+    for table in ("chunks", "claims", "deals"):
         cur.execute(
             f"DELETE FROM {table} WHERE org_id IN "
             "(SELECT id FROM organisation WHERE clerk_org_id = %s)",
@@ -129,7 +129,13 @@ async def _ingest(org_key: str, claims: list[dict], chunks: list[dict]) -> None:
             session.add(org)
             await session.flush()
         org_id = org.id
-        session.add_all(_row_from_claim(c, org_id, session_id) for c in claims)
+        deal = await session.scalar(select(Deal).where(Deal.org_id == org_id))
+        if deal is None:
+            deal = Deal(org_id=org_id, name=f"L1 e2e deal ({org_key})")
+            session.add(deal)
+            await session.flush()
+        deal_id = deal.id
+        session.add_all(_row_from_claim(c, org_id, deal_id, session_id) for c in claims)
         for c in chunks:
             row = _row_from_chunk(c, org_id, embedding=None, embedding_version=None)
             # SIM-218 (migration 77be2ddc60a0) added the FK

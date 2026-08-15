@@ -6,14 +6,30 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
 
+def _insert_deal(cur, org_pk: int) -> str:
+    """Reuses an existing deal for this org if one exists (org_a_id is a
+    reused, ON CONFLICT DO NOTHING test org), else creates one -- claims.deal_id
+    is a required FK now."""
+    cur.execute("SELECT id FROM deals WHERE org_id = %s LIMIT 1", (org_pk,))
+    row = cur.fetchone()
+    if row is not None:
+        return str(row[0])
+    cur.execute(
+        "INSERT INTO deals (org_id, name) VALUES (%s, 'Test Deal') RETURNING id",
+        (org_pk,),
+    )
+    return str(cur.fetchone()[0])
+
+
 def _insert_claim(cur, org_pk: int) -> str:
     """Minimal valid claims row (satisfies the CHECK constraints in
     60a151dd80b0) for corroboration_events.claim_id to point at."""
+    deal_pk = _insert_deal(cur, org_pk)
     cur.execute(
-        "INSERT INTO claims (org_id, entity, attribute, value, kind, page, status) "
-        "VALUES (%s, 'Test Entity', 'test_attr', '{}'::jsonb, 'pdf', 1, 'missing') "
+        "INSERT INTO claims (org_id, deal_id, entity, attribute, value, kind, page, status) "
+        "VALUES (%s, %s, 'Test Entity', 'test_attr', '{}'::jsonb, 'pdf', 1, 'missing') "
         "RETURNING id",
-        (org_pk,),
+        (org_pk, deal_pk),
     )
     return str(cur.fetchone()[0])
 
@@ -66,6 +82,7 @@ def org_b_event_id(owner_conn) -> Iterator[str]:
             "DELETE FROM corroboration_events WHERE id = %s", (event_id,)
         )  # doadmin only — dd_app can never do this, see immutability tests below
         cur.execute("DELETE FROM claims WHERE id = %s", (claim_id,))
+        cur.execute("DELETE FROM deals WHERE org_id = %s", (org_b_pk,))
         cur.execute("DELETE FROM organisation WHERE id = %s", (org_b_pk,))
 
 

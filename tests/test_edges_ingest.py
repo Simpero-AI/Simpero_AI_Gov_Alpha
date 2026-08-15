@@ -114,7 +114,7 @@ def _delete_org(org_key: str) -> None:
     conn = psycopg2.connect(_owner_dsn())
     conn.autocommit = True
     cur = conn.cursor()
-    for table in ("edges", "claims"):
+    for table in ("edges", "claims", "deals"):
         cur.execute(
             f"DELETE FROM {table} WHERE org_id IN "
             "(SELECT id FROM organisation WHERE clerk_org_id = %s)",

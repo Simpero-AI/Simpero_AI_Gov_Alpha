@@ -16,7 +16,7 @@ import pytest
 from sqlalchemy import select, text
 
 from app.core.database import AsyncSessionLocal
-from app.models import Claim, Edge, Organisation
+from app.models import Claim, Deal, Edge, Organisation
 from app.models.organisation import OrgType
 from app.services.consistency import DEFAULT_RULES, ConsistencySummary, Rule, reconcile_consistency
 
@@ -53,7 +53,7 @@ def _delete_org(org_key: str) -> None:
     conn = psycopg2.connect(_owner_dsn())
     conn.autocommit = True
     cur = conn.cursor()
-    for table in ("edges", "claims"):
+    for table in ("edges", "claims", "deals"):
         cur.execute(
             f"DELETE FROM {table} WHERE org_id IN "
             "(SELECT id FROM organisation WHERE clerk_org_id = %s)",
@@ -104,8 +104,12 @@ async def _seed(org_key: str, claims: dict[str, Claim]) -> dict[str, uuid.UUID]:
         )
         session.add(org)
         await session.flush()
+        deal = Deal(org_id=org.id, name=f"consistency test deal ({org_key})")
+        session.add(deal)
+        await session.flush()
         for c in claims.values():
             c.org_id = org.id
+            c.deal_id = deal.id
         session.add_all(claims.values())
         await session.flush()
         return {label: c.id for label, c in claims.items()}
