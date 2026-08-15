@@ -47,6 +47,8 @@ async def recent_activity(
                 action=row.event_type,
                 session_id=str(row.session_id) if row.session_id else None,
                 job_id=None,
+                actor_email=row.actor_email,
+                payload=row.payload,
             )
             for row in rows
         ],

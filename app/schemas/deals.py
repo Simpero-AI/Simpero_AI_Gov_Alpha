@@ -112,9 +112,10 @@ class LivePipelineRowResponse(CamelModel):
 class DealRowResponse(CamelModel):
     """The `deal` half of `DealWithLatestMemo`. No `userId` — deals are
     org-scoped in this backend, not user-scoped (deviation from the legacy
-    per-user DealRowShape; there's no user_id column on `deals`, see Phase 0).
-    `sector_tags` is a JSON string (parseSectorTags on the frontend), matching
-    the frozen contract's `DealRowShape.sectorTags: string`.
+    per-user DealRowShape; see Phase 0). `deals.user_id` exists in the DB as
+    creator metadata only — no query here filters on it. `sector_tags` is a
+    JSON string (parseSectorTags on the frontend), matching the frozen
+    contract's `DealRowShape.sectorTags: string`.
     """
 
     id: str

@@ -39,11 +39,13 @@ from app.services.pipeline_steps import no_job_steps
 router = APIRouter(prefix="/deals", tags=["deals"])
 
 
-async def _actor(db: AsyncSession, claims: dict[str, Any]) -> tuple[int, str, str | None]:
-    """(org_id, actor_id, actor_email) for the audit rows this router appends."""
+async def _actor(db: AsyncSession, claims: dict[str, Any]) -> tuple[int, str, str | None, int]:
+    """(org_id, actor_id, actor_email, user_id) -- actor_id is the Clerk id
+    (audit rows), user_id is the local users.id (FK columns like
+    deals.user_id)."""
     user = await UserRepo(db).get_by_clerk_id(claims["user_id"])
     assert user is not None  # get_db JIT-provisions this row before the handler runs
-    return user.org_id, claims["user_id"], user.email
+    return user.org_id, claims["user_id"], user.email, user.id
 
 
 def _steps_for_status(
@@ -127,12 +129,13 @@ async def create_deal(
 ) -> CreateDealResponse:
     """deals.create. fund_id stays null — the frontend's contract has no fund
     field yet (see the comment on Deal.fund_id)."""
-    org_id, actor_id, actor_email = await _actor(db, claims)
+    org_id, actor_id, actor_email, user_id = await _actor(db, claims)
 
     deal = await DealRepo(db).create(
         {
             "id": uuid.uuid4(),
             "org_id": org_id,
+            "user_id": user_id,
             "name": body.name,
             "gp_source": body.gp_source,
             "deal_size_min_usd": body.deal_size_min_usd,
@@ -220,7 +223,7 @@ async def get_deal(
     if deal is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
 
-    org_id, actor_id, actor_email = await _actor(db, claims)
+    org_id, actor_id, actor_email, _ = await _actor(db, claims)
     await HumanAuditRepo(db).append(
         {
             "org_id": org_id,
@@ -399,7 +402,7 @@ async def start_analysis(
             detail="Documents are still being verified — try again in a moment",
         )
 
-    org_id, actor_id, actor_email = await _actor(db, claims)
+    org_id, actor_id, actor_email, _ = await _actor(db, claims)
 
     try:
         run = await analysis_repo.create(
