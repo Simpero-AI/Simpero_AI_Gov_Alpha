@@ -40,7 +40,7 @@ from pathlib import Path
 from sqlalchemy import func, select, text
 
 from app.core.database import AsyncSessionLocal
-from app.models import Claim, Edge, Organisation
+from app.models import Claim, Deal, Edge, Organisation
 from app.models.organisation import OrgType
 
 logger = logging.getLogger(__name__)
@@ -52,11 +52,12 @@ _CONTRACT = Path(__file__).parent.parent / "contracts" / "claims.schema.json"
 _LOCATION_COLUMNS = ("page", "char_start", "char_end", "bbox", "sheet", "cell_ref", "paragraph")
 
 
-def _row_from_claim(claim: dict, org_id: int, session_id: uuid.UUID) -> Claim:
+def _row_from_claim(claim: dict, org_id: int, deal_id: uuid.UUID, session_id: uuid.UUID) -> Claim:
     """One seam-JSON claim -> one Claim ORM row, flattening the location."""
     location = claim["location"]
     row = Claim(
         org_id=org_id,
+        deal_id=deal_id,
         # Which run produced this claim. Tagging every row makes two extraction
         # runs over the same document independently queryable in one table --
         # which is what a golden-set diff needs: compare THIS run against THAT
@@ -142,7 +143,17 @@ async def _run(payload: dict, org_key: str, commit: bool, session_id: uuid.UUID)
             await session.flush()  # assigns org.id
         org_id = org.id
 
-        rows = [_row_from_claim(c, org_id, session_id) for c in claims]
+        # The demo deal. Get-or-create, same reuse rationale as the org above:
+        # claims.deal_id is a required FK now, and this demo path has no real
+        # deal to point at, so it needs one of its own to reuse across reruns.
+        deal = await session.scalar(select(Deal).where(Deal.org_id == org_id))
+        if deal is None:
+            deal = Deal(org_id=org_id, name=f"E2E demo deal ({org_key})")
+            session.add(deal)
+            await session.flush()  # assigns deal.id
+        deal_id = deal.id
+
+        rows = [_row_from_claim(c, org_id, deal_id, session_id) for c in claims]
         session.add_all(rows)
         await session.flush()
 
