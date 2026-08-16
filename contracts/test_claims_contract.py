@@ -62,6 +62,9 @@ CANONICAL_ATTRIBUTES: frozenset[str] = frozenset(
         "operating_cash_flow",
         "free_cash_flow",
         "operating_metric",
+        "core_unmapped",
+        "customer_concentration",
+        "monthly_burn",
     }
 )
 
@@ -401,6 +404,48 @@ def test_operating_metric_bucket_accepted_once_e2_has_run(
         "attribute_raw": "Same-store sales growth",
     }
     assert not list(validator.iter_errors(ok)), "operating_metric must validate once E2 has run"
+
+
+def test_customer_concentration_accepted_once_e2_has_run(
+    validator: Draft202012Validator,
+) -> None:
+    # Screening #3: an ordinary leaf attribute (not a catch-all like
+    # operating_metric), added so gs_04/db_07 can read a real figure instead
+    # of always returning unknown.
+    ok = {
+        **VALID_PDF_CLAIM,
+        "attribute": "customer_concentration",
+        "attribute_raw": "Top customer % of revenue",
+    }
+    assert not list(validator.iter_errors(ok)), (
+        "customer_concentration must validate once E2 has run"
+    )
+
+
+def test_monthly_burn_accepted_once_e2_has_run(validator: Draft202012Validator) -> None:
+    # Screening #3: needed for db_02's runway = cash_and_equivalents / monthly_burn.
+    ok = {
+        **VALID_PDF_CLAIM,
+        "attribute": "monthly_burn",
+        "attribute_raw": "Monthly cash burn",
+    }
+    assert not list(validator.iter_errors(ok)), "monthly_burn must validate once E2 has run"
+
+
+def test_core_unmapped_accepted_once_e2_has_run(validator: Draft202012Validator) -> None:
+    # SIM-384's catch-all, and the reason this test exists: the parser really
+    # emits core_unmapped (it is in emit.CANONICAL_ATTRIBUTES), but this
+    # repo's copy of the enum was missing it. Since
+    # app/jobs/tasks/start_deal_verification.py::_validate_claims RAISES on
+    # the first contract violation, one core_unmapped claim in a real parse
+    # failed the deal's ENTIRE verification run -- not just that claim. This
+    # test is the regression guard for that, not a vocabulary formality.
+    ok = {
+        **VALID_PDF_CLAIM,
+        "attribute": "core_unmapped",
+        "attribute_raw": "Adjusted contribution margin (pre-allocation)",
+    }
+    assert not list(validator.iter_errors(ok)), "core_unmapped must validate once E2 has run"
 
 
 def test_attribute_unconstrained_when_attribute_raw_is_null(

@@ -11,6 +11,10 @@ full PgBouncer reasoning). Unlike that task, this one has no external
 async wait to poll -- ingest and reconciliation are synchronous DB/Spaces
 work, so the whole job runs inside one transaction, committed at the end.
 
+On success it chains into screening (SIM-404), creating that run's row
+inside this transaction and enqueuing the job only after the commit -- see
+the comment at the hand-off for why the two cannot be swapped.
+
 Scope, decided explicitly (see the stage-chaining doc's "Verification
 scope" question): reconcile_same_fact/reconcile_consistency are scoped to
 one data_source_id each -- neither does cross-document reconciliation. This
@@ -21,12 +25,13 @@ caught by this -- that gap is real and open, not solved here.
 
 import json
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from saq.types import Context
 from sqlalchemy import text
 
 from app.core.database import AsyncSessionLocal
+from app.jobs.queue import get_queue
 from app.models import Claim, Edge
 from app.repo.AnalysisRunRepo import AnalysisRunRepo
 from app.repo.HumanAuditRepo import HumanAuditRepo
@@ -264,3 +269,46 @@ async def start_deal_verification(
                 },
             }
         )
+
+        # Chain into screening (SIM-404). The row is created HERE, inside the
+        # transaction that just marked this run terminal, for two reasons:
+        # uq_analysis_run_active is a partial unique index on deal_id ALONE
+        # (not deal_id+job_name), so a screening row can only exist once this
+        # run is no longer queued/in_progress -- doing both in one
+        # transaction is what makes that legal. And it keeps the chain atomic
+        # with the verification result, same pattern as start_deal_analysis's
+        # hand-off into this job.
+        screening_run_id = uuid4()
+        await run_repo.create(
+            {
+                "id": screening_run_id,
+                "org_id": org_id,
+                "deal_id": deal_uuid,
+                "job_name": "screening",
+                "status": "queued",
+            }
+        )
+        await HumanAuditRepo(session).append(
+            {
+                "org_id": org_id,
+                "actor_id": "Internal System",
+                "actor_email": "Internal System",
+                "event_type": "analysis_requested",
+                "deal_id": deal_uuid,
+                "payload": {"analysis_run_id": str(screening_run_id), "job_name": "screening"},
+            }
+        )
+
+    # Outside the transaction -- screening_run_id's row is now durably
+    # committed, so a worker that dequeues this immediately is guaranteed to
+    # find it. Enqueuing inside the `async with` above let a worker outrace
+    # the commit and fail with "analysis_run ... not found" (a real bug hit
+    # in local testing on the parsing -> verification hand-off).
+    await get_queue().enqueue(
+        "start_deal_screening",
+        analysis_run_id=str(screening_run_id),
+        clerk_org_id=clerk_org_id,
+        timeout=3600,
+        retries=1,
+        ttl=86400,
+    )

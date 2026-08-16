@@ -14,6 +14,7 @@ from app.repo.AnalysisRunRepo import AnalysisRunRepo
 from app.repo.DataSourceRepo import DataSourceRepo
 from app.repo.DealRepo import DealRepo
 from app.repo.HumanAuditRepo import HumanAuditRepo
+from app.repo.ScreeningResultRepo import ScreeningResultRepo
 from app.repo.SessionRepo import SessionRepo
 from app.repo.UserRepo import UserRepo
 from app.schemas.deals import (
@@ -29,7 +30,9 @@ from app.schemas.deals import (
     LivePipelineRowResponse,
     PipelineStepResponse,
     PipelineValueStat,
+    ScreeningResultResponse,
     StartAnalysisRequest,
+    UpdateDealRequest,
     ValueDelta,
 )
 from app.services.dashboard_stats import compute_month_bounds, compute_pipeline_value_delta
@@ -115,6 +118,8 @@ def _deal_row_response(deal: Deal) -> DealRowResponse:
         # (parseSectorTags on the frontend) — not the real array `listPipeline`
         # returns for the same column.
         sector_tags=json.dumps(deal.sector_tags or []),
+        sector=deal.sector,
+        hq_geography=deal.hq_geography,
         state=deal.status,
         created_at=deal.created_at,
         updated_at=deal.updated_at,
@@ -141,6 +146,8 @@ async def create_deal(
             "deal_size_min_usd": body.deal_size_min_usd,
             "deal_size_max_usd": body.deal_size_max_usd,
             "sector_tags": body.sector_tags,
+            "sector": body.sector,
+            "hq_geography": body.hq_geography,
         }
     )
     await HumanAuditRepo(db).append(
@@ -249,6 +256,83 @@ async def get_deal(
     )
 
 
+@router.patch("/{deal_id}", response_model=DealRowResponse)
+async def update_deal(
+    deal_id: uuid.UUID,
+    body: UpdateDealRequest,
+    claims: dict[str, Any] = Depends(get_claims),
+    db: AsyncSession = Depends(get_db),
+) -> DealRowResponse:
+    """deals.update -- sets sector/hq_geography on an already-created deal.
+    Needed for legacy deals with neither set. `exclude_unset=True`
+    gives true partial-update semantics: a field the client omits entirely
+    is left untouched, while an explicit `null` clears it."""
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    updates = body.model_dump(exclude_unset=True)
+    updated = await DealRepo(db).update(deal_id, updates)
+    assert updated is not None  # just confirmed the row exists, above
+
+    org_id, actor_id, actor_email, _ = await _actor(db, claims)
+    await HumanAuditRepo(db).append(
+        {
+            "org_id": org_id,
+            "actor_id": actor_id,
+            "actor_email": actor_email,
+            "event_type": "deal_updated",
+            "deal_id": deal_id,
+            "payload": {"fields": list(updates.keys())},
+        }
+    )
+
+    return _deal_row_response(updated)
+
+
+@router.get("/{deal_id}/screening", response_model=ScreeningResultResponse)
+async def get_deal_screening(
+    deal_id: uuid.UUID, db: AsyncSession = Depends(get_db)
+) -> ScreeningResultResponse:
+    """SIM-404: the deal's most recent screening pass -- recommendation,
+    rulebook version, and every rule's verdict with its evidence.
+
+    Deliberately its own endpoint rather than a new phase on
+    `GET /{deal_id}/status`: that response's `steps` list is ported from
+    Simpero_AI_Gov_Web's src/shared/pipelineSteps.ts and must stay in sync
+    with it (app/services/pipeline_steps.py), so adding a step there is a
+    cross-repo change. It also carries a known trap -- a listed phase no job
+    sets gets marked "done" once current_phase moves past its index, which
+    told users stages had run that never did. Screening reads cleanly as its
+    own resource, so nothing about the frontend contract has to move for it.
+
+    404 distinguishes the two real cases in its detail: no such deal, versus
+    a deal that simply has not been screened yet.
+    """
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    result = await ScreeningResultRepo(db).latest_for_deal(deal_id)
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="This deal has not been screened yet",
+        )
+
+    return ScreeningResultResponse(
+        id=str(result.id),
+        deal_id=str(result.deal_id),
+        analysis_run_id=str(result.analysis_run_id) if result.analysis_run_id else None,
+        rulebook_version=result.rulebook_version,
+        recommendation=result.recommendation,
+        # Stored shape == wire shape (RuleResult.to_json), so this validates
+        # the persisted rows rather than rebuilding them field by field.
+        rule_results=result.rule_results,
+        created_at=result.created_at,
+    )
+
+
 @router.get("/{deal_id}/status", response_model=DealStatusResponse)
 async def get_deal_status(
     deal_id: uuid.UUID, db: AsyncSession = Depends(get_db)
@@ -278,6 +362,11 @@ async def get_deal_status(
     # a step whose own run has a real ended_at -- i.e. one that's actually
     # finished, never a guess at one still in progress.
     step_durations: dict[str, int] = {}
+    # Bound here, not only in the else-branch below: the screening branch
+    # reads it, and while that branch is only reachable when job_name is not
+    # "parsing", relying on that coupling would break the moment either
+    # condition moved.
+    verification_run: AnalysisRun | None = None
     if run.job_name == "parsing":
         chain_started_at = run.started_at
         parsing_seconds = _run_seconds(run)
@@ -289,7 +378,16 @@ async def get_deal_status(
         parsing_seconds = _run_seconds(parsing_run) if parsing_run is not None else None
         if parsing_seconds is not None:
             step_durations["parsing"] = parsing_seconds
-        verification_seconds = _run_seconds(run)
+        # The verification duration must come from the VERIFICATION row, not
+        # from `run` -- once screening became the latest row (SIM-404),
+        # `_run_seconds(run)` would file screening's own elapsed time under
+        # step_durations["verification"] and misreport it.
+        verification_run = (
+            run
+            if run.job_name == "verification"
+            else await AnalysisRunRepo(db).latest_by_job_name(deal_id, "verification")
+        )
+        verification_seconds = _run_seconds(verification_run) if verification_run else None
         if verification_seconds is not None:
             step_durations["verification"] = verification_seconds
     ended_at = run.ended_at
@@ -328,6 +426,43 @@ async def get_deal_status(
             step_durations=step_durations,
             error_message=run.error_message,
             job_comments=run.job_comments,
+        )
+
+    if run.job_name == "screening":
+        # SIM-404. Both TRACKED steps (parsing, verification) are already
+        # done by the time a screening row exists, so every listed step is
+        # "done" and current_phase is past the end -- the same
+        # "governance" shape verification-successful returns. No screening
+        # step is added to PIPELINE_STEPS on purpose: that list is ported
+        # from Simpero_AI_Gov_Web's pipelineSteps.ts and must stay in sync
+        # with it.
+        #
+        # job_comments deliberately comes from the VERIFICATION run, not
+        # this one. JobCommentResponse is a per-DOCUMENT shape
+        # (dataSourceId/fileName), and screening is a deal-level judgment
+        # with no document to attribute -- passing a screening row's own
+        # comments here fails response validation outright. The screening
+        # outcome is read from GET /deals/{deal_id}/screening instead.
+        verification_comments = verification_run.job_comments if verification_run else None
+        if run.status == "failed":
+            return DealStatusResponse(
+                job_status="error",
+                current_phase="governance",
+                steps=_steps_for_status("governance"),
+                started_at=chain_started_at,
+                ended_at=ended_at,
+                step_durations=step_durations,
+                error_message=run.error_message,
+                job_comments=verification_comments,
+            )
+        return DealStatusResponse(
+            job_status="processing",
+            current_phase="governance",
+            steps=_steps_for_status("governance"),
+            started_at=chain_started_at,
+            ended_at=ended_at,
+            step_durations=step_durations,
+            job_comments=verification_comments,
         )
 
     # job_name == "verification"

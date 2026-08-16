@@ -7,19 +7,6 @@ from app.repo.DealRepo import DealRepo
 
 
 @pytest.fixture
-def org_a_id(owner_conn, test_org_id) -> int:
-    """The organisation backing the test session's own app.org_id."""
-    with owner_conn.cursor() as cur:
-        cur.execute(
-            "INSERT INTO organisation (clerk_org_id, name, created_at) VALUES (%s, %s, now()) "
-            "ON CONFLICT (clerk_org_id) DO NOTHING",
-            (test_org_id, "Org A"),
-        )
-        cur.execute("SELECT id FROM organisation WHERE clerk_org_id = %s", (test_org_id,))
-        return cur.fetchone()[0]
-
-
-@pytest.fixture
 def org_b_deal_id(owner_conn) -> Iterator[str]:
     """A deal belonging to a *different* org, seeded via the doadmin
     connection (bypasses RLS) — a dd_app session scoped to org A's

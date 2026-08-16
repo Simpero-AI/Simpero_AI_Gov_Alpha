@@ -124,6 +124,8 @@ class DealRowResponse(CamelModel):
     deal_size_min_usd: int | None
     deal_size_max_usd: int | None
     sector_tags: str
+    sector: str | None
+    hq_geography: str | None
     state: str
     created_at: datetime
     updated_at: datetime
@@ -148,10 +150,23 @@ class CreateDealRequest(CamelModel):
     deal_size_min_usd: int | None
     deal_size_max_usd: int | None
     sector_tags: list[str] | None
+    sector: str | None = None
+    hq_geography: str | None = None
 
 
 class CreateDealResponse(CamelModel):
     id: str
+
+
+class UpdateDealRequest(CamelModel):
+    """deals.update -- PATCH /deals/{id}. All fields optional and unset by
+    default: `model_dump(exclude_unset=True)` on the route only applies keys
+    the client actually included in the JSON body, so a field entirely
+    omitted stays untouched while an explicit `null` clears it. Lets a human
+    fill in sector/hq_geography on a legacy deal."""
+
+    sector: str | None = None
+    hq_geography: str | None = None
 
 
 class StartAnalysisRequest(CamelModel):
@@ -159,3 +174,44 @@ class StartAnalysisRequest(CamelModel):
     interpreted — nothing consumes it yet (Open Question 3)."""
 
     selected_frameworks: list[str] | None = None
+
+
+class ScreeningRuleResultResponse(CamelModel):
+    """One rule's verdict as it appears in screening_result.rule_results.
+
+    Mirrors RuleResult.to_json() (app/services/screening/types.py) rather
+    than re-deriving it: the stored shape and the wire shape are deliberately
+    the same object, so a reviewer reading the API response is reading
+    exactly what was written to the provenance record.
+
+    `evidence_ref` stays a bare dict — it is a discriminated union
+    (`kind: "claim" | "deal_field"`) whose arms have different fields, and
+    flattening it into one optional-everything model would lose precisely the
+    distinction it exists to carry.
+    """
+
+    rule_id: str
+    verdict: str
+    evaluator: str
+    evidence_ref: dict | None
+    confidence: float
+    reason: str | None
+
+
+class ScreeningResultResponse(CamelModel):
+    """GET /deals/{id}/screening — the deal's most recent screening pass.
+
+    A recommendation, not a decision: `auto_decline` means a deal-breaker
+    matched and cites which, but nothing in the system declines the deal on
+    its own. On an `auto_decline` the engine short-circuits, so `ruleResults`
+    is a partial list ending at the breaker that fired — that is the real
+    record of what ran, not a truncation to paper over.
+    """
+
+    id: str
+    deal_id: str
+    analysis_run_id: str | None
+    rulebook_version: str
+    recommendation: str
+    rule_results: list[ScreeningRuleResultResponse]
+    created_at: datetime

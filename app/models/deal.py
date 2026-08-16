@@ -48,6 +48,21 @@ class Deal(Base):
 
     sector_tags: Mapped[list | None] = mapped_column(JSONB, nullable=True)
 
+    # Screening #3: structured, single-value fields db_04/gs_07/gs_08 key off
+    # -- distinct from sector_tags above (free-text, unstructured, display
+    # only). Plain Text, deliberately no SAEnum and no CheckConstraint: a
+    # CHECK can't reference another table's workspace config (gs_08's
+    # approved_sectors lives in investment_profiles.mandate, SIM-<screening>)
+    # or the rulebook's own prohibited list (db_04, app/services/screening/
+    # rulebooks/track_b.yaml) -- and a CHECK enforcing either would block
+    # *creating* a deal in a prohibited sector, which defeats db_04's whole
+    # point: the row must exist so it can be evaluated and flagged as a
+    # deal-breaker, not silently rejected at INSERT. Do not "fix" this into
+    # a CheckConstraint later -- sector/geography policy lives in config and
+    # the rulebook, not the schema.
+    sector: Mapped[str | None] = mapped_column(Text, nullable=True)
+    hq_geography: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default=DEFAULT_DEAL_STATUS)
 
     created_at: Mapped[datetime] = mapped_column(
