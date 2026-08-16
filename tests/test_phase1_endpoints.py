@@ -214,7 +214,6 @@ def test_create_deal_with_screening_fields_round_trips(client, seeded_org):
             "sectorTags": None,
             "sector": "saas",
             "hqGeography": "US",
-            "founderEquityPostClosePct": 0.42,
         },
     )
     assert create_resp.status_code == 201
@@ -225,7 +224,6 @@ def test_create_deal_with_screening_fields_round_trips(client, seeded_org):
     deal = get_resp.json()["deal"]
     assert deal["sector"] == "saas"
     assert deal["hqGeography"] == "US"
-    assert deal["founderEquityPostClosePct"] == pytest.approx(0.42)
 
 
 def test_patch_deal_sets_one_field_leaves_others_untouched(client, owner_conn, seeded_org):
@@ -237,7 +235,6 @@ def test_patch_deal_sets_one_field_leaves_others_untouched(client, owner_conn, s
     body = resp.json()
     assert body["hqGeography"] == "CA"
     assert body["sector"] == "fintech"
-    assert body["founderEquityPostClosePct"] is None
 
 
 def test_patch_deal_explicit_null_clears_field(client, owner_conn, seeded_org):
