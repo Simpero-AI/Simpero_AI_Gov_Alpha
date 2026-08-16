@@ -11,12 +11,17 @@ from app.repo.CorroborationEventRepo import CorroborationEventRepo
 from app.services.corroboration import ClaimNotCorroboratableError, record_corroboration_result
 
 
-def _claim_kwargs(org_pk: int, *, status: str, verification_method: str | None) -> dict:
+def _claim_kwargs(
+    org_pk: int, deal_id: str, *, status: str, verification_method: str | None
+) -> dict:
     """Minimal valid claims row satisfying every CHECK constraint, with
-    status/verification_method swappable per test."""
+    status/verification_method swappable per test. `deal_id` is required:
+    claims.deal_id is NOT NULL with an FK to deals.id (f3a8c9d2e1b7), so every
+    claim hangs off a real deal even though corroboration is claim-scoped."""
     has_span = status != "missing"
     return {
         "org_id": org_pk,
+        "deal_id": deal_id,
         "entity": "Acme Corp",
         "attribute": "revenueLatestUsd",
         "value": {
@@ -47,10 +52,26 @@ def org_pk(owner_conn, test_org_id) -> int:
 
 
 @pytest.fixture
-async def cited_claim(db_session, org_pk) -> Claim:
+def deal_pk(owner_conn, org_pk) -> str:
+    """A deal for org_pk. Inserted via owner_conn (bypassing RLS, same as
+    org_pk) so the claim's deal_id FK resolves regardless of the RLS scope the
+    async session runs under. Corroboration is claim-scoped, but claims.deal_id
+    is NOT NULL (f3a8c9d2e1b7), so a real deal must exist to hang a claim off."""
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO deals (org_id, name) VALUES (%s, %s) RETURNING id",
+            (org_pk, "Corroboration Test Deal"),
+        )
+        return cur.fetchone()[0]
+
+
+@pytest.fixture
+async def cited_claim(db_session, org_pk, deal_pk) -> Claim:
     """A claim that already passed internal Verify — the only kind of claim
     an outside source has a document-sourced value to agree/disagree with."""
-    claim = Claim(**_claim_kwargs(org_pk, status="cited", verification_method="exact_span"))
+    claim = Claim(
+        **_claim_kwargs(org_pk, deal_pk, status="cited", verification_method="exact_span")
+    )
     db_session.add(claim)
     await db_session.flush()
     return claim
@@ -119,11 +140,11 @@ async def test_verification_method_survives_conflict(db_session, cited_claim):
 
 
 @pytest.mark.parametrize("status", ["proposed", "rejected", "missing"])
-async def test_uncheckable_claim_raises_and_writes_nothing(db_session, org_pk, status):
+async def test_uncheckable_claim_raises_and_writes_nothing(db_session, org_pk, deal_pk, status):
     """A claim that never reached `cited` has no document-sourced value yet
     to disagree with — must reject before writing anything, not silently
     corroborate an unchecked claim."""
-    claim = Claim(**_claim_kwargs(org_pk, status=status, verification_method=None))
+    claim = Claim(**_claim_kwargs(org_pk, deal_pk, status=status, verification_method=None))
     db_session.add(claim)
     await db_session.flush()
 
