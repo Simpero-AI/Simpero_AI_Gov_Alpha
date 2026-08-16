@@ -138,7 +138,16 @@ async def reconcile_same_fact(
     # it here. Reconciling operating_metric claims BY attribute_raw -- the only
     # key that actually identifies them -- is the follow-up, and it needs the
     # backend to persist attribute_raw first (SIM-381).
+    #
+    # SIM-384: `core_unmapped` (E2's OTHER catch-all -- "financial but
+    # unplaceable", as opposed to operating_metric's "real sector metric")
+    # has the identical problem for the identical reason: it is itself a
+    # bucket of many distinct raw labels (298 on one real CIM) forced under
+    # one canonical name, so naive attribute-keyed grouping would flood the
+    # same false-contradicts pathology SIM-383 fixed for operating_metric.
+    # Exclude it here too, pending the same attribute_raw-keyed follow-up.
     stmt = stmt.where(Claim.attribute != "operating_metric")
+    stmt = stmt.where(Claim.attribute != "core_unmapped")
     # Qualitative claims carry no magnitude (value.normalized is null by
     # construction), already excluded by the filter above. claim_kind is
     # otherwise irrelevant here: numeric facts, not extraction provenance.
