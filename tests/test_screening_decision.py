@@ -236,11 +236,11 @@ def test_rule_result_forces_zero_confidence_on_unknown():
 # --- unimplemented evaluators (#5 / #6) -------------------------------------
 
 
-async def test_rules_without_an_evaluator_are_unknown_under_their_own_kind(db_session, org_a_id):
-    """Not a stub: 12 rules belong to tickets #5/#6. Until those land the
-    honest verdict is `unknown` -> human review, reported under the rule's
-    real evaluator kind so the audit trail doesn't call an LLM rule
-    deterministic."""
+async def test_out_of_scope_rules_are_unknown_with_a_no_evidence_reason(db_session, org_a_id):
+    """13 rules are out of scope for the deterministic CIM-only screener
+    (evaluator: none -- SIM-405/406 descoped). Their honest verdict is
+    `unknown` -> human review, reported under evaluator "none" with a uniform
+    "No evidence found in the documents" reason."""
     deal = await DealRepo(db_session).create({"org_id": org_a_id, "name": "Unevaluated"})
     await db_session.flush()
 
@@ -248,10 +248,10 @@ async def test_rules_without_an_evaluator_are_unknown_under_their_own_kind(db_se
     by_id = {r.rule_id: r for r in result.results}
 
     assert by_id["gs_01"].verdict == "unknown"
-    assert by_id["gs_01"].evaluator == "llm"
-    assert "SIM-405" in (by_id["gs_01"].reason or "")
-    assert by_id["db_09"].evaluator == "external"
-    assert "SIM-406" in (by_id["db_09"].reason or "")
+    assert by_id["gs_01"].evaluator == "none"
+    assert by_id["gs_01"].reason == "No evidence found in the documents"
+    assert by_id["db_09"].evaluator == "none"
+    assert by_id["db_09"].reason == "No evidence found in the documents"
 
 
 async def test_structurally_unverifiable_rules_report_the_policy_not_a_ticket(db_session, org_a_id):

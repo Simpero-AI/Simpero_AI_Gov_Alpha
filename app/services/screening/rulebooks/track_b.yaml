@@ -1,3 +1,12 @@
+# Track B screener rulebook (SIM-401) -- 21 rules as versioned data.
+#
+# SCOPE 2026-08-14 (deterministic, CIM-only): `evaluator` is one of
+#   deterministic -> runs (pure code over claims + intake deal fields)
+#   none          -> out of scope; resolves to "No evidence found in the
+#                    documents" (unknown), no evaluation. LLM/external/hybrid
+#                    rules are descoped (SIM-405/406) and set to `none`.
+# Assessable: gs_03, gs_04, gs_07, gs_08, db_04, db_07, plus db_01/db_02 as
+# deterministic gate-only advisories (surface the figure, never auto-decline).
 version: track_b.v1
 track: B
 rules:
@@ -5,12 +14,12 @@ rules:
   - id: gs_01
     kind: green_signal
     question: "Founder(s) full-time on the business"
-    evaluator: llm
+    evaluator: none
     evidence: {chunks: "founder role / time commitment"}
   - id: gs_02
     kind: green_signal
     question: "Founder signed 5+ year hold commitment"
-    evaluator: llm
+    evaluator: none
     evidence: {chunks: "founder hold / lock-up / commitment terms"}
   - id: gs_03
     kind: green_signal
@@ -27,14 +36,13 @@ rules:
   - id: gs_05
     kind: green_signal
     question: "Product/IP fully owned by company"
-    evaluator: llm
+    evaluator: none
     evidence: {chunks: "IP ownership / assignment"}
   - id: gs_06
     kind: green_signal
     question: "Founder retains >=10% equity post-close"
-    evaluator: deterministic
-    evidence: {claim: founder_equity_post_close}
-    threshold: {founder_equity_gte: 0.10}
+    evaluator: none
+    evidence: {chunks: "founder equity / post-close ownership"}
   - id: gs_07
     kind: green_signal
     question: "HQ in approved geography"
@@ -50,17 +58,17 @@ rules:
   - id: gs_09
     kind: green_signal
     question: "Clean cap table, no unresolved SAFEs/notes with blocking terms"
-    evaluator: llm
+    evaluator: none
     evidence: {chunks: "cap table / SAFEs / convertible notes / terms"}
   - id: gs_10
     kind: green_signal
     question: "At least one outside advisor or board observer in place"
-    evaluator: llm
+    evaluator: none
     evidence: {chunks: "board / advisors / governance"}
   - id: gs_11
     kind: green_signal
     question: "No undisclosed related-party transactions"
-    evaluator: llm
+    evaluator: none
     evidence: {chunks: "related-party transactions"}
     unknown: "Structurally unverifiable from the CIM — only DISCLOSED related-party txns are visible; 'undisclosed' is a negative that cannot be proven from the doc. Always resolves to unknown -> human review."
 
@@ -68,19 +76,19 @@ rules:
   - id: db_01
     kind: deal_breaker
     question: "No paying customers and no signed LOIs/pilots"
-    evaluator: hybrid          # deterministic gate (revenue==0) + llm (LOI/pilot presence)
-    evidence: {claim: revenue, chunks: "LOIs / pilots / signed agreements"}
+    evaluator: deterministic   # gate only: revenue==0 gate + (no-LOI clause not assessable from CIM)
+    evidence: {claim: revenue}
     threshold: {revenue_eq: 0}
   - id: db_02
     kind: deal_breaker
     question: "Runway <6 months with no active raise"
-    evaluator: hybrid          # deterministic gate (runway<6) + llm (active raise)
-    evidence: {claim: [cash_and_equivalents, monthly_burn], chunks: "active raise / fundraising"}
+    evaluator: deterministic   # gate only: runway<6 gate + (no-active-raise clause not assessable from CIM)
+    evidence: {claim: [cash_and_equivalents, monthly_burn]}
     threshold: {runway_months_lt: 6}
   - id: db_03
     kind: deal_breaker
     question: "Founder seeking full exit within 24 months"
-    evaluator: llm
+    evaluator: none
     evidence: {chunks: "founder exit / transition / succession"}
   - id: db_04
     kind: deal_breaker
@@ -91,12 +99,12 @@ rules:
   - id: db_05
     kind: deal_breaker
     question: "Unresolved litigation/regulatory investigation at LOI"
-    evaluator: external        # litigation/regulatory search; falls back to llm-over-legal + unknown
+    evaluator: none
     evidence: {external: litigation_search, chunks: "litigation / regulatory / legal proceedings"}
   - id: db_06
     kind: deal_breaker
     question: "IP owned by third party, not company"
-    evaluator: llm
+    evaluator: none
     evidence: {chunks: "IP ownership / assignment"}
   - id: db_07
     kind: deal_breaker
@@ -107,16 +115,16 @@ rules:
   - id: db_08
     kind: deal_breaker
     question: "Undisclosed related-party transactions"
-    evaluator: llm
+    evaluator: none
     evidence: {chunks: "related-party transactions"}
     unknown: "Same as gs_11 — undisclosed is unprovable from the doc. Always unknown -> human review."
   - id: db_09
     kind: deal_breaker
     question: "Sanctioned country or individual involved"
-    evaluator: external
+    evaluator: none
     evidence: {external: ofac_sanctions_screen}
   - id: db_10
     kind: deal_breaker
     question: "Cap table has unresolved control/blocking rights for a non-founder holder"
-    evaluator: llm
+    evaluator: none
     evidence: {chunks: "control rights / blocking / protective provisions / board control"}

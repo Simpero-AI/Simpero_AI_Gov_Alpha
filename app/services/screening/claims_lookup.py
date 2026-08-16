@@ -36,7 +36,12 @@ async def claims_for_attribute(
         .where(Claim.deal_id == deal_id)
         .where(Claim.attribute == attribute)
         .where(Claim.status.in_(_TRUSTED_STATUSES))
-        .where(Claim.value["normalized"].isnot(None))
+        # `->>` (astext) maps a JSON `null` to SQL NULL; the bare `->`
+        # subscript does not, so `isnot(None)` on it would let a claim whose
+        # value.normalized is JSON null (a cited XLSX text cell -- see
+        # emit.py) through, then crash the numeric evaluators on `None > 0`.
+        # Filter on astext so JSON null is excluded like a missing key.
+        .where(Claim.value["normalized"].astext.isnot(None))
     )
     claims = list((await session.scalars(stmt)).all())
     # `superseded_by_same_fact`'s own contract meaning is "an edge-ignorant

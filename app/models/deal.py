@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import BigInteger, ForeignKey, Integer, Numeric, Text, func
+from sqlalchemy import BigInteger, ForeignKey, Integer, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import DateTime
@@ -57,19 +57,6 @@ class Deal(Base):
     # the rulebook, not the schema.
     sector: Mapped[str | None] = mapped_column(Text, nullable=True)
     hq_geography: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Post-close founder equity as a fraction (0.0-1.0), not a percent int --
-    # gs_06's threshold (founder_equity_gte: 0.10) compares directly against
-    # this. Nullable: typically decided during deal structuring, after
-    # intake, not at creation (see the PATCH /deals/{id} endpoint) --
-    # unset means gs_06 stays `unknown`, never a guess. Numeric(5,4), not
-    # Float: this feeds an auto-decision threshold, so exact decimal storage
-    # (no binary-float write-time rounding) is worth it, unlike a plain
-    # display value. asdecimal=False keeps it a plain Python float at the
-    # ORM boundary -- consistent with how claim values are handled -- while
-    # Postgres still stores it as exact NUMERIC.
-    founder_equity_post_close_pct: Mapped[float | None] = mapped_column(
-        Numeric(5, 4, asdecimal=False), nullable=True
-    )
 
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default=DEFAULT_DEAL_STATUS)
 

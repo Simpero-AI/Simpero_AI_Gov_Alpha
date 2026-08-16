@@ -24,8 +24,8 @@ from app.services.screening.evaluators import deterministic
 @pytest.mark.parametrize("module", [deterministic, decision], ids=["deterministic", "decision"])
 def test_no_llm_client_referenced(module):
     source = inspect.getsource(module)
-    # Substring, not word match: the reason string "llm evaluator not
-    # implemented (SIM-405)" is prose ABOUT a model, not a client -- so this
-    # asserts on the client vendor/constructor, which prose never names.
+    # Substring, not word match: reason prose like "No evidence found in the
+    # documents" describes a rule's disposition, not a client -- so this
+    # asserts on the client vendor/constructor, which such prose never names.
     assert "anthropic" not in source.lower()
     assert "Client(" not in source

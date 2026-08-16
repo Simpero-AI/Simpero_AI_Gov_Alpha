@@ -35,16 +35,12 @@ from app.services.screening.types import RuleResult
 
 Recommendation = Literal["auto_decline", "green", "human_review"]
 
-# Why a rule has no verdict of its own yet. Not a stub: tickets #5 (llm) and
-# #6 (external) own these rules, and until they land the honest answer is
-# `unknown` -> human review, which is exactly what the rulebook's unknown
-# policy prescribes. Wiring them in later is adding an entry to a dispatch
-# table, not changing this engine.
-_NO_EVALUATOR_REASON = {
-    "llm": "llm evaluator not implemented (SIM-405)",
-    "external": "external evaluator not implemented (SIM-406)",
-    "hybrid": "llm half of the hybrid not implemented (SIM-405)",
-}
+# A rule with no evaluator of its own is out of scope for the deterministic
+# CIM-only screener (evaluator: none in track_b.yaml -- SIM-405/406 descoped).
+# Its honest answer is `unknown` with a fixed "no evidence" reason: never a
+# guess, and it neither satisfies a must-have nor auto-declines. gs_11/db_08
+# keep their own structural-unknown note instead (see evaluate_rule).
+_NO_EVIDENCE_REASON = "No evidence found in the documents"
 
 
 @dataclass(frozen=True)
@@ -89,16 +85,13 @@ async def evaluate_rule(
         return await evaluator(session, deal, rulebook)
 
     rule = rulebook.by_id[rule_id]
-    # A rule the rulebook marks structurally unverifiable (gs_11/db_08) is
-    # unknown BY POLICY, not by absence of an implementation -- say so, so a
-    # human reading the result isn't told to wait for a ticket that will
-    # never change this answer.
-    reason = rule.unknown or _NO_EVALUATOR_REASON.get(
-        rule.evaluator, f"no evaluator for {rule.evaluator!r}"
-    )
-    # Reported under the rule's OWN evaluator kind, not "deterministic":
-    # this result's provenance is "the llm rule nobody has built yet", and
-    # the audit trail has to be able to say so.
+    # gs_11/db_08 are unknown BY POLICY -- a negative ("no undisclosed X")
+    # that no document can ever prove -- so they keep their own note. Every
+    # other out-of-scope rule reports the uniform "No evidence found in the
+    # documents".
+    reason = rule.unknown or _NO_EVIDENCE_REASON
+    # Reported under the rule's OWN evaluator kind ("none"), not
+    # "deterministic": the audit trail has to name the real provenance.
     return RuleResult(rule_id, "unknown", None, rule.evaluator, reason=reason)
 
 

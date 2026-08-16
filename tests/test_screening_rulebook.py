@@ -11,7 +11,7 @@ import pytest
 from app.services.screening.rulebook import Rule, load_rulebook
 
 _EXPECTED_IDS = {f"gs_{i:02d}" for i in range(1, 12)} | {f"db_{i:02d}" for i in range(1, 11)}
-_VALID_EVALUATORS = {"deterministic", "llm", "external", "hybrid"}
+_VALID_EVALUATORS = {"deterministic", "llm", "external", "hybrid", "none"}
 
 
 def test_loads_exactly_21_rules() -> None:

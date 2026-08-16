@@ -14,7 +14,6 @@ import uuid
 from app.models import Claim
 from app.repo.DealRepo import DealRepo
 from app.repo.InvestmentProfileRepo import InvestmentProfileRepo
-from app.services.screening.evaluators import deterministic as det_module
 from app.services.screening.evaluators.deterministic import EVALUATORS
 from app.services.screening.rulebook import load_rulebook
 from app.services.screening.types import ClaimRef, RuleResult
@@ -265,28 +264,6 @@ async def test_db_07_unknown_when_not_extracted(db_session, org_a_id):
     assert result.verdict == "unknown"
 
 
-# --- gs_06: founder equity post-close (deal field, not a claim) ------------
-
-
-async def test_gs_06_y_when_equity_at_or_above_threshold(db_session, org_a_id):
-    deal = await _seed_deal(db_session, org_a_id, founder_equity_post_close_pct=0.15)
-    result = await _evaluate("gs_06", db_session, deal)
-    assert result.verdict == "Y"
-    assert result.evidence == det_module.DealField("founder_equity_post_close_pct", 0.15)
-
-
-async def test_gs_06_n_when_equity_below_threshold(db_session, org_a_id):
-    deal = await _seed_deal(db_session, org_a_id, founder_equity_post_close_pct=0.05)
-    result = await _evaluate("gs_06", db_session, deal)
-    assert result.verdict == "N"
-
-
-async def test_gs_06_unknown_when_unset(db_session, org_a_id):
-    deal = await _seed_deal(db_session, org_a_id)
-    result = await _evaluate("gs_06", db_session, deal)
-    assert result.verdict == "unknown"
-
-
 # --- gs_07: HQ geography ----------------------------------------------------
 
 
@@ -399,7 +376,7 @@ async def test_db_01_unknown_deferred_when_revenue_zero(db_session, org_a_id):
 
     result = await _evaluate("db_01", db_session, deal)
     assert result.verdict == "unknown"
-    assert "ticket #5" in _reason(result)
+    assert "not assessable from the CIM" in _reason(result)
 
 
 async def test_db_01_unknown_when_no_revenue_claim(db_session, org_a_id):
@@ -442,7 +419,7 @@ async def test_db_02_unknown_deferred_when_runway_short(db_session, org_a_id):
 
     result = await _evaluate("db_02", db_session, deal)
     assert result.verdict == "unknown"
-    assert "ticket #5" in _reason(result)
+    assert "not assessable from the CIM" in _reason(result)
 
 
 async def test_db_02_unknown_when_cash_missing(db_session, org_a_id):

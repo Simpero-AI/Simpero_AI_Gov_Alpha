@@ -107,32 +107,6 @@ async def evaluate_db_07(session: AsyncSession, deal: Deal, rulebook: Rulebook) 
     return RuleResult("db_07", verdict, claim_ref(claim), "deterministic")
 
 
-async def evaluate_gs_06(session: AsyncSession, deal: Deal, rulebook: Rulebook) -> RuleResult:
-    """Founder retains >=10% equity post-close.
-
-    Sourced from Deal.founder_equity_post_close_pct (a structured deal
-    field, ticket #3's design decision), not a Claim -- post-close ownership
-    depends on the deal's proposed structure, which no extraction pipeline
-    computes today. The rulebook's `evidence: {claim: ...}` tag predates that
-    decision; deal_field is the real source.
-    """
-    rule = rulebook.by_id["gs_06"]
-    assert rule.threshold is not None
-    value = deal.founder_equity_post_close_pct
-    if value is None:
-        return RuleResult(
-            "gs_06",
-            "unknown",
-            None,
-            "deterministic",
-            reason="founder_equity_post_close_pct not set on the deal",
-        )
-    verdict = "Y" if value >= rule.threshold["founder_equity_gte"] else "N"
-    return RuleResult(
-        "gs_06", verdict, DealField("founder_equity_post_close_pct", value), "deterministic"
-    )
-
-
 async def evaluate_gs_07(session: AsyncSession, deal: Deal, rulebook: Rulebook) -> RuleResult:
     """HQ in approved geography."""
     if deal.hq_geography is None:
@@ -190,10 +164,11 @@ async def evaluate_db_04(session: AsyncSession, deal: Deal, rulebook: Rulebook) 
 
 async def evaluate_db_01_gate(session: AsyncSession, deal: Deal, rulebook: Rulebook) -> RuleResult:
     """No paying customers and no signed LOIs/pilots -- deterministic gate
-    only. This evaluator never returns Y: a full Y verdict needs the LLM
-    LOI/pilot check ticket #5 supplies. revenue > 0 clears the gate (N, no
-    model call needed); revenue == 0 defers to #5 and stays `unknown` here,
-    distinguished by its reason from the missing-claim case."""
+    only. This evaluator never returns Y: the second clause (signed
+    LOIs/pilots) is not assessable from the CIM. revenue > 0 clears the gate
+    (N, no breaker); revenue == 0 leaves the rule `unknown` -- no evidence in
+    the documents for the LOI/pilot clause -- distinguished by its reason
+    from the missing-claim case."""
     rule = rulebook.by_id["db_01"]
     assert rule.threshold is not None
     claim = await select_claim(session, deal.id, "revenue")
@@ -209,8 +184,8 @@ async def evaluate_db_01_gate(session: AsyncSession, deal: Deal, rulebook: Ruleb
         claim_ref(claim),
         "deterministic",
         reason=(
-            "revenue == 0 -- gate cleared for the LLM LOI/pilot check "
-            "(ticket #5), not resolved here"
+            "revenue == 0; the no-LOI/pilot clause is not assessable from "
+            "the CIM -- no evidence in the documents"
         ),
     )
 
@@ -221,8 +196,9 @@ async def evaluate_db_02_gate(session: AsyncSession, deal: Deal, rulebook: Ruleb
     extracted figure). Both claims must resolve, and burn must be nonzero,
     or the result is `unknown` -- a zero burn is a data-quality case this
     evaluator can't respectably resolve either way, not a real green signal.
-    runway >= 6mo clears the gate (N, no model call needed); runway < 6mo
-    defers to #5's active-raise check and stays `unknown` here."""
+    runway >= 6mo clears the gate (N, no breaker); runway < 6mo leaves the
+    rule `unknown` -- the no-active-raise clause is not assessable from the
+    CIM -- and stays `unknown` here."""
     rule = rulebook.by_id["db_02"]
     assert rule.threshold is not None
     cash = await select_claim(session, deal.id, "cash_and_equivalents")
@@ -258,8 +234,8 @@ async def evaluate_db_02_gate(session: AsyncSession, deal: Deal, rulebook: Ruleb
         claim_ref(cash),
         "deterministic",
         reason=(
-            "runway < 6 months -- gate cleared for the LLM active-raise check "
-            "(ticket #5), not resolved here"
+            "runway < 6 months; the no-active-raise clause is not assessable "
+            "from the CIM -- no evidence in the documents"
         ),
     )
 
@@ -267,7 +243,6 @@ async def evaluate_db_02_gate(session: AsyncSession, deal: Deal, rulebook: Ruleb
 EVALUATORS: dict[str, Callable[[AsyncSession, Deal, Rulebook], Awaitable[RuleResult]]] = {
     "gs_03": evaluate_gs_03,
     "gs_04": evaluate_gs_04,
-    "gs_06": evaluate_gs_06,
     "gs_07": evaluate_gs_07,
     "gs_08": evaluate_gs_08,
     "db_01": evaluate_db_01_gate,

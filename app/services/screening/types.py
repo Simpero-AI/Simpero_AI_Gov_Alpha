@@ -41,7 +41,7 @@ class DealField:
         return {"kind": "deal_field", "field": self.field, "value": self.value}
 
 
-EvaluatorKind = Literal["deterministic", "llm", "external", "hybrid"]
+EvaluatorKind = Literal["deterministic", "llm", "external", "hybrid", "none"]
 
 
 @dataclass(frozen=True)

@@ -118,7 +118,6 @@ def _deal_row_response(deal: Deal) -> DealRowResponse:
         sector_tags=json.dumps(deal.sector_tags or []),
         sector=deal.sector,
         hq_geography=deal.hq_geography,
-        founder_equity_post_close_pct=deal.founder_equity_post_close_pct,
         state=deal.status,
         created_at=deal.created_at,
         updated_at=deal.updated_at,
@@ -146,7 +145,6 @@ async def create_deal(
             "sector_tags": body.sector_tags,
             "sector": body.sector,
             "hq_geography": body.hq_geography,
-            "founder_equity_post_close_pct": body.founder_equity_post_close_pct,
         }
     )
     await HumanAuditRepo(db).append(
@@ -262,10 +260,8 @@ async def update_deal(
     claims: dict[str, Any] = Depends(get_claims),
     db: AsyncSession = Depends(get_db),
 ) -> DealRowResponse:
-    """deals.update -- sets sector/hq_geography/founder_equity_post_close_pct
-    on an already-created deal. Needed for legacy deals with none of these
-    set, and because founder_equity_post_close is typically decided during
-    deal structuring, after intake, not at creation. `exclude_unset=True`
+    """deals.update -- sets sector/hq_geography on an already-created deal.
+    Needed for legacy deals with neither set. `exclude_unset=True`
     gives true partial-update semantics: a field the client omits entirely
     is left untouched, while an explicit `null` clears it."""
     deal = await DealRepo(db).get_by_id(deal_id)

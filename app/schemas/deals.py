@@ -125,7 +125,6 @@ class DealRowResponse(CamelModel):
     sector_tags: str
     sector: str | None
     hq_geography: str | None
-    founder_equity_post_close_pct: float | None
     state: str
     created_at: datetime
     updated_at: datetime
@@ -152,7 +151,6 @@ class CreateDealRequest(CamelModel):
     sector_tags: list[str] | None
     sector: str | None = None
     hq_geography: str | None = None
-    founder_equity_post_close_pct: float | None = None
 
 
 class CreateDealResponse(CamelModel):
@@ -164,13 +162,10 @@ class UpdateDealRequest(CamelModel):
     default: `model_dump(exclude_unset=True)` on the route only applies keys
     the client actually included in the JSON body, so a field entirely
     omitted stays untouched while an explicit `null` clears it. Lets a human
-    fill in sector/hq_geography/founder_equity_post_close_pct on a legacy
-    deal, or set founder equity later during deal structuring (after
-    intake, when create_deal already ran)."""
+    fill in sector/hq_geography on a legacy deal."""
 
     sector: str | None = None
     hq_geography: str | None = None
-    founder_equity_post_close_pct: float | None = None
 
 
 class StartAnalysisRequest(CamelModel):

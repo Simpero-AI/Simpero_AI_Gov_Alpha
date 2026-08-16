@@ -28,7 +28,11 @@ _EXPECTED_VERSION = "track_b.v1"
 _EXPECTED_IDS = frozenset(f"gs_{i:02d}" for i in range(1, 12)) | frozenset(
     f"db_{i:02d}" for i in range(1, 11)
 )
-_VALID_EVALUATORS = frozenset({"deterministic", "llm", "external", "hybrid"})
+# `none` = out of scope for the deterministic CIM-only screener (2026-08-14):
+# the rule carries no evaluator and resolves to "No evidence found in the
+# documents" (SIM-405/406 descoped). It is a first-class evaluator value, not
+# a missing one, so the rulebook still validates and the audit trail can name it.
+_VALID_EVALUATORS = frozenset({"deterministic", "llm", "external", "hybrid", "none"})
 _VALID_KINDS = frozenset({"green_signal", "deal_breaker"})
 # Rules that are structurally unverifiable from the CIM (a negative -- "no
 # undisclosed X" -- can never be proven from the document itself) and so
@@ -43,7 +47,7 @@ class Rule:
     track: str
     kind: Literal["green_signal", "deal_breaker"]
     question: str
-    evaluator: Literal["deterministic", "llm", "external", "hybrid"]
+    evaluator: Literal["deterministic", "llm", "external", "hybrid", "none"]
     evidence: dict
     threshold: dict | None = None
     unknown: str | None = None
