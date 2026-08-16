@@ -8,6 +8,7 @@ from sqlalchemy.types import DateTime
 
 from app.core.database import Base
 from app.models.data_source import DataSource
+from app.models.deal import Deal
 from app.models.organisation import Organisation
 
 # The shape of a claim is defined by contracts/claims.schema.json, NOT here.
@@ -102,19 +103,20 @@ class Claim(Base):
         Integer, ForeignKey(Organisation.id), nullable=False, index=True
     )
 
-    # deal_id: still a bare UUID, not yet a FK -- `claims` predates `deals` in
-    # the migration chain (claims_spine came before deals), so this column
-    # was a true forward reference when authored. `deals` now precedes the
-    # current head, so it's structurally addable, but only pending a
-    # one-time orphaned-row check against the real DB (see the data_source
-    # FK follow-up migration's docstring) -- not done here.
+    # deal_id -> deals.id. `claims` predates `deals` in the migration chain
+    # (claims_spine came before deals), so this started as a bare UUID; the FK
+    # was added once `deals` existed, gated on a one-time orphaned-row check
+    # against the real DB (see 77be2ddc60a0_data_source_fks.py) -- confirmed
+    # zero, so no backfill was needed.
     # session_id/chunk_id: sessions/chunks tables exist, but no FK added yet
     # (out of scope for this pass). Typed UUID on the expectation that new
     # tables follow audit_log's intended UUID pattern rather than
     # organisation's serial Integer. The contract requires none of them (only
     # entity/attribute/value/status/location), so they stay nullable until
     # there is something to point at.
-    deal_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
+    deal_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey(Deal.id), nullable=False, index=True
+    )
     session_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), nullable=True, index=True
     )

@@ -7,7 +7,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import DateTime
 
 from app.core.database import Base
-from app.models.organisation import Funds, Organisation
+from app.models.organisation import Funds, Organisation, Users
 
 # Lifecycle states mirror the frontend's dealsLifecycle.STATE_ORDER
 # (src/shared/dealsLifecycle.ts in Simpero_AI_Gov_Web): sourcing -> draft ->
@@ -32,6 +32,11 @@ class Deal(Base):
     # Nullable: the frontend's deals.create contract has no fund field yet.
     fund_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey(Funds.id), nullable=True, index=True
+    )
+    # Creator, for display/audit only — deals stay org-scoped, not user-scoped
+    # (see DealRowResponse's docstring); no query filters on this column.
+    user_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey(Users.id), nullable=True, index=True
     )
 
     name: Mapped[str] = mapped_column(Text, nullable=False)
