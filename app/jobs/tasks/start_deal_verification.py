@@ -23,7 +23,9 @@ deal. A fact reported in two DIFFERENT documents of the same deal is NOT
 caught by this -- that gap is real and open, not solved here.
 """
 
+import asyncio
 import json
+import logging
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -38,6 +40,16 @@ from app.repo.HumanAuditRepo import HumanAuditRepo
 from app.services.consistency import reconcile_consistency
 from app.services.reconciliation import reconcile_same_fact
 from app.services.uploads.spaces import get_json_object
+
+logger = logging.getLogger(__name__)
+
+# Per-statement / idle-in-transaction ceilings for the verify job's own
+# transaction, set well under its SAQ job timeout so a blocked or runaway query
+# aborts as a normal error (caught and recorded as `failed` below) instead of
+# hanging the job -- and the UI -- for hours. statement_timeout counts lock
+# waits too, so a query stuck behind a lock also aborts here.
+_STATEMENT_TIMEOUT = "120s"
+_IDLE_IN_TXN_TIMEOUT = "120s"
 
 _CONTRACT_PATH = Path(__file__).parents[3] / "contracts" / "claims.schema.json"
 
@@ -147,12 +159,43 @@ async def start_deal_verification(
     parsing_run_id: str,
     clerk_org_id: str,
 ) -> None:
+    """SAQ entrypoint. Thin wrapper whose only job is to guarantee that ANY
+    failure of the verification work -- an exception mid-ingest/reconcile, or
+    the SAQ timeout cancelling this coroutine -- durably records a terminal
+    `failed` status. The work itself runs in one transaction (_run_verification);
+    when that transaction rolls back it takes its own `in_progress` marker with
+    it, so without this wrapper the run is left non-terminal and the UI renders
+    it as "Verifying claims" forever (observed: a multi-hour hang). CancelledError
+    is caught alongside Exception because SAQ enforces its job timeout by
+    cancelling this coroutine, and CancelledError is a BaseException."""
+    run_id = UUID(analysis_run_id)
+    try:
+        await _run_verification(
+            analysis_run_id=analysis_run_id,
+            parsing_run_id=parsing_run_id,
+            clerk_org_id=clerk_org_id,
+        )
+    except (Exception, asyncio.CancelledError) as exc:
+        await _mark_run_failed(run_id, clerk_org_id, exc)
+        raise
+
+
+async def _run_verification(
+    *,
+    analysis_run_id: str,
+    parsing_run_id: str,
+    clerk_org_id: str,
+) -> None:
     """`deal_id` is deliberately not a parameter -- org_id/deal_id both come
     from the run rows themselves (get_by_id), so passing it separately would
     just be a second, redundant source of truth for the same value."""
     run_id = UUID(analysis_run_id)
 
     async with AsyncSessionLocal() as session, session.begin():
+        await session.execute(text(f"SET LOCAL statement_timeout = '{_STATEMENT_TIMEOUT}'"))
+        await session.execute(
+            text(f"SET LOCAL idle_in_transaction_session_timeout = '{_IDLE_IN_TXN_TIMEOUT}'")
+        )
         await _set_org(session, clerk_org_id)
         run_repo = AnalysisRunRepo(session)
 
@@ -312,3 +355,40 @@ async def start_deal_verification(
         retries=1,
         ttl=86400,
     )
+
+
+async def _mark_run_failed(run_id: UUID, clerk_org_id: str, exc: BaseException) -> None:
+    """Record a terminal `failed` status for the run in its OWN fresh
+    transaction -- the work transaction has already rolled back, so its
+    in_progress marker is gone and the run would otherwise sit non-terminal
+    (UI hangs on "Verifying claims" indefinitely). Idempotent (skips a run that
+    already reached a terminal status, so a SAQ retry after this is a clean
+    no-op via _run_verification's own guard) and best-effort: if even this write
+    fails it is logged, never raised, so it can never mask the real failure that
+    the caller re-raises. error_message carries only the exception TYPE -- never
+    str(exc) -- to keep document-derived content out of a persisted field."""
+    try:
+        async with AsyncSessionLocal() as session, session.begin():
+            await session.execute(text("SET LOCAL statement_timeout = '30s'"))
+            await _set_org(session, clerk_org_id)
+            run_repo = AnalysisRunRepo(session)
+            run = await run_repo.get_by_id(run_id)
+            if run is None or run.status in ("successful", "failed"):
+                return
+            await run_repo.update_progress(
+                run_id,
+                status="failed",
+                error_message=f"verification failed: {type(exc).__name__}",
+            )
+            await HumanAuditRepo(session).append(
+                {
+                    "org_id": run.org_id,
+                    "actor_id": "Internal System",
+                    "actor_email": "Internal System",
+                    "event_type": "analysis_verification_completed",
+                    "deal_id": run.deal_id,
+                    "payload": {"analysis_run_id": str(run_id), "status": "failed"},
+                }
+            )
+    except Exception:
+        logger.exception("could not record verification failure for run %s", run_id)

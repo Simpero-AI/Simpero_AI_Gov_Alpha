@@ -236,6 +236,66 @@ async def test_no_usable_documents_marks_run_failed(owner_conn, seeded_org, seed
     assert _count_claims(owner_conn, seeded_org["org_pk"]) == 0
 
 
+async def test_midjob_failure_durably_marks_run_failed(
+    owner_conn, seeded_org, seeded_deal, monkeypatch, mocked_screening_enqueue
+):
+    """The stuck-forever bug: the whole job runs in one transaction, so a
+    mid-job crash rolls back the in_progress marker too, leaving the run
+    non-terminal and the UI spinning indefinitely. The wrapper must record a
+    terminal `failed` status in a FRESH transaction. Proven by claims=0 (the
+    work transaction rolled back) AND status=failed (a separate transaction
+    committed the terminal state)."""
+    data_source_id = _seed_data_source(owner_conn, seeded_org["org_pk"], seeded_deal, "cim.pdf")
+    parse_jobs = [
+        {
+            "data_source_id": data_source_id,
+            "filename": "cim.pdf",
+            "storage_key": "org/cim.pdf",
+            "job_key": "job-1",
+            "outcome": "parsed",
+            "code": None,
+            "message": None,
+            "bucket": "test-bucket",
+            "key": "claims/cim.json",
+        }
+    ]
+    parsing_run_id = _seed_parsing_run(owner_conn, seeded_org["org_pk"], seeded_deal, parse_jobs)
+    run_id = _seed_verification_run(owner_conn, seeded_org["org_pk"], seeded_deal)
+
+    envelope = {
+        "run_id": parsing_run_id,
+        "sha256": "a" * 64,
+        "source_file": "cim.pdf",
+        "claims": [_claim_json("c1", page=1), _claim_json("c2", page=5)],
+        "edges": [],
+    }
+    monkeypatch.setattr(job_module, "get_json_object", lambda bucket, key: envelope)
+
+    # Blow up AFTER ingest, during reconciliation -- the realistic failure
+    # point, and the one that used to strand the run at in_progress forever.
+    def boom(*args, **kwargs):
+        raise RuntimeError("reconcile exploded")
+
+    monkeypatch.setattr(job_module, "reconcile_same_fact", boom)
+
+    with pytest.raises(RuntimeError, match="reconcile exploded"):
+        await job_module.start_deal_verification(
+            {},
+            analysis_run_id=run_id,
+            parsing_run_id=parsing_run_id,
+            clerk_org_id=seeded_org["clerk_org_id"],
+        )
+
+    run = _fetch_run(owner_conn, run_id)
+    assert run["status"] == "failed"
+    assert run["error_message"] == "verification failed: RuntimeError"
+    # Work transaction rolled back -> no claims committed; the failed status
+    # came from a SEPARATE transaction. That split is the whole fix.
+    assert _count_claims(owner_conn, seeded_org["org_pk"]) == 0
+    # A crashed run must not chain into screening.
+    assert len(mocked_screening_enqueue) == 0
+
+
 async def test_already_terminal_run_is_a_noop(owner_conn, seeded_org, seeded_deal, monkeypatch):
     """D11-style idempotency guard (review on PR #81): a SAQ redelivery after
     a successful commit must not re-run the insert-only ingest -- it would
