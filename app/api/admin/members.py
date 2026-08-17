@@ -1,4 +1,4 @@
-from typing import Any, Literal, cast
+from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
@@ -11,10 +11,12 @@ from app.models.clerk_admin_user import AdminType, ClerkAdminUser
 from app.models.organisation import Users, utc_now
 from app.repo.AdminUserRepo import AdminUserRepo
 from app.repo.HumanAuditRepo import HumanAuditRepo
-from app.schemas.admin.members import MemberResponse, UpdateMemberRoleRequest
+from app.schemas.admin.members import OrgMemberResponse, UpdateMemberRoleRequest
 from app.schemas.common import SuccessResponse
 from app.services.admin.clerk_admin import (
     clerk_error_to_http,
+    fetch_clerk_user_primary_email,
+    list_organization_memberships,
     remove_organization_membership,
     update_organization_membership,
 )
@@ -26,65 +28,109 @@ router = APIRouter(prefix="/members", tags=["admin"])
 _CLERK_ROLE = {"member": "org:member", "admin": "org:admin"}
 
 
-def _status(value: str) -> Literal["active", "inactive"]:
-    return cast(Literal["active", "inactive"], value)
+def _member_name(public_user_data: dict[str, Any]) -> str | None:
+    parts = [public_user_data.get("first_name"), public_user_data.get("last_name")]
+    name = " ".join(p for p in parts if p)
+    return name or None
 
 
-@router.get("", response_model=list[MemberResponse])
+def _to_org_member_response(m: dict[str, Any]) -> OrgMemberResponse:
+    return OrgMemberResponse(
+        id=m["id"],
+        user_id=m["public_user_data"]["user_id"],
+        name=_member_name(m["public_user_data"]),
+        email=m["public_user_data"].get("identifier"),
+        role=m["role"],
+        status="active",  # every live Clerk membership is definitionally active
+    )
+
+
+def _inactive_local_user_to_org_member_response(user: Users) -> OrgMemberResponse:
+    """A removed member's Clerk membership is gone, so there's no membership
+    id to reuse — the frontend's primary key for these actions is
+    clerk_user_id anyway (see the PATCH/DELETE endpoints below), so it
+    doubles as both `id` and `user_id` here."""
+    return OrgMemberResponse(
+        id=user.clerk_user_id,
+        user_id=user.clerk_user_id,
+        name=user.name,
+        email=user.email,
+        role=_CLERK_ROLE[user.role],
+        status="inactive",
+    )
+
+
+@router.get("", response_model=list[OrgMemberResponse])
 async def list_members(
-    db: AsyncSession = Depends(get_admin_db),
     claims: dict[str, Any] = Depends(require_org_admin),
-) -> list[MemberResponse]:
-    """From the RLS-scoped `users` table — no WHERE org_id here, RLS alone
-    restricts this to the caller's own org (members ARE product users;
-    reading under RLS is fine, only *provisioning* an admin as a product
-    user is avoided). Soft-deleted (removed) members stay visible, with
-    status="inactive", so admins can see who's been removed and re-invite
-    them from the same screen."""
-    result = await db.execute(select(Users))
-    return [
-        MemberResponse(
-            id=user.id,
-            clerk_user_id=user.clerk_user_id,
-            name=user.name,
-            email=user.email,
-            role=user.role,
-            status=_status(user.status),
-        )
-        for user in result.scalars().all()
+    db: AsyncSession = Depends(get_admin_db),
+) -> list[OrgMemberResponse]:
+    """Own-org member list: live Clerk memberships (always active, and always
+    reflecting the current Clerk role even if it was changed directly in the
+    Clerk Dashboard) merged with locally-soft-deleted `users` rows (removed
+    members, whose Clerk membership is fully revoked and so would never
+    appear in the live list otherwise). No _set_org_scope needed here, unlike
+    platform_members.py::list_org_members — get_admin_db's RLS clamp already
+    scopes this session to the caller's own org.
+
+    Dedup: a local inactive row is only included if its clerk_user_id is NOT
+    also in the live Clerk list — see list_org_members's docstring for why.
+    """
+    try:
+        memberships = await list_organization_memberships(claims["tenant_id"])
+    except httpx.HTTPError as exc:
+        raise clerk_error_to_http(exc) from exc
+
+    live_clerk_user_ids = {m["public_user_data"]["user_id"] for m in memberships}
+
+    local_inactive = await db.scalars(select(Users).where(Users.status == "inactive"))
+
+    result = [_to_org_member_response(m) for m in memberships]
+    result += [
+        _inactive_local_user_to_org_member_response(user)
+        for user in local_inactive
+        if user.clerk_user_id not in live_clerk_user_ids
     ]
+    return result
 
 
-@router.delete("/{user_id}", response_model=SuccessResponse)
+@router.delete("/{clerk_user_id}", response_model=SuccessResponse)
 async def remove_member(
-    user_id: int,
+    clerk_user_id: str,
     claims: dict[str, Any] = Depends(require_org_admin),
     db: AsyncSession = Depends(get_admin_db),
 ) -> SuccessResponse:
     """Member-removal semantics: primary = revoke the Clerk org membership;
     secondary = soft-delete the local `users` row (status -> 'inactive',
-    deactivated_at stamped; RLS-scoped). Reversible by re-inviting — the row
-    is reactivated on the re-invited member's next login, see
-    _ensure_user_provisioned in app/core/dependencies.py.
+    deactivated_at stamped) if one exists — best-effort, since an admin-only
+    identity (or a member who never logged into the product) may have none.
+    Reversible by re-inviting — the row is reactivated on the re-invited
+    member's next login, see _ensure_user_provisioned in
+    app/core/dependencies.py.
 
-    Since the role-change feature (PATCH /admin/members/{user_id}) lets a
-    member hold an active `clerk_admin_users` row at the same time as their
+    Target is looked up by live Clerk membership, not a local row, mirroring
+    platform_members.py::remove_org_member — this also fixes the bug where an
+    admin-only identity with no local `users` row could never be removed
+    through this endpoint (it would 404 on the old local-only lookup).
+
+    Since the role-change feature (PATCH /admin/members/{clerk_user_id}) lets
+    a member hold an active `clerk_admin_users` row at the same time as their
     `users` row, this also deactivates that admin row if one exists — a
-    deleted member must not be left with dangling `/admin` portal access.
-    The last-active-admin guard below now covers this endpoint too, not just
-    the PATCH demote path (was previously scaffolded-but-inert here, per R3,
-    back when admins could never also hold a `users` row)."""
-    target = await db.get(Users, user_id)
-    if target is None:
-        raise HTTPException(status_code=404, detail="Member not found")
-    if target.clerk_user_id == claims["user_id"]:
-        # The caller has no `users` row (admins are admin-only), so this can
-        # only ever fire if an admin is somehow also the target row — kept
-        # as a guard anyway since the target is looked up by path param, not
-        # assumed absent.
+    deleted member must not be left with dangling `/admin` portal access."""
+    if clerk_user_id == claims["user_id"]:
         raise HTTPException(status_code=403, detail="Cannot remove yourself")
 
-    target_admin_row = await AdminUserRepo(db).get_by_clerk_id(target.clerk_user_id)
+    try:
+        memberships = await list_organization_memberships(claims["tenant_id"])
+    except httpx.HTTPError as exc:
+        raise clerk_error_to_http(exc) from exc
+    current = next(
+        (m for m in memberships if m["public_user_data"]["user_id"] == clerk_user_id), None
+    )
+    if current is None:
+        raise HTTPException(status_code=404, detail="Member not found")
+
+    target_admin_row = await AdminUserRepo(db).get_by_clerk_id(clerk_user_id)
     target_is_active_admin = target_admin_row is not None and target_admin_row.status == "active"
     if target_is_active_admin:
         active_admins = await db.scalar(
@@ -96,15 +142,17 @@ async def remove_member(
             raise HTTPException(status_code=403, detail="Cannot remove the last active admin")
 
     try:
-        await remove_organization_membership(claims["tenant_id"], target.clerk_user_id)
+        await remove_organization_membership(claims["tenant_id"], clerk_user_id)
     except httpx.HTTPError as exc:
         raise clerk_error_to_http(exc) from exc
 
-    removed_clerk_user_id, removed_email = target.clerk_user_id, target.email
-    target.status = "inactive"
-    target.deactivated_at = utc_now()
     if target_is_active_admin:
-        await AdminUserRepo(db).deactivate(removed_clerk_user_id)
+        await AdminUserRepo(db).deactivate(clerk_user_id)
+
+    local_user = await db.scalar(select(Users).where(Users.clerk_user_id == clerk_user_id))
+    if local_user is not None:
+        local_user.status = "inactive"
+        local_user.deactivated_at = utc_now()
 
     org_id, actor_id, actor_email = await _admin_actor(db, claims)
     await HumanAuditRepo(db).append(
@@ -114,8 +162,8 @@ async def remove_member(
             "actor_email": actor_email,
             "event_type": "admin_member_removed",
             "payload": {
-                "removed_clerk_user_id": removed_clerk_user_id,
-                "removed_email": removed_email,
+                "removed_clerk_user_id": clerk_user_id,
+                "removed_email": await fetch_clerk_user_primary_email(clerk_user_id),
                 "admin_role_deactivated": target_is_active_admin,
                 "clerk_membership_revoked": True,
             },
@@ -124,26 +172,40 @@ async def remove_member(
     return SuccessResponse(success=True)
 
 
-@router.patch("/{user_id}", response_model=MemberResponse)
+@router.patch("/{clerk_user_id}", response_model=OrgMemberResponse)
 async def update_member_role(
-    user_id: int,
+    clerk_user_id: str,
     payload: UpdateMemberRoleRequest,
     claims: dict[str, Any] = Depends(require_org_admin),
     db: AsyncSession = Depends(get_admin_db),
-) -> MemberResponse:
-    """Own-org role change — keeps `users.role`, the Clerk org membership
-    role, and `clerk_admin_users` in sync. Guard order matters: self-change,
-    last-admin, and no-op checks all happen before the external Clerk call
-    (mirrors remove_member's discipline of never mutating Clerk speculatively)."""
-    target = await db.get(Users, user_id)
-    if target is None:
-        raise HTTPException(status_code=404, detail="Member not found")
-    if target.clerk_user_id == claims["user_id"]:
+) -> OrgMemberResponse:
+    """Own-org role change — keeps the Clerk org membership role,
+    `clerk_admin_users`, and (best-effort) `users.role` in sync. Target is
+    looked up by live Clerk membership, not a local row, mirroring
+    platform_members.py::update_org_member_role — this also fixes the bug
+    where an admin-only identity with no local `users` row could never be
+    role-changed through this endpoint. Guard order matters: self-change,
+    no-op, and last-admin checks all happen before the external Clerk call
+    (mirrors remove_member's discipline of never mutating Clerk
+    speculatively)."""
+    if clerk_user_id == claims["user_id"]:
         raise HTTPException(status_code=403, detail="Cannot change your own role")
 
-    old_role = target.role
+    try:
+        memberships = await list_organization_memberships(claims["tenant_id"])
+    except httpx.HTTPError as exc:
+        raise clerk_error_to_http(exc) from exc
+    current = next(
+        (m for m in memberships if m["public_user_data"]["user_id"] == clerk_user_id), None
+    )
+    if current is None:
+        raise HTTPException(status_code=404, detail="Member not found")
+
     new_role = payload.role
-    if old_role == "admin" and new_role == "member":
+    if _CLERK_ROLE[new_role] == current["role"]:
+        return _to_org_member_response(current)
+
+    if current["role"] == "org:admin" and new_role == "member":
         active_admins = await db.scalar(
             select(func.count())
             .select_from(ClerkAdminUser)
@@ -152,19 +214,9 @@ async def update_member_role(
         if active_admins is not None and active_admins <= 1:
             raise HTTPException(status_code=403, detail="Cannot demote the last active admin")
 
-    if new_role == old_role:
-        return MemberResponse(
-            id=target.id,
-            clerk_user_id=target.clerk_user_id,
-            name=target.name,
-            email=target.email,
-            role=target.role,
-            status=_status(target.status),
-        )
-
     try:
-        await update_organization_membership(
-            claims["tenant_id"], target.clerk_user_id, _CLERK_ROLE[new_role]
+        updated = await update_organization_membership(
+            claims["tenant_id"], clerk_user_id, _CLERK_ROLE[new_role]
         )
     except httpx.HTTPError as exc:
         raise clerk_error_to_http(exc) from exc
@@ -178,17 +230,20 @@ async def update_member_role(
         )
         await AdminUserRepo(db).reactivate_or_create(
             {
-                "clerk_user_id": target.clerk_user_id,
+                "clerk_user_id": clerk_user_id,
                 "clerk_org_id": claims["tenant_id"],
                 "org_id": org_id,
-                "email": target.email,
+                "email": await fetch_clerk_user_primary_email(clerk_user_id),
                 "admin_type": admin_type,
             }
         )
     else:
-        await AdminUserRepo(db).deactivate(target.clerk_user_id)
+        await AdminUserRepo(db).deactivate(clerk_user_id)
 
-    target.role = new_role
+    local_user = await db.scalar(select(Users).where(Users.clerk_user_id == clerk_user_id))
+    users_role_updated = local_user is not None
+    if local_user is not None:
+        local_user.role = new_role
 
     await HumanAuditRepo(db).append(
         {
@@ -197,22 +252,13 @@ async def update_member_role(
             "actor_email": actor_email,
             "event_type": "admin_member_role_changed",
             "payload": {
-                "target_clerk_user_id": target.clerk_user_id,
-                "target_email": target.email,
-                "old_role": old_role,
-                "new_role": new_role,
+                "target_clerk_user_id": clerk_user_id,
+                "target_email": await fetch_clerk_user_primary_email(clerk_user_id),
+                "old_role": current["role"],
+                "new_role": _CLERK_ROLE[new_role],
                 "clerk_membership_role_updated": True,
-                # target is always looked up by local int id, so a `users`
-                # row is guaranteed to exist and be updated on this path.
-                "users_role_updated": True,
+                "users_role_updated": users_role_updated,
             },
         }
     )
-    return MemberResponse(
-        id=target.id,
-        clerk_user_id=target.clerk_user_id,
-        name=target.name,
-        email=target.email,
-        role=target.role,
-        status=_status(target.status),
-    )
+    return _to_org_member_response(updated)

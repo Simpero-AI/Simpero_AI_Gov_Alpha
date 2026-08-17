@@ -7,23 +7,14 @@ class UpdateMemberRoleRequest(CamelModel):
     role: Literal["member", "admin"]
 
 
-class MemberResponse(CamelModel):
-    id: int
-    clerk_user_id: str
-    name: str | None
-    email: str | None
-    role: str
-    status: Literal["active", "inactive"]
-
-
 class OrgMemberResponse(CamelModel):
-    """Platform-admin cross-org member view (GET
+    """Member view for both the org-admin's own-org members endpoints (GET
+    /members) and the platform-admin cross-org endpoints (GET
     /organizations/{clerk_org_id}/members) — sourced from Clerk's membership
-    API merged with locally-soft-deleted `users` rows (see list_org_members).
-    `id` is the Clerk org membership id for live members, or the
-    `clerk_user_id` for a locally-inactive row with no Clerk membership left
-    — distinct from MemberResponse, whose int id backs the org-admin's
-    own-org DELETE /members/{user_id}."""
+    API merged with locally-soft-deleted `users` rows (see list_org_members /
+    list_members). `id` is the Clerk org membership id for live members, or
+    the `clerk_user_id` for a locally-inactive row with no Clerk membership
+    left."""
 
     id: str
     user_id: str
