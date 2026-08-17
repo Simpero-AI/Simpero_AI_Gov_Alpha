@@ -42,10 +42,10 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from sqlalchemy import select
-from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Claim, Edge
+from app.models import Claim
+from app.services.edge_writer import flush_edges, stage_edge
 
 # Same real-world number restated twice should match closely -- this is NOT
 # the arithmetic-derivation tolerance SIM-372 uses (that checks a formula
@@ -149,11 +149,13 @@ async def reconcile_same_fact(
         groups.setdefault((c.entity, c.attribute, c.period_year, c.period_kind), []).append(c)
 
     summary = ReconciliationSummary()
+    edges: list[dict] = []
     for group in groups.values():
         if len(group) < 2:
             continue
         summary.groups_considered += 1
-        await _reconcile_group(session, group, run_id=run_id, summary=summary)
+        _reconcile_group(group, run_id=run_id, summary=summary, edges=edges)
+    await flush_edges(session, edges)
 
     summary.open_questions.append(
         "table-vs-prose ownership falls back to table_group_id today -- "
@@ -165,12 +167,12 @@ async def reconcile_same_fact(
     return summary
 
 
-async def _reconcile_group(
-    session: AsyncSession,
+def _reconcile_group(
     group: Sequence[Claim],
     *,
     run_id: str,
     summary: ReconciliationSummary,
+    edges: list[dict],
 ) -> None:
     # Greedy value-clustering: each claim joins the first existing cluster
     # whose representative value matches it, else starts a new cluster.
@@ -217,13 +219,14 @@ async def _reconcile_group(
             # pairing (SIM-341); re-deriving it here would double-count.
             summary.skipped_same_page_pairs += 1
             continue
-        await _write_edge(
-            session,
+        stage_edge(
+            edges,
             org_id=other.org_id,
             from_claim_id=other.id,
             to_claim_id=canonical_claim.id,
             type_="same_fact",
             basis=f"cross-page reconciliation: {other.attribute} matches the canonical claim",
+            created_by="reconciliation",
             run_id=run_id,
             metadata_={"rule": "value_match", "tolerance": _SAME_FACT_REL_TOL},
         )
@@ -244,42 +247,15 @@ async def _reconcile_group(
             continue
         from_id, to_id = _canonical_from_to(rep.id, canonical_claim.id)
         value_delta = float(rep.value["normalized"]) - float(canonical_claim.value["normalized"])
-        await _write_edge(
-            session,
+        stage_edge(
+            edges,
             org_id=rep.org_id,
             from_claim_id=from_id,
             to_claim_id=to_id,
             type_="contradicts",
             basis=f"cross-page reconciliation: {rep.attribute} disagrees with the canonical claim",
+            created_by="reconciliation",
             run_id=run_id,
             metadata_={"value_delta": value_delta},
         )
         summary.contradicts_edges += 1
-
-
-async def _write_edge(
-    session: AsyncSession,
-    *,
-    org_id: int,
-    from_claim_id: uuid.UUID,
-    to_claim_id: uuid.UUID,
-    type_: str,
-    basis: str,
-    run_id: str,
-    metadata_: dict,
-) -> None:
-    stmt = (
-        pg_insert(Edge)
-        .values(
-            org_id=org_id,
-            from_claim_id=from_claim_id,
-            to_claim_id=to_claim_id,
-            type=type_,
-            basis=basis,
-            created_by="reconciliation",
-            run_id=run_id,
-            metadata_=metadata_,
-        )
-        .on_conflict_do_nothing(constraint="uq_edges_org_from_to_type")
-    )
-    await session.execute(stmt)
