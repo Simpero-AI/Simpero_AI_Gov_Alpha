@@ -1,6 +1,8 @@
 from datetime import datetime
 from typing import Literal
 
+from pydantic import Field
+
 from app.schemas.common import CamelModel
 
 
@@ -224,4 +226,55 @@ class ScreeningResultResponse(CamelModel):
     rulebook_version: str
     recommendation: str
     rule_results: list[ScreeningRuleResultResponse]
+    created_at: datetime
+
+
+class FormerNameResponse(CamelModel):
+    """A previous legal name with the window it applied to.
+
+    The dates are the point, not decoration: they are what lets a reader tell
+    "this document is old and uses the old name" from "this is a different
+    company". Both bounds are optional — EDGAR omits `to` on an open range and
+    has thin history for older filers, and an absent date is unknown, never
+    inferred.
+    """
+
+    name: str
+    # `from` is a Python keyword, so the attribute is `from_` with an explicit
+    # alias. to_camel would leave the trailing underscore on the wire, and the
+    # stored JSONB (and EDGAR itself) spells it `from` — the alias keeps the
+    # persisted shape and the wire shape identical, as everywhere else here.
+    from_: str | None = Field(default=None, alias="from")
+    to: str | None = None
+
+
+class EntityResolutionResponse(CamelModel):
+    """GET/POST /deals/{id}/entity-resolution — which real-world company this
+    deal was resolved to, and on what evidence.
+
+    Three outcomes, and the last two are NOT the same thing:
+    `notFound` means we searched and this company genuinely has no SEC filer —
+    the expected answer for a private target, and never a negative finding
+    about the deal. `unresolved` means we could not tell (ambiguous name, or
+    SEC's own endpoints disagreeing) and therefore checked nothing.
+
+    `registryId` (EDGAR's 10-digit CIK) is present only on `resolved`, and
+    always present on it — the database enforces both directions.
+    """
+
+    id: str
+    deal_id: str
+    source: str
+    status: Literal["resolved", "not_found", "unresolved"]
+    query_name: str
+    registry_id: str | None
+    legal_name: str | None
+    former_names: list[FormerNameResponse]
+    matched_on: Literal["current_name", "former_name"] | None
+    reason: str | None
+    # Which endpoints were called, candidate counts, the matched name. A bare
+    # dict for the same reason as ScreeningRuleResultResponse.evidence_ref:
+    # its keys legitimately differ per outcome, and flattening it into one
+    # optional-everything model would lose that.
+    evidence: dict
     created_at: datetime

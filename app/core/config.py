@@ -20,6 +20,12 @@ class Settings(BaseSettings):
     # Clerk org id of the Simpero platform org (internal staff). "" => the
     # platform-admin surface fails closed (denies everyone) until set.
     simpero_platform_org_id: str = ""
+    # SEC EDGAR entity resolution (SIM-262). Keyless — SEC asks only for a
+    # descriptive User-Agent naming a contact, e.g. "Simpero AI ops@simpero.ai".
+    # "" => EdgarResolver raises at construction rather than sending
+    # unidentified traffic SEC answers with 403, so the feature fails closed
+    # until set — same posture as voyage_api_key.
+    sec_edgar_user_agent: str = ""
     # Frontend base URL — builds Clerk invitation redirect_url(s) for both the
     # admin seed invite (/admin/sign-up) and product-user invites (/sign-up).
     app_base_url: str = "http://localhost:3000"

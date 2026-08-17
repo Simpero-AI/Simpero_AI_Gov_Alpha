@@ -9,6 +9,7 @@ from app.models.corroboration_event import CorroborationEvent
 from app.models.data_source import DataSource
 from app.models.deal import Deal
 from app.models.edge import Edge
+from app.models.entity_resolution import EntityResolution
 from app.models.human_audit_log import HumanAuditLog
 from app.models.investment_profile import InvestmentProfile
 from app.models.mandate import Mandate, MandateCategory, MandateOptions
@@ -27,6 +28,7 @@ __all__ = [
     "DataSource",
     "Deal",
     "Edge",
+    "EntityResolution",
     "HumanAuditLog",
     "InvestmentProfile",
     "Mandate",
