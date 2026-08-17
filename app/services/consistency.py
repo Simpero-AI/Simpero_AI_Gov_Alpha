@@ -47,10 +47,10 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
 from sqlalchemy import select
-from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Claim, Edge
+from app.models import Claim
+from app.services.edge_writer import flush_edges, stage_edge
 from app.services.tolerance import values_match
 
 # Match vs mismatch uses the shared value_type-keyed tolerance table
@@ -184,6 +184,7 @@ async def reconcile_consistency(
         summary.rules_evaluated += 1
         rules_by_attribute.setdefault(rule.derived_attribute, []).append(rule)
 
+    edges: list[dict] = []
     for attribute, attribute_rules in rules_by_attribute.items():
         derived_candidates = [
             c
@@ -193,9 +194,10 @@ async def reconcile_consistency(
             if c.claim_type == "computational"
         ]
         for derived in derived_candidates:
-            await _check_derived(
-                session, derived, attribute_rules, by_key, run_id=run_id, summary=summary
+            _check_derived(
+                derived, attribute_rules, by_key, run_id=run_id, summary=summary, edges=edges
             )
+    await flush_edges(session, edges)
     return summary
 
 
@@ -237,14 +239,14 @@ def _evaluate(
     return operands, expected, actual
 
 
-async def _check_derived(
-    session: AsyncSession,
+def _check_derived(
     derived: Claim,
     rules: Sequence[Rule],
     by_key: dict[tuple[str, int | None, str | None, str], list[Claim]],
     *,
     run_id: str,
     summary: ConsistencySummary,
+    edges: list[dict],
 ) -> None:
     """Disposition one computational claim against every rule that derives its
     attribute, coherently. It reconstructs cleanly only if EVERY evaluable rule
@@ -272,13 +274,14 @@ async def _check_derived(
                 if pair in seen_pairs:
                     continue
                 seen_pairs.add(pair)
-                await _write_edge(
-                    session,
+                stage_edge(
+                    edges,
                     org_id=derived.org_id,
                     from_claim_id=pair[0],
                     to_claim_id=pair[1],
                     type_="contradicts",
                     basis=f"{rule.name}: recomputed {expected:.4g} vs claimed {actual:.4g}",
+                    created_by="consistency",
                     run_id=run_id,
                     metadata_={"rule": rule.name, "value_delta": expected - actual},
                 )
@@ -298,42 +301,15 @@ async def _check_derived(
             if operand.id in seen_operands:
                 continue
             seen_operands.add(operand.id)
-            await _write_edge(
-                session,
+            stage_edge(
+                edges,
                 org_id=derived.org_id,
                 from_claim_id=derived.id,
                 to_claim_id=operand.id,
                 type_="derived_from",
                 basis=f"{rule.name}: recomputed {expected:.4g} matches claimed {actual:.4g}",
+                created_by="consistency",
                 run_id=run_id,
                 metadata_={"rule": rule.name, "operands": [str(o.id) for o in operands.values()]},
             )
             summary.derived_from_edges += 1
-
-
-async def _write_edge(
-    session: AsyncSession,
-    *,
-    org_id: int,
-    from_claim_id: uuid.UUID,
-    to_claim_id: uuid.UUID,
-    type_: str,
-    basis: str,
-    run_id: str,
-    metadata_: dict,
-) -> None:
-    stmt = (
-        pg_insert(Edge)
-        .values(
-            org_id=org_id,
-            from_claim_id=from_claim_id,
-            to_claim_id=to_claim_id,
-            type=type_,
-            basis=basis,
-            created_by="consistency",
-            run_id=run_id,
-            metadata_=metadata_,
-        )
-        .on_conflict_do_nothing(constraint="uq_edges_org_from_to_type")
-    )
-    await session.execute(stmt)
