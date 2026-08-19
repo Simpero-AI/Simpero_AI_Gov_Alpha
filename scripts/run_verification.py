@@ -102,9 +102,11 @@ async def _run(org_key: str, commit: bool) -> None:
         else:
             print("      (none)")
 
-        # After the promoter's in-session mutations, so the histogram reflects
-        # what --commit would actually persist -- autoflush pushes the pending
-        # status changes out ahead of the aggregate.
+        # AsyncSessionLocal sets autoflush=False, so the promoter's in-place
+        # `status` mutations are invisible to a SQL aggregate until they are
+        # flushed -- without this the histogram below would print the BEFORE
+        # numbers again and read as "the promoter did nothing".
+        await session.flush()
         print("\nclaim status after verification:")
         await _print_status_histogram(session)
 

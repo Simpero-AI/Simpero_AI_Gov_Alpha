@@ -42,6 +42,14 @@ Scope, and what it deliberately leaves alone:
 `session` must already be RLS-scoped (SET LOCAL app.org_id) by the caller,
 and the caller owns the transaction: this mutates claims in place and never
 flushes or commits, same contract as the rest of app/services/.
+
+One consequence worth stating, because it is easy to get wrong: the app's
+sessions are built with autoflush=False (app/core/database.py), so those
+in-place mutations are invisible to any subsequent SQL read of `status`
+until the caller flushes. A later pass that SELECTs on status -- the status
+roll-up does exactly that -- must be preceded by an explicit
+`await session.flush()`, or it silently sees the pre-promotion world and
+does nothing.
 """
 
 from __future__ import annotations
