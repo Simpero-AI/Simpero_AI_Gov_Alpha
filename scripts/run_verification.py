@@ -2,7 +2,8 @@
 exact-span `proposed -> cited` promoter (SIM-412) first, then the two
 claim-to-claim passes that write typed edges + flags -- 3a reconciliation (same
 fact across pages/tiers, SIM-371) and 3b consistency (formula reconstruction,
-SIM-372/376).
+SIM-372/376), and finally the status roll-up (SIM-254, wired here by
+SIM-413).
 
 This is the post-ingest step that turns the pipeline from extraction -> claims
 into extraction -> claims -> verification -> edges. The passes existed and were
@@ -38,8 +39,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import AsyncSessionLocal
 from app.models import Claim
 from app.services.consistency import reconcile_consistency
+from app.services.corroboration import CORROBORATABLE_STATUSES
 from app.services.reconciliation import reconcile_same_fact
 from app.services.span_promotion import promote_exact_span
+from app.services.status_rollup import roll_up_status
 
 
 class _Rollback(Exception):
@@ -102,19 +105,47 @@ async def _run(org_key: str, commit: bool) -> None:
         else:
             print("      (none)")
 
-        # AsyncSessionLocal sets autoflush=False, so the promoter's in-place
-        # `status` mutations are invisible to a SQL aggregate until they are
-        # flushed -- without this the histogram below would print the BEFORE
-        # numbers again and read as "the promoter did nothing".
+        # Last, and reading everything above: the roll-up folds internal
+        # disagreement (formula_mismatch flags, contradicts edges) and any
+        # external corroboration events into one trust status per claim.
+        rolled = await _roll_up_all(session)
+        print("\nstatus roll-up (cited -> verified / inconclusive / ...):")
+        if rolled:
+            for status, n in sorted(rolled.items()):
+                print(f"      -> {status:20} {n}")
+        else:
+            print("      (nothing internally checked yet)")
+
+        # _roll_up_all flushes on the way out; this is belt-and-braces for the
+        # aggregate below, since AsyncSessionLocal sets autoflush=False and an
+        # unflushed in-place `status` mutation would make the histogram print
+        # the BEFORE numbers and read as "nothing happened".
         await session.flush()
         print("\nclaim status after verification:")
         await _print_status_histogram(session)
 
         if commit:
-            print("\n--commit: persisting edges + flags + promoted statuses.")
+            print("\n--commit: persisting edges + flags + promoted/rolled-up statuses.")
         else:
             print("\ndry run -- rolling back (pass --commit to persist).")
             raise _Rollback()
+
+
+async def _roll_up_all(session: AsyncSession) -> dict[str, int]:
+    """Roll up every internally-checked claim in scope, returning the resulting
+    status counts. The status filter is the guard: roll_up_status raises on a
+    claim that has not reached `cited`, which is exactly what `proposed` and
+    `missing` claims are."""
+    # autoflush=False, so the promoter's pending proposed -> cited mutations
+    # would not be visible to this SELECT and the roll-up would find nothing.
+    await session.flush()
+    stmt = select(Claim).where(Claim.status.in_(sorted(CORROBORATABLE_STATUSES)))
+    counts: dict[str, int] = {}
+    for claim in (await session.scalars(stmt)).all():
+        resolved = await roll_up_status(session, claim)
+        counts[resolved] = counts.get(resolved, 0) + 1
+    await session.flush()
+    return counts
 
 
 async def _print_status_histogram(session: AsyncSession) -> None:
