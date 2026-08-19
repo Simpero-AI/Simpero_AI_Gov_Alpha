@@ -134,6 +134,14 @@ def _count_claims(owner_conn, org_pk: int) -> int:
         return cur.fetchone()[0]
 
 
+def _claim_statuses(owner_conn, org_pk: int) -> dict[str, int]:
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "SELECT status, count(*) FROM claims WHERE org_id = %s GROUP BY status", (org_pk,)
+        )
+        return dict(cur.fetchall())
+
+
 def _fetch_edges(owner_conn, org_pk: int) -> list[tuple[str, str]]:
     with owner_conn.cursor() as cur:
         cur.execute("SELECT type, created_by FROM edges WHERE org_id = %s", (org_pk,))
@@ -196,6 +204,7 @@ async def test_ingests_claims_and_reconciles_same_page_fact(
     assert run["job_comments"][0]["status"] == "verified"
     assert "2 claim(s) ingested" in run["job_comments"][0]["comment"]
     assert "1 same_fact" in run["job_comments"][0]["comment"]
+    assert "2 cited via exact_span" in run["job_comments"][0]["comment"]
 
     # SIM-404: chains into a job_name="screening" row + enqueue. The row is
     # created inside the job's transaction (uq_analysis_run_active is per
@@ -217,6 +226,75 @@ async def test_ingests_claims_and_reconciles_same_page_fact(
     assert job_name == "start_deal_screening"
     assert kwargs["analysis_run_id"] == str(screening_run_id)
     assert kwargs["clerk_org_id"] == seeded_org["clerk_org_id"]
+
+
+async def test_promotes_span_resolved_claims_and_holds_the_rest(
+    owner_conn, seeded_org, seeded_deal, monkeypatch, mocked_screening_enqueue
+):
+    """SIM-412 through the real job: the parser hands every PDF claim over at
+    `proposed`, and before this pass existed the deal ended the run 100%
+    `proposed`/`missing` with zero `cited` -- nothing screening or any external
+    corroborator would look at. tests/test_span_promotion.py covers the rule
+    itself; this pins that the job actually runs it, and that the two claims it
+    must NOT promote survive a full end-to-end run untouched."""
+    data_source_id = _seed_data_source(owner_conn, seeded_org["org_pk"], seeded_deal, "cim.pdf")
+    parse_jobs = [
+        {
+            "data_source_id": data_source_id,
+            "filename": "cim.pdf",
+            "storage_key": "org/cim.pdf",
+            "job_key": "job-1",
+            "outcome": "parsed",
+            "code": None,
+            "message": None,
+            "bucket": "test-bucket",
+            "key": "claims/cim.json",
+        }
+    ]
+    parsing_run_id = _seed_parsing_run(owner_conn, seeded_org["org_pk"], seeded_deal, parse_jobs)
+    run_id = _seed_verification_run(owner_conn, seeded_org["org_pk"], seeded_deal)
+
+    faulted = _claim_json("c2", page=5)
+    faulted["flags"] = ["binding_unsupported"]
+
+    not_found = _claim_json("c3", page=9)
+    not_found["status"] = "missing"
+    not_found["location"] = {"kind": "pdf", "page": 9}
+
+    envelope = {
+        "run_id": parsing_run_id,
+        "sha256": "a" * 64,
+        "source_file": "cim.pdf",
+        "claims": [_claim_json("c1", page=1), faulted, not_found],
+        "edges": [],
+    }
+    monkeypatch.setattr(job_module, "get_json_object", lambda bucket, key: envelope)
+
+    await job_module.start_deal_verification(
+        {},
+        analysis_run_id=run_id,
+        parsing_run_id=parsing_run_id,
+        clerk_org_id=seeded_org["clerk_org_id"],
+    )
+
+    assert _fetch_run(owner_conn, run_id)["status"] == "successful"
+    assert _claim_statuses(owner_conn, seeded_org["org_pk"]) == {
+        "cited": 1,
+        "proposed": 1,
+        "missing": 1,
+    }
+
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "SELECT claim_ref, verification_method FROM claims WHERE org_id = %s "
+            "ORDER BY claim_ref",
+            (seeded_org["org_pk"],),
+        )
+        assert cur.fetchall() == [("c1", "exact_span"), ("c2", None), ("c3", None)]
+
+    comment = _fetch_run(owner_conn, run_id)["job_comments"][0]["comment"]
+    assert "1 cited via exact_span" in comment
+    assert "1 held at proposed (binding_unsupported)" in comment
 
 
 async def test_no_usable_documents_marks_run_failed(owner_conn, seeded_org, seeded_deal):

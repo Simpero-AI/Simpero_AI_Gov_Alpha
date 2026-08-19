@@ -39,6 +39,7 @@ from app.repo.AnalysisRunRepo import AnalysisRunRepo
 from app.repo.HumanAuditRepo import HumanAuditRepo
 from app.services.consistency import reconcile_consistency
 from app.services.reconciliation import reconcile_same_fact
+from app.services.span_promotion import promote_exact_span
 from app.services.uploads.spaces import get_json_object
 
 logger = logging.getLogger(__name__)
@@ -281,6 +282,15 @@ async def _run_verification(
             )
 
         for data_source_id in verified_data_source_ids:
+            # SIM-412 first: the parser leaves every PDF claim at `proposed`,
+            # and nothing downstream of here trusts a `proposed` claim
+            # (screening's claims_lookup, corroboration's precondition, the
+            # status roll-up). Promotion is a provenance judgment -- "the cited
+            # span resolved and the binding auditor did not fault it" -- so it
+            # is independent of 3a/3b, which decide whether the claim agrees
+            # with its neighbours. Running it before them keeps the reading
+            # order honest: cite first, then cross-check.
+            promoted = await promote_exact_span(session, data_source_id=data_source_id)
             same_fact = await reconcile_same_fact(
                 session, data_source_id=data_source_id, run_id=analysis_run_id
             )
@@ -291,7 +301,10 @@ async def _run_verification(
                 if comment["dataSourceId"] == str(data_source_id):
                     comment["status"] = "verified"
                     comment["comment"] += (
-                        f" Reconciliation: {same_fact.same_fact_edges} same_fact, "
+                        f" Promotion: {promoted.claims_promoted} cited via exact_span, "
+                        f"{promoted.skipped_binding_unsupported} held at proposed "
+                        f"(binding_unsupported). "
+                        f"Reconciliation: {same_fact.same_fact_edges} same_fact, "
                         f"{same_fact.contradicts_edges} contradicts. Consistency: "
                         f"{consistency.derived_from_edges} derived_from, "
                         f"{consistency.contradicts_edges} contradicts."

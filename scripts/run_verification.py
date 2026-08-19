@@ -1,6 +1,8 @@
-"""Run the claim-to-claim verification passes over one tenant's already-ingested
-claims and write their typed edges + flags: 3a reconciliation (same fact across
-pages/tiers, SIM-371) then 3b consistency (formula reconstruction, SIM-372/376).
+"""Run the verification passes over one tenant's already-ingested claims: the
+exact-span `proposed -> cited` promoter (SIM-412) first, then the two
+claim-to-claim passes that write typed edges + flags -- 3a reconciliation (same
+fact across pages/tiers, SIM-371) and 3b consistency (formula reconstruction,
+SIM-372/376).
 
 This is the post-ingest step that turns the pipeline from extraction -> claims
 into extraction -> claims -> verification -> edges. The passes existed and were
@@ -14,7 +16,14 @@ passes REQUIRE an already-scoped session and do not scope themselves (see their
 docstrings). data_source_id=None matches the demo ingest path (its claims carry
 a NULL data_source_id). Both passes are idempotent (INSERT ... ON CONFLICT DO
 NOTHING against SIM-369's UNIQUE), so a re-run over unchanged claims writes zero
-new edges. Rolls back unless --commit, the same safety contract as the ingest.
+new edges; the promoter is idempotent too (it only selects `proposed` claims,
+so a second run finds none). Rolls back unless --commit, the same safety
+contract as the ingest.
+
+The claim-status histogram printed at the end is the observable this whole
+chain exists for: before SIM-412 it read 100% proposed/missing with zero
+`cited`, which is what left screening and every external corroborator with
+nothing to read.
 """
 
 from __future__ import annotations
@@ -24,11 +33,13 @@ import asyncio
 import contextlib
 
 from sqlalchemy import func, select, text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import AsyncSessionLocal
 from app.models import Claim
 from app.services.consistency import reconcile_consistency
 from app.services.reconciliation import reconcile_same_fact
+from app.services.span_promotion import promote_exact_span
 
 
 class _Rollback(Exception):
@@ -48,8 +59,17 @@ async def _run(org_key: str, commit: bool) -> None:
         if not n_claims:
             print("  nothing to verify -- ingest first (scripts/ingest_claims.py).")
 
+        print("\nclaim status before verification:")
+        await _print_status_histogram(session)
+
+        promoted = await promote_exact_span(session, data_source_id=None)
         recon = await reconcile_same_fact(session, data_source_id=None, run_id="sandbox-3a")
         cons = await reconcile_consistency(session, data_source_id=None, run_id="sandbox-3b")
+
+        print("\nexact-span promotion (proposed -> cited):")
+        print(f"      claims considered ........ {promoted.claims_considered}")
+        print(f"      promoted to cited ........ {promoted.claims_promoted}")
+        print(f"      held (binding_unsupported) {promoted.skipped_binding_unsupported}")
 
         print("\n3a reconciliation (same fact across pages/tiers):")
         print(f"      groups considered ........ {recon.groups_considered}")
@@ -82,11 +102,31 @@ async def _run(org_key: str, commit: bool) -> None:
         else:
             print("      (none)")
 
+        # After the promoter's in-session mutations, so the histogram reflects
+        # what --commit would actually persist -- autoflush pushes the pending
+        # status changes out ahead of the aggregate.
+        print("\nclaim status after verification:")
+        await _print_status_histogram(session)
+
         if commit:
-            print("\n--commit: persisting edges + flags.")
+            print("\n--commit: persisting edges + flags + promoted statuses.")
         else:
             print("\ndry run -- rolling back (pass --commit to persist).")
             raise _Rollback()
+
+
+async def _print_status_histogram(session: AsyncSession) -> None:
+    """The tenant's claims by status, under its own RLS scope."""
+    rows = (
+        await session.execute(
+            select(Claim.status, func.count()).group_by(Claim.status).order_by(func.count().desc())
+        )
+    ).all()
+    if not rows:
+        print("      (no claims)")
+        return
+    for status, n in rows:
+        print(f"      {status:20} {n}")
 
 
 def main(argv: list[str] | None = None) -> None:
