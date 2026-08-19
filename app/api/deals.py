@@ -38,6 +38,8 @@ from app.schemas.deals import (
 from app.services.dashboard_stats import compute_month_bounds, compute_pipeline_value_delta
 from app.services.memo_summary import derive_pipeline_metrics
 from app.services.pipeline_steps import no_job_steps
+from app.services.screening.rule_view import enrich_rule_results
+from app.services.screening.rulebook import load_rulebook
 
 router = APIRouter(prefix="/deals", tags=["deals"])
 
@@ -320,15 +322,20 @@ async def get_deal_screening(
             detail="This deal has not been screened yet",
         )
 
+    enriched_rules = enrich_rule_results(
+        result.rule_results, load_rulebook(), result.rulebook_version
+    )
+
     return ScreeningResultResponse(
         id=str(result.id),
         deal_id=str(result.deal_id),
         analysis_run_id=str(result.analysis_run_id) if result.analysis_run_id else None,
         rulebook_version=result.rulebook_version,
         recommendation=result.recommendation,
-        # Stored shape == wire shape (RuleResult.to_json), so this validates
-        # the persisted rows rather than rebuilding them field by field.
-        rule_results=result.rule_results,
+        # Stored shape == wire shape (RuleResult.to_json) plus the two joined
+        # rulebook fields; validates the persisted rows rather than rebuilding
+        # them field by field.
+        rule_results=enriched_rules,
         created_at=result.created_at,
     )
 
