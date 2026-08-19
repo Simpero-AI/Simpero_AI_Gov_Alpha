@@ -302,6 +302,19 @@ async def test_rollup_is_idempotent(db_session, cited_claim):
     assert first == second == "inconclusive"
 
 
+async def test_rollup_is_stable_re_run_over_an_already_resolved_status(db_session, strong_claim):
+    """Idempotency where the SECOND pass's INPUT status is already a resolved
+    value, not `cited`. test_rollup_is_idempotent only re-runs from
+    `cited` -> `inconclusive`; here the first pass moves `cited` -> `verified`,
+    so the re-run exercises a resolved status as input. It must not raise
+    (every resolved status is in CORROBORATABLE_STATUSES) and must not drift."""
+    assert await roll_up_status(db_session, strong_claim) == "verified"
+    assert strong_claim.status == "verified"
+
+    assert await roll_up_status(db_session, strong_claim) == "verified"
+    assert strong_claim.status == "verified"
+
+
 async def test_rollup_upgrades_as_new_agreeing_evidence_arrives(db_session, cited_claim):
     """The roll-up is meant to be re-run as more corroboration lands, not
     computed once and frozen."""
@@ -527,5 +540,10 @@ async def test_rollup_keeps_a_strong_claim_inside_screening_trust(db_session, st
     await roll_up_status(db_session, strong_claim)
     await db_session.flush()
 
+    # Pin the `cited` -> `verified` transition this test's docstring names, not
+    # just screening membership: `cited` (a no-op roll-up) and
+    # `partially_verified` are both in _TRUSTED_STATUSES too, so a bare
+    # membership check would still pass under a strong -> verified regression.
+    assert strong_claim.status == "verified"
     after = await claims_for_attribute(db_session, strong_claim.deal_id, "revenue")
     assert strong_claim.id in {c.id for c in after}
