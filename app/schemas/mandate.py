@@ -16,6 +16,7 @@ MandateOptionResponse.model_rebuild()
 class MandateCategoryResponse(CamelModel):
     id: str
     category: str
+    slug: str | None = None
     options: list[MandateOptionResponse]
 
 

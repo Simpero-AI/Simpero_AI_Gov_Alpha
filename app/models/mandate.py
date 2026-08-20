@@ -23,6 +23,24 @@ class MandateCategory(Base):
 
     category: Mapped[str] = mapped_column(String(150), nullable=False, unique=True, index=True)
 
+    # Immutable identity, decoupled from the editable `category` display
+    # name -- assigned once at creation from a fixed, backend-owned enum
+    # (see CreateMandateCategoryRequest.slug in app/schemas/admin/mandate.py)
+    # and never changed afterward. NULL for categories outside that fixed
+    # set. Partial unique index, not a plain unique column, so multiple NULL
+    # rows don't collide -- same pattern as the mandate_options partial
+    # indexes below.
+    slug: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+    __table_args__ = (
+        Index(
+            "uq_mandate_categories_slug",
+            "slug",
+            unique=True,
+            postgresql_where=text("slug IS NOT NULL"),
+        ),
+    )
+
 
 class MandateOptions(Base):
     __tablename__ = "mandate_options"

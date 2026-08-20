@@ -67,6 +67,7 @@ async def list_categories(
         MandateCategoryResponse(
             id=str(category.id),
             category=category.category,
+            slug=category.slug,
             options=options_by_category.get(category.id, []),
         )
         for category in categories
@@ -79,12 +80,15 @@ async def create_category(
     claims: dict[str, Any] = Depends(require_platform_admin),
     db: AsyncSession = Depends(get_admin_db),
 ) -> MandateCategoryResponse:
-    category = await MandateCategoryRepo(db).create({"category": payload.category})
+    category = await MandateCategoryRepo(db).create(
+        {"category": payload.category, "slug": payload.slug}
+    )
     try:
         await db.flush()
     except IntegrityError as exc:
         raise HTTPException(
-            status_code=409, detail="A mandate category with this name already exists"
+            status_code=409,
+            detail="A mandate category with this name or slug already exists",
         ) from exc
 
     org_id, actor_id, actor_email = await _admin_actor(db, claims)
@@ -94,10 +98,16 @@ async def create_category(
             "actor_id": actor_id,
             "actor_email": actor_email,
             "event_type": "admin_mandate_category_created",
-            "payload": {"category_id": str(category.id), "category": category.category},
+            "payload": {
+                "category_id": str(category.id),
+                "category": category.category,
+                "slug": category.slug,
+            },
         }
     )
-    return MandateCategoryResponse(id=str(category.id), category=category.category, options=[])
+    return MandateCategoryResponse(
+        id=str(category.id), category=category.category, slug=category.slug, options=[]
+    )
 
 
 @router.patch("/categories/{category_id}", response_model=MandateCategoryResponse)
@@ -131,6 +141,7 @@ async def update_category(
     return MandateCategoryResponse(
         id=str(category.id),
         category=category.category,
+        slug=category.slug,
         options=_nest_options_by_category(options).get(category_id, []),
     )
 
