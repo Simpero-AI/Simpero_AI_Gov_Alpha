@@ -64,7 +64,14 @@ def seeded_org(owner_conn) -> Iterator[dict[str, Any]]:
     yield {"clerk_org_id": clerk_org_id, "org_pk": org_pk}
 
     with owner_conn.cursor() as cur:
-        for table in ("human_audit_log", "sessions", "investment_profiles", "deals", "users"):
+        for table in (
+            "human_audit_log",
+            "sessions",
+            "analysis_run",
+            "investment_profiles",
+            "deals",
+            "users",
+        ):
             cur.execute(f"DELETE FROM {table} WHERE org_id = %s", (org_pk,))
         cur.execute("DELETE FROM organisation WHERE id = %s", (org_pk,))
 
@@ -77,6 +84,18 @@ def _seed_deal(owner_conn, org_pk: int, **fields: Any) -> str:
         cur.execute(
             f"INSERT INTO deals ({cols}) VALUES ({placeholders}) RETURNING id",
             list(columns.values()),
+        )
+        return str(cur.fetchone()[0])
+
+
+def _seed_analysis_run(
+    owner_conn, org_pk: int, deal_id: str, status: str, job_name: str = "parsing"
+) -> str:
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO analysis_run (org_id, deal_id, job_name, status) "
+            "VALUES (%s, %s, %s, %s) RETURNING id",
+            (org_pk, deal_id, job_name, status),
         )
         return str(cur.fetchone()[0])
 
@@ -199,6 +218,24 @@ def test_list_pipeline_and_dashboard_stats_shapes(client, owner_conn, seeded_org
     assert "pipelineValueUsd" in stats
     assert stats["avgAiScore"]["value"] is None
     assert stats["ddCompletionPct"]["value"] == 0
+
+
+def test_list_pipeline_reflects_real_analysis_run_status(client, owner_conn, seeded_org):
+    """list_pipeline must report the same status GET /{deal_id}/status does,
+    not a hardcoded no_job -- regression test for the bug where the pipeline
+    table never showed a deal as anything but no_job."""
+    deal_id = _seed_deal(owner_conn, seeded_org["org_pk"])
+    _seed_analysis_run(owner_conn, seeded_org["org_pk"], deal_id, "in_progress")
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    status_resp = client.get(f"/deals/{deal_id}/status")
+    assert status_resp.json()["jobStatus"] == "processing"
+
+    pipeline_resp = client.get("/deals/pipeline")
+    assert pipeline_resp.status_code == 200
+    row = next(row for row in pipeline_resp.json() if row["dealId"] == deal_id)
+    assert row["agentStatus"]["jobStatus"] == "processing"
+    assert row["agentStatus"]["currentPhase"] == "parsing"
 
 
 def test_create_deal_with_screening_fields_round_trips(client, seeded_org):

@@ -172,9 +172,10 @@ async def list_pipeline(db: AsyncSession = Depends(get_db)) -> list[LivePipeline
 
     rows: list[LivePipelineRowResponse] = []
     for deal in deals:
-        # ponytail: one query per deal for its latest session (N+1) — fine at
-        # pipeline-table scale; batch this (single query with a lateral join
-        # or window function) if the pipeline table gets large.
+        # ponytail: one query per deal for its latest session, and one more
+        # for its analysis-run status (N+1 x2) — fine at pipeline-table
+        # scale; batch this (single query with a lateral join or window
+        # function) if the pipeline table gets large.
         latest_session = await session_repo.latest_for_deal(deal.id)
         metrics = derive_pipeline_metrics(latest_session.memo_json if latest_session else None)
         rows.append(
@@ -185,7 +186,7 @@ async def list_pipeline(db: AsyncSession = Depends(get_db)) -> list[LivePipeline
                 sector_tags=deal.sector_tags or [],
                 state=deal.status,
                 created_at=deal.created_at,
-                agent_status=_no_job_status(),
+                agent_status=await _compute_deal_status(db, deal.id),
                 **metrics,
             )
         )
@@ -333,24 +334,25 @@ async def get_deal_screening(
     )
 
 
-@router.get("/{deal_id}/status", response_model=DealStatusResponse)
-async def get_deal_status(
-    deal_id: uuid.UUID, db: AsyncSession = Depends(get_db)
-) -> DealStatusResponse:
-    """deals.status -> DealStatusPayload. Maps the deal's latest
-    analysis_run onto this shape, keyed by (job_name, status) per
-    docs/plans/analysis-pipeline-stage-chaining.md (point 4's combined
-    per-document job folds extraction+the binding audit into `job_name
-    == "parsing"` itself, so that row's `successful` now points straight
-    at `"verification"` rather than `"classify"` — pass1's work already happened
-    inside it). `job_name == "verification"` is the separate, deal-level
-    3a/3b pass (`start_deal_verification`), which only ever runs after a
-    `parsing` row succeeds. Neither ever maps to `"complete"` — the memo
-    tail (governance/OFAC/drafting/scoring) has no job behind it yet."""
-    deal = await DealRepo(db).get_by_id(deal_id)
-    if deal is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
-
+async def _compute_deal_status(db: AsyncSession, deal_id: uuid.UUID) -> DealStatusResponse:
+    """Maps a deal's latest analysis_run onto DealStatusResponse, keyed by
+    (job_name, status) per docs/plans/analysis-pipeline-stage-chaining.md
+    (point 4's combined per-document job folds extraction+the binding audit
+    into `job_name == "parsing"` itself, so that row's `successful` now
+    points straight at `"verification"` rather than `"classify"` — pass1's
+    work already happened inside it). `job_name == "verification"` is the
+    separate, deal-level 3a/3b pass (`start_deal_verification`), which only
+    ever runs after a `parsing` row succeeds. `job_name == "screening"`
+    (SIM-401/402/403/404) is the real last stage in the chain, and its
+    `successful` row supersedes `verification`'s as the latest one once it
+    exists. There is still no dedicated "complete" job or pipeline stage
+    beyond that — the memo tail (governance/OFAC/drafting/scoring) has no
+    job behind it yet — so a successful `screening` run is this app's
+    current definition of a finished deal, and a successful `verification`
+    run is treated as terminal only for a deal that hasn't reached
+    screening yet. Shared by GET /{deal_id}/status and GET /pipeline —
+    the pipeline table must show the same real status this endpoint does,
+    not a hardcoded placeholder."""
     run = await AnalysisRunRepo(db).latest_for_deal(deal_id)
     if run is None:
         return _no_job_status()
@@ -443,6 +445,11 @@ async def get_deal_status(
         # with no document to attribute -- passing a screening row's own
         # comments here fails response validation outright. The screening
         # outcome is read from GET /deals/{deal_id}/screening instead.
+        #
+        # "successful" means job_status="complete" -- screening is the real
+        # last stage in the chain (SIM-401/402/403/404), so a successful
+        # screening row is this app's current definition of a finished deal.
+        # "queued"/"in_progress" still just mean "processing".
         verification_comments = verification_run.job_comments if verification_run else None
         if run.status == "failed":
             return DealStatusResponse(
@@ -456,7 +463,7 @@ async def get_deal_status(
                 job_comments=verification_comments,
             )
         return DealStatusResponse(
-            job_status="processing",
+            job_status="complete" if run.status == "successful" else "processing",
             current_phase="governance",
             steps=_steps_for_status("governance"),
             started_at=chain_started_at,
@@ -476,7 +483,7 @@ async def get_deal_status(
         )
     if run.status == "successful":
         return DealStatusResponse(
-            job_status="processing",
+            job_status="complete",
             current_phase="governance",
             steps=_steps_for_status("governance"),
             started_at=chain_started_at,
@@ -494,6 +501,19 @@ async def get_deal_status(
         error_message=run.error_message,
         job_comments=run.job_comments,
     )
+
+
+@router.get("/{deal_id}/status", response_model=DealStatusResponse)
+async def get_deal_status(
+    deal_id: uuid.UUID, db: AsyncSession = Depends(get_db)
+) -> DealStatusResponse:
+    """deals.status -> DealStatusPayload. See _compute_deal_status for the
+    mapping."""
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    return await _compute_deal_status(db, deal_id)
 
 
 @router.post(

@@ -296,25 +296,87 @@ def test_status_verification_in_progress_maps_to_verification_current(
     assert steps["verification"] == "current"
 
 
-def test_status_verification_successful_maps_to_governance_next(
+def test_status_verification_successful_maps_to_complete(
     client, owner_conn, seeded_org, seeded_deal
 ):
-    """The 3a/3b pass succeeding moves currentPhase past verification to
-    governance -- still never "complete", since nothing beyond governance
-    has a job behind it either. "governance" isn't a tracked step of its
-    own (nothing is actively running once it's reached) -- every tracked
-    step reports "done" instead of one reporting "current"."""
+    """A successful verification run is "complete" for a deal that hasn't
+    reached screening yet -- once a screening row exists it supersedes
+    verification as the latest run (see the screening-branch tests below),
+    but until then there's no dedicated complete job or pipeline stage past
+    it (the memo tail: governance/OFAC/drafting/scoring has no job behind
+    it), so verification succeeding stands in as terminal. currentPhase
+    stays "governance" regardless -- _steps_for_status already reports
+    every tracked step ("parsing", "verification") as "done" once
+    currentPhase is past both, which is the correct steps array for a
+    finished deal on its own; only the top-level jobStatus needed to
+    change."""
     _seed_analysis_run(
         owner_conn, seeded_org["org_pk"], seeded_deal, "successful", job_name="verification"
     )
     _authed(seeded_org["clerk_org_id"], "user-1")
 
     body = client.get(f"/deals/{seeded_deal}/status").json()
-    assert body["jobStatus"] == "processing"
+    assert body["jobStatus"] == "complete"
     assert body["currentPhase"] == "governance"
     steps = {step["phase"]: step["status"] for step in body["steps"]}
     assert steps["parsing"] == "done"
     assert steps["verification"] == "done"
+
+
+def test_status_screening_successful_maps_to_complete(client, owner_conn, seeded_org, seeded_deal):
+    """SIM-401/402/403/404: screening is the real last stage in the chain,
+    so once a screening row exists (superseding verification as the
+    latest run), its own "successful" status -- not verification's -- is
+    what maps to job_status="complete"."""
+    _seed_analysis_run(
+        owner_conn, seeded_org["org_pk"], seeded_deal, "successful", job_name="verification"
+    )
+    _seed_analysis_run(
+        owner_conn, seeded_org["org_pk"], seeded_deal, "successful", job_name="screening"
+    )
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    body = client.get(f"/deals/{seeded_deal}/status").json()
+    assert body["jobStatus"] == "complete"
+    assert body["currentPhase"] == "governance"
+    steps = {step["phase"]: step["status"] for step in body["steps"]}
+    assert steps["parsing"] == "done"
+    assert steps["verification"] == "done"
+
+
+def test_status_screening_in_progress_maps_to_processing(
+    client, owner_conn, seeded_org, seeded_deal
+):
+    _seed_analysis_run(
+        owner_conn, seeded_org["org_pk"], seeded_deal, "successful", job_name="verification"
+    )
+    _seed_analysis_run(
+        owner_conn, seeded_org["org_pk"], seeded_deal, "in_progress", job_name="screening"
+    )
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    body = client.get(f"/deals/{seeded_deal}/status").json()
+    assert body["jobStatus"] == "processing"
+    assert body["currentPhase"] == "governance"
+
+
+def test_status_screening_failed_maps_to_error(client, owner_conn, seeded_org, seeded_deal):
+    _seed_analysis_run(
+        owner_conn, seeded_org["org_pk"], seeded_deal, "successful", job_name="verification"
+    )
+    _seed_analysis_run(
+        owner_conn,
+        seeded_org["org_pk"],
+        seeded_deal,
+        "failed",
+        "Screening could not complete.",
+        job_name="screening",
+    )
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    body = client.get(f"/deals/{seeded_deal}/status").json()
+    assert body["jobStatus"] == "error"
+    assert body["currentPhase"] == "governance"
 
 
 def test_status_verification_failed_maps_to_verification_failed(
