@@ -182,7 +182,9 @@ class ScreeningRuleResultResponse(CamelModel):
     Mirrors RuleResult.to_json() (app/services/screening/types.py) rather
     than re-deriving it: the stored shape and the wire shape are deliberately
     the same object, so a reviewer reading the API response is reading
-    exactly what was written to the provenance record.
+    exactly what was written to the provenance record. The two exceptions --
+    `question` and `kind` -- are joined from the rulebook at read time (see
+    below), not stored on the row.
 
     `evidence_ref` stays a bare dict — it is a discriminated union
     (`kind: "claim" | "deal_field"`) whose arms have different fields, and
@@ -196,6 +198,14 @@ class ScreeningRuleResultResponse(CamelModel):
     evidence_ref: dict | None
     confidence: float
     reason: str | None
+    # Joined from the rulebook by rule_id at read time, NOT part of the stored
+    # RuleResult: track_b.yaml is the single source of truth for a rule's
+    # question text and kind, so the frontend renders the human-readable
+    # question and tells a met green_signal from a tripped deal_breaker without
+    # duplicating policy. Null if the stored rule_id is absent from the current
+    # rulebook (version skew).
+    question: str | None = None
+    kind: str | None = None
 
 
 class ScreeningResultResponse(CamelModel):
