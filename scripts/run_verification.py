@@ -42,7 +42,7 @@ from app.services.consistency import reconcile_consistency
 from app.services.corroboration import CORROBORATABLE_STATUSES
 from app.services.reconciliation import reconcile_same_fact
 from app.services.span_promotion import promote_exact_span
-from app.services.status_rollup import roll_up_status
+from app.services.status_rollup import roll_up_deal
 
 
 class _Rollback(Exception):
@@ -133,17 +133,18 @@ async def _run(org_key: str, commit: bool) -> None:
 
 async def _roll_up_all(session: AsyncSession) -> dict[str, int]:
     """Roll up every internally-checked claim in scope, returning the resulting
-    status counts. The status filter is the guard: roll_up_status raises on a
-    claim that has not reached `cited`, which is exactly what `proposed` and
-    `missing` claims are."""
+    status counts. The status filter is the guard: roll_up_deal only has a
+    verdict for internally-checked claims, which is exactly what `proposed` and
+    `missing` claims are not."""
     # autoflush=False, so the promoter's pending proposed -> cited mutations
     # would not be visible to this SELECT and the roll-up would find nothing.
     await session.flush()
     stmt = select(Claim).where(Claim.status.in_(sorted(CORROBORATABLE_STATUSES)))
+    claims = list((await session.scalars(stmt)).all())
+    await roll_up_deal(session, claims)
     counts: dict[str, int] = {}
-    for claim in (await session.scalars(stmt)).all():
-        resolved = await roll_up_status(session, claim)
-        counts[resolved] = counts.get(resolved, 0) + 1
+    for claim in claims:
+        counts[claim.status] = counts.get(claim.status, 0) + 1
     await session.flush()
     return counts
 

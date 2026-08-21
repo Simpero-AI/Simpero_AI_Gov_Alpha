@@ -53,7 +53,7 @@ from app.services.consistency import reconcile_consistency
 from app.services.corroboration import CORROBORATABLE_STATUSES
 from app.services.reconciliation import reconcile_same_fact
 from app.services.span_promotion import promote_exact_span
-from app.services.status_rollup import roll_up_status
+from app.services.status_rollup import roll_up_deal
 from app.services.uploads.spaces import get_json_object
 
 logger = logging.getLogger(__name__)
@@ -332,11 +332,11 @@ async def _run_verification(
         # trust is a property of the claim, not of the document it arrived in,
         # and a `contradicts` edge can point at a claim from another file.
         #
-        # The status filter is the guard, not a try/except: roll_up_status
-        # raises ClaimNotCorroboratableError on anything that has not reached
-        # an internally-checked status, and `proposed`/`missing`/`rejected`
-        # claims are exactly the ones this pass has no verdict for. No
-        # `WHERE org_id` -- RLS owns tenant scoping (see CLAUDE.md).
+        # The status filter is the guard, not a try/except: roll_up_deal only
+        # has a verdict for internally-checked claims, and
+        # `proposed`/`missing`/`rejected` are exactly the ones it does not -- so
+        # they are filtered out here rather than raised on. No `WHERE org_id` --
+        # RLS owns tenant scoping (see CLAUDE.md).
         #
         # The flush is load-bearing, not defensive: AsyncSessionLocal sets
         # autoflush=False, so the promoter's pending `proposed -> cited`
@@ -344,14 +344,18 @@ async def _run_verification(
         # it the roll-up quietly matches zero claims and the whole step is a
         # no-op that still reports success.
         await session.flush()
-        rollup_counts: Counter[str] = Counter()
         rollup_stmt = (
             select(Claim)
             .where(Claim.deal_id == deal_uuid)
             .where(Claim.status.in_(sorted(CORROBORATABLE_STATUSES)))
         )
-        for claim in (await session.scalars(rollup_stmt)).all():
-            rollup_counts[await roll_up_status(session, claim)] += 1
+        # Batched (the SIM-411 pattern): roll_up_deal issues two set-building
+        # queries for the whole deal rather than two per claim, then resolves in
+        # memory -- a deal with hundreds of cited claims would otherwise fire
+        # hundreds of sequential round-trips against the managed DB.
+        rollup_claims = list((await session.scalars(rollup_stmt)).all())
+        await roll_up_deal(session, rollup_claims)
+        rollup_counts: Counter[str] = Counter(claim.status for claim in rollup_claims)
         await session.flush()
 
         rollup_summary = ", ".join(f"{n} {status}" for status, n in sorted(rollup_counts.items()))
