@@ -52,7 +52,8 @@ class Deal(Base):
     # -- distinct from sector_tags above (free-text, unstructured, display
     # only). Plain Text, deliberately no SAEnum and no CheckConstraint: a
     # CHECK can't reference another table's workspace config (gs_08's
-    # approved_sectors lives in investment_profiles.mandate, SIM-<screening>)
+    # approved sectors are derived from the org's `mandates` row -- see
+    # app/services/screening/workspace_config.py, SIM-414)
     # or the rulebook's own prohibited list (db_04, app/services/screening/
     # rulebooks/track_b.yaml) -- and a CHECK enforcing either would block
     # *creating* a deal in a prohibited sector, which defeats db_04's whole
