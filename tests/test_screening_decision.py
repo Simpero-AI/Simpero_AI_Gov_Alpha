@@ -233,6 +233,29 @@ def test_rule_result_forces_zero_confidence_on_unknown():
     assert RuleResult("gs_01", "Y", DealField("x", "y"), "deterministic").confidence == 1.0
 
 
+async def test_evaluate_rule_degrades_to_unknown_when_its_evaluator_raises(monkeypatch):
+    """Fail closed on ONE rule instead of failing the whole screening run: an
+    evaluator that raises on unexpected data degrades to an `unknown` verdict
+    here (which can never satisfy a must-have and never auto-declines, so the
+    deal routes to a human) rather than propagating up through screen_deal and
+    leaving the screening analysis_run non-terminal -- the hang that shows up
+    as the frontend stuck on "loading results" (see start_deal_screening's
+    failure wrapper). The verdict is reported under the rule's own evaluator
+    kind, with a reason that names it an evaluator error."""
+    rule_id = "db_04"  # a real deterministic evaluator, so this is an existing one raising
+
+    async def boom(session, deal, rulebook):
+        raise RuntimeError("evaluator exploded")
+
+    monkeypatch.setitem(decision_module.EVALUATORS, rule_id, boom)
+
+    result = await decision_module.evaluate_rule(rule_id, _UNUSED_SESSION, _UNUSED_DEAL, RULEBOOK)
+    assert result.rule_id == rule_id
+    assert result.verdict == "unknown"
+    assert result.evidence is None
+    assert "evaluator error" in (result.reason or "")
+
+
 # --- unimplemented evaluators (#5 / #6) -------------------------------------
 
 

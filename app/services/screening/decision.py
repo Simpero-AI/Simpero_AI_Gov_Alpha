@@ -23,6 +23,7 @@ this module's contract, not an implementation detail -- see
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -32,6 +33,8 @@ from app.models.deal import Deal
 from app.services.screening.evaluators.deterministic import EVALUATORS
 from app.services.screening.rulebook import Rulebook, load_rulebook
 from app.services.screening.types import RuleResult
+
+logger = logging.getLogger(__name__)
 
 Recommendation = Literal["auto_decline", "green", "human_review"]
 
@@ -80,11 +83,30 @@ async def evaluate_rule(
 ) -> RuleResult:
     """One rule's verdict, dispatching to its evaluator -- or an explicit
     `unknown` when the rule's evaluator kind isn't built yet."""
+    rule = rulebook.by_id[rule_id]
     evaluator = EVALUATORS.get(rule_id)
     if evaluator is not None:
-        return await evaluator(session, deal, rulebook)
+        try:
+            return await evaluator(session, deal, rulebook)
+        except Exception:
+            # Fail closed on ONE rule instead of failing the whole screening
+            # run. An evaluator that raises on unexpected data degrades to an
+            # `unknown` verdict here -- which can never satisfy a must-have and
+            # never auto-declines, so the deal routes to a human (the engine's
+            # stated posture) -- rather than propagating up through screen_deal
+            # and leaving the screening analysis_run non-terminal (the frontend
+            # then hangs on "loading results"; see start_deal_screening's
+            # failure wrapper). Logged, never swallowed silently, so a
+            # persistent evaluator bug is still visible in the worker logs.
+            logger.exception("screening evaluator for rule %s raised; verdict -> unknown", rule_id)
+            return RuleResult(
+                rule_id,
+                "unknown",
+                None,
+                rule.evaluator,
+                reason=f"evaluator error ({rule.evaluator}); routed to human review",
+            )
 
-    rule = rulebook.by_id[rule_id]
     # gs_11/db_08 are unknown BY POLICY -- a negative ("no undisclosed X")
     # that no document can ever prove -- so they keep their own note. Every
     # other out-of-scope rule reports the uniform "No evidence found in the
