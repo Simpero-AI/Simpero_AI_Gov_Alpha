@@ -1,0 +1,223 @@
+{
+  "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "source_file": "l2-golden.pdf",
+  "description": "SIM-354 synthetic golden retrieval set. Relevance is by chunk index (stable). Sparse-only (CI) is expected to miss the semantic query 'profitability_hard' -- that gap is the dense leg's job (L3, SIM-357).",
+  "chunks": [
+    {
+      "content": "Revenue increased to $84.2 million in fiscal 2024, up from $71.5 million in fiscal 2023.",
+      "element_type": "prose",
+      "page": 1,
+      "order": 0,
+      "document_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "source_file": "l2-golden.pdf",
+      "scale_context": null,
+      "scale_multiplier": null,
+      "spans": [
+        [
+          0,
+          88
+        ]
+      ],
+      "bbox": null,
+      "section": "Financial Summary",
+      "flags": []
+    },
+    {
+      "content": "Gross margin expanded to 41% in fiscal 2024 as freight costs normalised.",
+      "element_type": "prose",
+      "page": 1,
+      "order": 1,
+      "document_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "source_file": "l2-golden.pdf",
+      "scale_context": null,
+      "scale_multiplier": null,
+      "spans": [
+        [
+          0,
+          72
+        ]
+      ],
+      "bbox": null,
+      "section": "Financial Summary",
+      "flags": []
+    },
+    {
+      "content": "Total headcount reached 1,240 employees across nine distribution centres at year end.",
+      "element_type": "prose",
+      "page": 1,
+      "order": 2,
+      "document_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "source_file": "l2-golden.pdf",
+      "scale_context": null,
+      "scale_multiplier": null,
+      "spans": [
+        [
+          0,
+          85
+        ]
+      ],
+      "bbox": null,
+      "section": "Operations",
+      "flags": []
+    },
+    {
+      "content": "Customer concentration is a key risk: the top three customers were 38% of revenue.",
+      "element_type": "prose",
+      "page": 2,
+      "order": 3,
+      "document_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "source_file": "l2-golden.pdf",
+      "scale_context": null,
+      "scale_multiplier": null,
+      "spans": [
+        [
+          0,
+          82
+        ]
+      ],
+      "bbox": null,
+      "section": "Risk Factors",
+      "flags": []
+    },
+    {
+      "content": "Net debt stood at $22.0 million, implying leverage of 1.8x EBITDA.",
+      "element_type": "prose",
+      "page": 2,
+      "order": 4,
+      "document_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "source_file": "l2-golden.pdf",
+      "scale_context": null,
+      "scale_multiplier": null,
+      "spans": [
+        [
+          0,
+          66
+        ]
+      ],
+      "bbox": null,
+      "section": "Financial Summary",
+      "flags": []
+    },
+    {
+      "content": "The business operates three segments: freight forwarding, warehousing, and last-mile delivery.",
+      "element_type": "prose",
+      "page": 1,
+      "order": 5,
+      "document_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "source_file": "l2-golden.pdf",
+      "scale_context": null,
+      "scale_multiplier": null,
+      "spans": [
+        [
+          0,
+          94
+        ]
+      ],
+      "bbox": null,
+      "section": "Business Overview",
+      "flags": []
+    },
+    {
+      "content": "Capital expenditure was $6.3 million in fiscal 2024, primarily fleet renewal.",
+      "element_type": "prose",
+      "page": 2,
+      "order": 6,
+      "document_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "source_file": "l2-golden.pdf",
+      "scale_context": null,
+      "scale_multiplier": null,
+      "spans": [
+        [
+          0,
+          77
+        ]
+      ],
+      "bbox": null,
+      "section": "Financial Summary",
+      "flags": []
+    },
+    {
+      "content": "Management projects revenue of $95 million in fiscal 2025, a 13% increase.",
+      "element_type": "prose",
+      "page": 2,
+      "order": 7,
+      "document_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "source_file": "l2-golden.pdf",
+      "scale_context": null,
+      "scale_multiplier": null,
+      "spans": [
+        [
+          0,
+          74
+        ]
+      ],
+      "bbox": null,
+      "section": "Outlook",
+      "flags": []
+    },
+    {
+      "content": "The workforce is represented by two labour unions under agreements expiring in 2026.",
+      "element_type": "prose",
+      "page": 1,
+      "order": 8,
+      "document_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "source_file": "l2-golden.pdf",
+      "scale_context": null,
+      "scale_multiplier": null,
+      "spans": [
+        [
+          0,
+          84
+        ]
+      ],
+      "bbox": null,
+      "section": "Operations",
+      "flags": []
+    }
+  ],
+  "queries": [
+    {
+      "id": "revenue_by_fiscal_year",
+      "query_text": "revenue fiscal",
+      "relevant": [
+        0,
+        7
+      ]
+    },
+    {
+      "id": "gross_margin",
+      "query_text": "gross margin",
+      "relevant": [
+        1
+      ]
+    },
+    {
+      "id": "headcount",
+      "query_text": "employee headcount",
+      "relevant": [
+        2
+      ]
+    },
+    {
+      "id": "customer_concentration",
+      "query_text": "customer concentration risk",
+      "relevant": [
+        3
+      ]
+    },
+    {
+      "id": "leverage",
+      "query_text": "net debt leverage",
+      "relevant": [
+        4
+      ]
+    },
+    {
+      "id": "profitability_hard",
+      "query_text": "how profitable is the company",
+      "relevant": [
+        1
+      ]
+    }
+  ]
+}
