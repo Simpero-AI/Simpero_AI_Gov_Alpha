@@ -55,10 +55,14 @@ by test_rollup_demotes_a_claim_out_of_screening_trust).
 same contract as the rest of app/services/.
 """
 
+import uuid
+from collections.abc import Sequence
+
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.claim import Claim
+from app.models.corroboration_event import CorroborationEvent
 from app.models.edge import Edge
 from app.repo.CorroborationEventRepo import CorroborationEventRepo
 from app.services.corroboration import CORROBORATABLE_STATUSES, ClaimNotCorroboratableError
@@ -162,3 +166,68 @@ async def roll_up_status(db: AsyncSession, claim: Claim) -> str:
         has_agreement=has_agreement,
     )
     return claim.status
+
+
+async def roll_up_deal(db: AsyncSession, claims: Sequence[Claim]) -> None:
+    """Batched roll-up over one deal's claims: the same result as calling
+    roll_up_status on each, but with two set-building queries for the whole
+    group instead of the two per claim (a corroboration-events lookup and a
+    contradicts-edge lookup). That per-claim round-trip is the pattern SIM-411
+    batched away for edge writes; a deal-wide roll-up over hundreds of claims
+    would otherwise fire hundreds of sequential queries against a managed DB.
+    resolve_status stays the single decision rule, so the verdict is identical.
+
+    Every claim must already be in CORROBORATABLE_STATUSES (the caller's
+    filter), same precondition as roll_up_status. Mutates claim.status in the
+    caller's transaction -- no flush, no commit.
+    """
+    ids = [claim.id for claim in claims]
+    if not ids:
+        return
+
+    # One query for the whole group: every claim id on either side of a
+    # `contradicts` edge. Both directions, exactly as has_internal_disagreement
+    # -- reconciliation canonicalises from < to, consistency writes
+    # derived -> operand, so a one-sided lookup would miss half of them.
+    edge_rows = (
+        await db.execute(
+            select(Edge.from_claim_id, Edge.to_claim_id)
+            .where(Edge.type == "contradicts")
+            .where(or_(Edge.from_claim_id.in_(ids), Edge.to_claim_id.in_(ids)))
+        )
+    ).all()
+    contradicted: set[uuid.UUID] = set()
+    for from_id, to_id in edge_rows:
+        contradicted.add(from_id)
+        contradicted.add(to_id)
+
+    # One query for the whole group: every claim id carrying a corroboration
+    # event (the has_agreement signal, still gated on non-conflicted below).
+    with_events: set[uuid.UUID] = set(
+        (
+            await db.scalars(
+                select(CorroborationEvent.claim_id)
+                .where(CorroborationEvent.claim_id.in_(ids))
+                .distinct()
+            )
+        ).all()
+    )
+
+    for claim in claims:
+        if claim.verification_method is None:
+            # Guarded by ck_claims_checked_requires_method for every
+            # CORROBORATABLE status -- unreachable, but fail loud rather than
+            # silently mis-grade if that invariant is ever broken upstream.
+            raise ValueError(
+                f"claim {claim.id} has status {claim.status!r} but no verification_method"
+            )
+        has_disagreement = claim.status == "conflicted"
+        internal_disagreement = (
+            bool(claim.flags) and "formula_mismatch" in claim.flags
+        ) or claim.id in contradicted
+        claim.status = resolve_status(
+            verification_method=claim.verification_method,
+            internal_disagreement=internal_disagreement,
+            has_disagreement=has_disagreement,
+            has_agreement=(not has_disagreement) and claim.id in with_events,
+        )

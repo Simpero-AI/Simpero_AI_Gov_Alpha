@@ -17,6 +17,7 @@ from app.services.status_rollup import (
     STRONG_VERIFICATION_METHODS,
     has_internal_disagreement,
     resolve_status,
+    roll_up_deal,
     roll_up_status,
 )
 
@@ -547,3 +548,57 @@ async def test_rollup_keeps_a_strong_claim_inside_screening_trust(db_session, st
     assert strong_claim.status == "verified"
     after = await claims_for_attribute(db_session, strong_claim.deal_id, "revenue")
     assert strong_claim.id in {c.id for c in after}
+
+
+# --------------------------------------------------------------------------
+# roll_up_deal: the batched version -- identical verdicts to roll_up_status,
+# two set-building queries for the whole group instead of two per claim
+# (SIM-412 review finding #1). Same signals exercised via the batch path.
+# --------------------------------------------------------------------------
+
+
+async def test_roll_up_deal_resolves_a_batch(db_session, strong_claim, cited_claim):
+    await roll_up_deal(db_session, [strong_claim, cited_claim])
+    assert strong_claim.status == "verified"  # strong method, no disagreement
+    assert cited_claim.status == "inconclusive"  # weak method, no external agreement
+
+
+async def test_roll_up_deal_demotes_on_a_contradicts_edge(
+    db_session, org_pk, deal_pk, strong_claim
+):
+    """The batched contradicts lookup finds an edge in either direction, same
+    as has_internal_disagreement's per-claim query (here the claim is the `to`
+    side)."""
+    other = await _other_claim(db_session, org_pk, deal_pk)
+    await _add_contradicts_edge(db_session, org_pk, source=other, target=strong_claim)
+
+    await roll_up_deal(db_session, [strong_claim])
+    assert strong_claim.status == "inconclusive"
+
+
+async def test_roll_up_deal_demotes_on_formula_mismatch_flag(db_session, strong_claim):
+    strong_claim.flags = ["formula_mismatch"]
+    await db_session.flush()
+
+    await roll_up_deal(db_session, [strong_claim])
+    assert strong_claim.status == "inconclusive"
+
+
+async def test_roll_up_deal_reads_agreeing_events_in_batch(db_session, cited_claim):
+    """The batched events lookup drives has_agreement, so a weak claim with an
+    agreeing external event resolves to partially_verified."""
+    await record_corroboration_result(
+        db_session,
+        claim=cited_claim,
+        outside_source="entity_lookup",
+        result={"status": "MATCHED"},
+        agrees=True,
+    )
+    await db_session.flush()
+
+    await roll_up_deal(db_session, [cited_claim])
+    assert cited_claim.status == "partially_verified"
+
+
+async def test_roll_up_deal_empty_is_a_noop(db_session):
+    await roll_up_deal(db_session, [])  # no claims -> no queries, no error

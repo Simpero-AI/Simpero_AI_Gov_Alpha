@@ -1,9 +1,20 @@
 """Ingest + verify job (docs/plans/analysis-pipeline-stage-chaining.md,
 points 2-3): reads back each of a deal's extracted-document claims
 envelopes from Spaces, ingests them into the claims spine under RLS (the
-async equivalent of scripts/ingest_claims.py), then runs the two
-already-built verification passes -- reconcile_same_fact (3a) and
-reconcile_consistency (3b) -- over the deal's now-ingested claims.
+async equivalent of scripts/ingest_claims.py), then runs the verification
+chain over the deal's now-ingested claims:
+
+  promote_exact_span (SIM-412)  proposed -> cited, per document
+  reconcile_same_fact (3a)      same fact across pages/tiers, per document
+  reconcile_consistency (3b)    formula reconstruction, per document
+  roll_up_status (SIM-413/254)  cited -> verified|inconclusive|..., per DEAL
+
+That order is not arbitrary. Promotion is a provenance judgment (the cited
+span resolved and the binding auditor did not fault it), so it owes nothing
+to 3a/3b and runs first. The roll-up is the only step that READS what the
+others wrote -- `formula_mismatch` flags and `contradicts` edges are its
+internal-disagreement signal -- so it runs last, and deal-wide, because a
+`contradicts` edge can point at a claim that arrived in another file.
 
 Runs in the SAQ worker process, same SET LOCAL app.org_id discipline as
 app/jobs/tasks/start_deal_analysis.py (see that module's docstring for the
@@ -26,11 +37,12 @@ caught by this -- that gap is real and open, not solved here.
 import asyncio
 import json
 import logging
+from collections import Counter
 from pathlib import Path
 from uuid import UUID, uuid4
 
 from saq.types import Context
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 from app.core.database import AsyncSessionLocal
 from app.jobs.queue import get_queue
@@ -38,8 +50,10 @@ from app.models import Claim, Edge
 from app.repo.AnalysisRunRepo import AnalysisRunRepo
 from app.repo.HumanAuditRepo import HumanAuditRepo
 from app.services.consistency import reconcile_consistency
+from app.services.corroboration import CORROBORATABLE_STATUSES
 from app.services.reconciliation import reconcile_same_fact
 from app.services.span_promotion import promote_exact_span
+from app.services.status_rollup import roll_up_deal
 from app.services.uploads.spaces import get_json_object
 
 logger = logging.getLogger(__name__)
@@ -310,6 +324,44 @@ async def _run_verification(
                         f"{consistency.contradicts_edges} contradicts."
                     )
 
+        # SIM-413: the status roll-up (SIM-254) last, and deal-scoped rather
+        # than per-document. Last because it READS what the passes above wrote
+        # -- the `formula_mismatch` flag and `contradicts` edges are its
+        # internal-disagreement signal, so running it before them would grade
+        # every claim on evidence that did not exist yet. Deal-scoped because
+        # trust is a property of the claim, not of the document it arrived in,
+        # and a `contradicts` edge can point at a claim from another file.
+        #
+        # The status filter is the guard, not a try/except: roll_up_deal only
+        # has a verdict for internally-checked claims, and
+        # `proposed`/`missing`/`rejected` are exactly the ones it does not -- so
+        # they are filtered out here rather than raised on. No `WHERE org_id` --
+        # RLS owns tenant scoping (see CLAUDE.md).
+        #
+        # The flush is load-bearing, not defensive: AsyncSessionLocal sets
+        # autoflush=False, so the promoter's pending `proposed -> cited`
+        # mutations are invisible to this SELECT until they hit the DB. Without
+        # it the roll-up quietly matches zero claims and the whole step is a
+        # no-op that still reports success.
+        await session.flush()
+        rollup_stmt = (
+            select(Claim)
+            .where(Claim.deal_id == deal_uuid)
+            .where(Claim.status.in_(sorted(CORROBORATABLE_STATUSES)))
+        )
+        # Batched (the SIM-411 pattern): roll_up_deal issues two set-building
+        # queries for the whole deal rather than two per claim, then resolves in
+        # memory -- a deal with hundreds of cited claims would otherwise fire
+        # hundreds of sequential round-trips against the managed DB.
+        rollup_claims = list((await session.scalars(rollup_stmt)).all())
+        await roll_up_deal(session, rollup_claims)
+        rollup_counts: Counter[str] = Counter(claim.status for claim in rollup_claims)
+        await session.flush()
+
+        rollup_summary = ", ".join(f"{n} {status}" for status, n in sorted(rollup_counts.items()))
+        for comment in job_comments:
+            comment["comment"] += f" Status roll-up (deal-wide): {rollup_summary or 'none'}."
+
         await run_repo.update_progress(run_id, status="successful", job_comments=job_comments)
         await HumanAuditRepo(session).append(
             {
@@ -322,6 +374,7 @@ async def _run_verification(
                     "analysis_run_id": analysis_run_id,
                     "status": "successful",
                     "job_comments": job_comments,
+                    "status_rollup": dict(rollup_counts),
                 },
             }
         )
