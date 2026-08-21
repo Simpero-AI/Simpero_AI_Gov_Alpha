@@ -57,6 +57,8 @@ CANONICAL_ATTRIBUTES: frozenset[str] = frozenset(
         "current_liabilities",
         "total_debt",
         "net_debt",
+        "current_assets",
+        "current_liabilities",
         "working_capital",
         "accounts_receivable",
         "accounts_payable",
