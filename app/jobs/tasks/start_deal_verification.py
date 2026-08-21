@@ -53,7 +53,7 @@ from app.services.consistency import reconcile_consistency
 from app.services.corroboration import CORROBORATABLE_STATUSES
 from app.services.reconciliation import reconcile_same_fact
 from app.services.span_promotion import promote_exact_span
-from app.services.status_rollup import roll_up_status
+from app.services.status_rollup import roll_up_deal
 from app.services.uploads.spaces import get_json_object
 
 logger = logging.getLogger(__name__)
@@ -344,14 +344,19 @@ async def _run_verification(
         # it the roll-up quietly matches zero claims and the whole step is a
         # no-op that still reports success.
         await session.flush()
-        rollup_counts: Counter[str] = Counter()
         rollup_stmt = (
             select(Claim)
             .where(Claim.deal_id == deal_uuid)
             .where(Claim.status.in_(sorted(CORROBORATABLE_STATUSES)))
         )
-        for claim in (await session.scalars(rollup_stmt)).all():
-            rollup_counts[await roll_up_status(session, claim)] += 1
+        rollup_claims = list((await session.scalars(rollup_stmt)).all())
+        # Batched, not one roll_up_status call per claim: on a large deal that
+        # was ~2 sequential round-trips per cited claim (the corroboration-event
+        # lookup + the contradicts-edge lookup), the round-trip-per-item pattern
+        # SIM-411 already had to batch for edge writes. roll_up_deal does the two
+        # lookups once for the whole deal.
+        await roll_up_deal(session, rollup_claims)
+        rollup_counts: Counter[str] = Counter(c.status for c in rollup_claims)
         await session.flush()
 
         rollup_summary = ", ".join(f"{n} {status}" for status, n in sorted(rollup_counts.items()))
