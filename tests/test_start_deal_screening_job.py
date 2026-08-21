@@ -254,6 +254,35 @@ async def test_a_missing_run_raises(seeded_org):
         )
 
 
+async def test_a_midjob_failure_durably_marks_run_failed(owner_conn, seeded_org, monkeypatch):
+    """A raise anywhere in the screening work must land the run at a terminal
+    `failed` status recorded in a FRESH transaction -- NOT roll back the
+    in_progress marker to `queued` and leave the run non-terminal, which makes
+    GET /deals/{id}/status report `processing` forever and hangs the frontend
+    on "loading results". Proven by results=[] (the work transaction rolled
+    back) AND status=failed (the wrapper's separate transaction committed).
+    Mirrors test_start_deal_verification_job's durable-failure test."""
+    deal_id = _seed_deal(owner_conn, seeded_org["org_pk"], sector="cannabis")
+    run_id = _seed_screening_run(owner_conn, seeded_org["org_pk"], deal_id)
+
+    async def boom(session, deal, rulebook=None):
+        raise RuntimeError("screen exploded")
+
+    monkeypatch.setattr(job_module, "screen_deal", boom)
+
+    with pytest.raises(RuntimeError, match="screen exploded"):
+        await job_module.start_deal_screening(
+            {}, analysis_run_id=run_id, clerk_org_id=seeded_org["clerk_org_id"]
+        )
+
+    run = _fetch_run(owner_conn, run_id)
+    assert run["status"] == "failed"
+    assert run["error_message"] == "screening failed: RuntimeError"
+    # Work transaction rolled back -> no result row; the failed status came
+    # from the wrapper's separate transaction, not this one.
+    assert _fetch_results(owner_conn, seeded_org["org_pk"]) == []
+
+
 async def test_a_run_cannot_outlive_its_deal(owner_conn, seeded_org):
     """The job has a defensive "deal not found" -> failed branch, and this
     documents WHY that branch is unreachable rather than untested:
