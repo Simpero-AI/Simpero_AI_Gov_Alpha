@@ -106,7 +106,14 @@ class Mandate(Base):
     the product portal. `mandate` is a free-form JSONB list of the org's
     selected category/option picks; not FK-validated against
     mandate_categories/mandate_options row-by-row (same "contract-shaped
-    JSONB" idiom as investment_profiles.mandate)."""
+    JSONB" idiom as investment_profiles.mandate).
+
+    Since SIM-414 this blob has a SECOND reader: screening derives gs_07's
+    approved geographies and gs_08's approved sectors from it (see
+    app/services/screening/workspace_config.py, which documents the exact
+    shape it depends on). Its shape is therefore a contract between two
+    subsystems, not just Builder UI state -- restructuring it silently
+    changes which deals pass screening."""
 
     __tablename__ = "mandates"
 
