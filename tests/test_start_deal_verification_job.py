@@ -278,8 +278,12 @@ async def test_promotes_span_resolved_claims_and_holds_the_rest(
     )
 
     assert _fetch_run(owner_conn, run_id)["status"] == "successful"
+    # `cited` is where the promoter leaves c1, but it is not where the run
+    # ends: SIM-413's roll-up runs after 3a/3b and carries a cleanly-cited,
+    # strongly-verified claim on to `verified`. The two claims the promoter
+    # refused stay exactly where they were, which is what this test is for.
     assert _claim_statuses(owner_conn, seeded_org["org_pk"]) == {
-        "cited": 1,
+        "verified": 1,
         "proposed": 1,
         "missing": 1,
     }

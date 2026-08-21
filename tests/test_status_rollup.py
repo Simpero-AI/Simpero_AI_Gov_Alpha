@@ -17,6 +17,7 @@ from app.services.status_rollup import (
     STRONG_VERIFICATION_METHODS,
     has_internal_disagreement,
     resolve_status,
+    roll_up_deal,
     roll_up_status,
 )
 
@@ -300,6 +301,48 @@ async def test_rollup_is_idempotent(db_session, cited_claim):
     second = await roll_up_status(db_session, cited_claim)
 
     assert first == second == "inconclusive"
+
+
+async def test_roll_up_deal_matches_per_claim_in_one_batch(
+    db_session, org_pk, deal_pk, strong_claim, cited_claim
+):
+    """roll_up_deal resolves the same statuses as roll_up_status would, batched:
+    strong -> verified, weak -> inconclusive, a strong claim demoted by a
+    contradicts edge -> inconclusive, a weak claim with an agreeing external
+    event -> partially_verified. Guards the batch path against diverging from
+    the per-claim decision it reimplements inline."""
+    demoted = Claim(
+        **_claim_kwargs(org_pk, deal_pk, status="cited", verification_method="exact_span")
+    )
+    demoted.attribute = "ebitda"
+    corroborated = Claim(
+        **_claim_kwargs(org_pk, deal_pk, status="cited", verification_method=WEAK_METHOD)
+    )
+    corroborated.attribute = "gross_profit"
+    db_session.add_all([demoted, corroborated])
+    await db_session.flush()
+
+    other = await _other_claim(db_session, org_pk, deal_pk)
+    await _add_contradicts_edge(db_session, org_pk, source=demoted, target=other)
+    await record_corroboration_result(
+        db_session,
+        claim=corroborated,
+        outside_source="entity_lookup",
+        result={"status": "MATCHED"},
+        agrees=True,
+    )
+    await db_session.flush()
+
+    await roll_up_deal(db_session, [strong_claim, cited_claim, demoted, corroborated])
+
+    assert strong_claim.status == "verified"
+    assert cited_claim.status == "inconclusive"
+    assert demoted.status == "inconclusive"
+    assert corroborated.status == "partially_verified"
+
+
+async def test_roll_up_deal_over_no_claims_is_a_noop(db_session):
+    await roll_up_deal(db_session, [])  # no query, no error
 
 
 async def test_rollup_is_stable_re_run_over_an_already_resolved_status(db_session, strong_claim):
