@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import AsyncSessionLocal
 
 TEST_org_id = "test-tenant-00000000"
+TEST_user_id = "test-user-00000000"
 
 
 @pytest.fixture(scope="session")
@@ -44,6 +45,24 @@ def org_a_id(owner_conn, test_org_id) -> int:
             (test_org_id, "Org A"),
         )
         cur.execute("SELECT id FROM organisation WHERE clerk_org_id = %s", (test_org_id,))
+        return cur.fetchone()[0]
+
+
+@pytest.fixture
+def user_a_id(owner_conn, org_a_id, test_org_id) -> int:
+    """A user inside org A. Needed because `mandates.user_id` is NOT NULL --
+    any test seeding a mandate (tests/test_workspace_config.py,
+    tests/test_screening_evaluators.py) needs a real users row to point at.
+    Same ON CONFLICT DO NOTHING / SELECT back idiom as org_a_id above, so it
+    survives a previous run that left the row behind."""
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO users (org_id, role, login_method, clerk_user_id, clerk_org_id, status) "
+            "VALUES (%s, 'admin', 'email', %s, %s, 'active') "
+            "ON CONFLICT (clerk_user_id) DO NOTHING",
+            (org_a_id, TEST_user_id, test_org_id),
+        )
+        cur.execute("SELECT id FROM users WHERE clerk_user_id = %s", (TEST_user_id,))
         return cur.fetchone()[0]
 
 

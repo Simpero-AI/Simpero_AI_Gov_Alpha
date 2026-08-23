@@ -48,13 +48,13 @@ rules:
     question: "HQ in approved geography"
     evaluator: deterministic
     evidence: {deal_field: hq_geography}
-    threshold: {in: approved_geographies}   # list from workspace config
+    threshold: {in: approved_geographies}   # derived from the org's mandates row
   - id: gs_08
     kind: green_signal
     question: "Operates in approved sector"
     evaluator: deterministic
     evidence: {deal_field: sector}
-    threshold: {in: approved_sectors}
+    threshold: {in: approved_sectors}       # derived from the org's mandates row
   - id: gs_09
     kind: green_signal
     question: "Clean cap table, no unresolved SAFEs/notes with blocking terms"
