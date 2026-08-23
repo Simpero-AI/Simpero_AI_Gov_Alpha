@@ -140,10 +140,24 @@ def upgrade():
         sa.ForeignKeyConstraint(["org_id"], ["organisation.id"]),
         sa.PrimaryKeyConstraint("id"),
     )
-    op.create_index(op.f("ix_clerk_admin_users_clerk_user_id"), "clerk_admin_users", ["clerk_user_id"], unique=True)
-    op.create_index(op.f("ix_clerk_admin_users_clerk_org_id"), "clerk_admin_users", ["clerk_org_id"], unique=False)
-    op.create_index(op.f("ix_clerk_admin_users_org_id"), "clerk_admin_users", ["org_id"], unique=False)
-    op.create_index(op.f("ix_clerk_admin_users_email"), "clerk_admin_users", ["email"], unique=False)
+    op.create_index(
+        op.f("ix_clerk_admin_users_clerk_user_id"),
+        "clerk_admin_users",
+        ["clerk_user_id"],
+        unique=True,
+    )
+    op.create_index(
+        op.f("ix_clerk_admin_users_clerk_org_id"),
+        "clerk_admin_users",
+        ["clerk_org_id"],
+        unique=False,
+    )
+    op.create_index(
+        op.f("ix_clerk_admin_users_org_id"), "clerk_admin_users", ["org_id"], unique=False
+    )
+    op.create_index(
+        op.f("ix_clerk_admin_users_email"), "clerk_admin_users", ["email"], unique=False
+    )
 
     # RLS enabled in the SAME migration that creates the table (same idiom as users/funds).
     op.execute("ALTER TABLE clerk_admin_users ENABLE ROW LEVEL SECURITY")
@@ -153,12 +167,15 @@ def upgrade():
             USING (clerk_org_id = current_setting('app.org_id', true))
     """)
 
+
 def downgrade():
     op.execute("DROP POLICY IF EXISTS org_isolation ON clerk_admin_users")
     op.execute("ALTER TABLE clerk_admin_users DISABLE ROW LEVEL SECURITY")
     op.drop_index(...)  # all four
     op.drop_table("clerk_admin_users")
-    op.execute("DROP TYPE IF EXISTS admintype")  # sa.Enum auto-creates the pg type; drop on downgrade
+    op.execute(
+        "DROP TYPE IF EXISTS admintype"
+    )  # sa.Enum auto-creates the pg type; drop on downgrade
 ```
 
 Explicit decisions (RLS/tenant boundary — extra scrutiny):
@@ -175,7 +192,7 @@ Explicit decisions (RLS/tenant boundary — extra scrutiny):
 A separate DB dependency for admin routes. Mirrors `get_db`'s RLS discipline exactly but provisions the **admin** row, not a product `users` row.
 
 ```python
-async def get_admin_db(claims = Depends(get_claims)) -> AsyncSession:
+async def get_admin_db(claims=Depends(get_claims)) -> AsyncSession:
     async with AsyncSessionLocal() as session, session.begin():
         # 1. FIRST statement — clamp RLS to the caller's own org.
         await session.execute(
@@ -203,7 +220,7 @@ async def _ensure_admin_provisioned(session, claims):
         # R6 downgrade-only sync (D3): revoke on the next request after a Clerk
         # demotion/removal. ONLY ever revokes — never upgrades or re-activates.
         if existing.status == "active" and not is_admin_now:
-            await repo.deactivate(claims["user_id"])   # status -> 'inactive'
+            await repo.deactivate(claims["user_id"])  # status -> 'inactive'
         # An inactive row stays inactive even if org_role == "admin" again
         # (re-activation would need a future admin-management endpoint — see R6).
         return
@@ -215,17 +232,17 @@ async def _ensure_admin_provisioned(session, claims):
         select(Organisation.id).where(Organisation.clerk_org_id == claims["tenant_id"])
     )  # guaranteed present by step (b)
     email = await fetch_clerk_user_primary_email(claims["user_id"])  # Clerk GET /users/{id}
-    admin_type = ("platform"
-                  if claims["tenant_id"] == settings.simpero_platform_org_id
-                  else "client")
-    await repo.upsert({
-        "clerk_user_id": claims["user_id"],
-        "clerk_org_id": claims["tenant_id"],
-        "org_id": org_pk,
-        "email": email,
-        "admin_type": admin_type,
-        "status": "active",
-    })  # pg_insert(...).on_conflict_do_nothing(index_elements=["clerk_user_id"])
+    admin_type = "platform" if claims["tenant_id"] == settings.simpero_platform_org_id else "client"
+    await repo.upsert(
+        {
+            "clerk_user_id": claims["user_id"],
+            "clerk_org_id": claims["tenant_id"],
+            "org_id": org_pk,
+            "email": email,
+            "admin_type": admin_type,
+            "status": "active",
+        }
+    )  # pg_insert(...).on_conflict_do_nothing(index_elements=["clerk_user_id"])
 ```
 
 **D3 logic + ordering (RLS/auth boundary — extra scrutiny):**
@@ -259,21 +276,25 @@ A human is granted `org:admin` in the **Simpero Clerk org** via the dashboard, o
 **The `clerk_admin_users` table is authoritative. Guards do not trust the JWT `org_role`.** They depend on `get_admin_db` (which has already provisioned the row for a legitimate admin and run the downgrade sync) and look up an **ACTIVE** row.
 
 ```python
-async def require_org_admin(claims = Depends(get_claims), db = Depends(get_admin_db)) -> dict:
+async def require_org_admin(claims=Depends(get_claims), db=Depends(get_admin_db)) -> dict:
     row = await AdminUserRepo(db).get_by_clerk_id(claims["user_id"])
     if row is None or row.status != "active":
-        raise AuthorizationError("Org admin privileges required")   # -> 403
+        raise AuthorizationError("Org admin privileges required")  # -> 403
     return claims
 
-async def require_platform_admin(claims = Depends(get_claims), db = Depends(get_admin_db)) -> dict:
+
+async def require_platform_admin(claims=Depends(get_claims), db=Depends(get_admin_db)) -> dict:
     platform_org = settings.simpero_platform_org_id
-    if not platform_org:                       # fail closed when unconfigured
-        raise AuthorizationError("Platform admin surface not configured")   # -> 403
+    if not platform_org:  # fail closed when unconfigured
+        raise AuthorizationError("Platform admin surface not configured")  # -> 403
     row = await AdminUserRepo(db).get_by_clerk_id(claims["user_id"])
-    if (row is None or row.status != "active"
-            or row.admin_type != "platform"
-            or claims["tenant_id"] != platform_org):
-        raise AuthorizationError("Platform admin privileges required")      # -> 403
+    if (
+        row is None
+        or row.status != "active"
+        or row.admin_type != "platform"
+        or claims["tenant_id"] != platform_org
+    ):
+        raise AuthorizationError("Platform admin privileges required")  # -> 403
     return claims
 ```
 
@@ -357,7 +378,9 @@ Adapter behavior:
 ## Config additions (`app/core/config.py`)
 
 ```python
-simpero_platform_org_id: str = ""            # Clerk org id of the Simpero platform org; "" => platform surface denies all (fail closed)
+simpero_platform_org_id: str = (
+    ""  # Clerk org id of the Simpero platform org; "" => platform surface denies all (fail closed)
+)
 app_base_url: str = "http://localhost:3000"  # builds invitation redirect_url(s)
 ```
 
@@ -377,7 +400,7 @@ Every admin **mutation** writes exactly one `HumanAuditRepo.append(...)` row ins
 ```python
 async def _admin_actor(db, claims) -> tuple[int, str, str | None]:
     row = await AdminUserRepo(db).get_by_clerk_id(claims["user_id"])
-    assert row is not None   # provisioned by get_admin_db; guard confirmed active
+    assert row is not None  # provisioned by get_admin_db; guard confirmed active
     return row.org_id, claims["user_id"], row.email
 ```
 
