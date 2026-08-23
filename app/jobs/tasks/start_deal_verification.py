@@ -50,7 +50,11 @@ from app.models import Claim, Edge
 from app.repo.AnalysisRunRepo import AnalysisRunRepo
 from app.repo.HumanAuditRepo import HumanAuditRepo
 from app.services.consistency import reconcile_consistency
-from app.services.corroboration import CORROBORATABLE_STATUSES
+from app.services.corroboration import (
+    CORROBORATABLE_STATUSES,
+    CORROBORATION_SOURCES,
+    run_corroboration,
+)
 from app.services.reconciliation import reconcile_same_fact
 from app.services.span_promotion import promote_exact_span
 from app.services.status_rollup import roll_up_deal
@@ -350,6 +354,14 @@ async def _run_verification(
             .where(Claim.status.in_(sorted(CORROBORATABLE_STATUSES)))
         )
         rollup_claims = list((await session.scalars(rollup_stmt)).all())
+        # SIM-415: the external corroboration pass runs HERE -- after the claims
+        # are cited/reconciled, before the roll-up -- so the roll-up reads the
+        # events it writes (agree -> has_agreement, disagree -> conflicted).
+        # CORROBORATION_SOURCES is empty until the per-source adapters (SIM-416+)
+        # register, so this is a no-op today; the flush below makes any events it
+        # does write visible to roll_up_deal's own SELECT (autoflush=False).
+        await run_corroboration(session, rollup_claims, CORROBORATION_SOURCES)
+        await session.flush()
         # Batched, not one roll_up_status call per claim: on a large deal that
         # was ~2 sequential round-trips per cited claim (the corroboration-event
         # lookup + the contradicts-edge lookup), the round-trip-per-item pattern
