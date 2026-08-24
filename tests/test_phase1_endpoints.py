@@ -88,6 +88,26 @@ def _seed_deal(owner_conn, org_pk: int, **fields: Any) -> str:
         return str(cur.fetchone()[0])
 
 
+def _seed_user(owner_conn, org_pk: int, clerk_org_id: str, **fields: Any) -> int:
+    columns = {
+        "org_id": org_pk,
+        "role": "member",
+        "login_method": "email",
+        "clerk_user_id": f"test-user-{uuid.uuid4().hex[:8]}",
+        "clerk_org_id": clerk_org_id,
+        "status": "active",
+        **fields,
+    }
+    cols = ", ".join(columns)
+    placeholders = ", ".join(["%s"] * len(columns))
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            f"INSERT INTO users ({cols}) VALUES ({placeholders}) RETURNING id",
+            list(columns.values()),
+        )
+        return cur.fetchone()[0]
+
+
 def _seed_analysis_run(
     owner_conn, org_pk: int, deal_id: str, status: str, job_name: str = "parsing"
 ) -> str:
@@ -328,6 +348,123 @@ def test_patch_deal_audits_deal_updated(client, owner_conn, seeded_org):
         actor_id, event_type, payload = rows[0]
         assert actor_id == "user-1"
         assert set(payload["fields"]) == {"sector", "hq_geography"}
+
+
+def test_create_deal_with_lead_and_referred_by_round_trips(client, owner_conn, seeded_org):
+    lead_id = _seed_user(
+        owner_conn, seeded_org["org_pk"], seeded_org["clerk_org_id"], name="Jamie Lead"
+    )
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    create_resp = client.post(
+        "/deals",
+        json={
+            "name": "Referred Co",
+            "gpSource": None,
+            "dealSizeMinUsd": None,
+            "dealSizeMaxUsd": None,
+            "sectorTags": None,
+            "leadUserId": lead_id,
+            "referredBy": "Jane Broker",
+        },
+    )
+    assert create_resp.status_code == 201
+    deal_id = create_resp.json()["id"]
+
+    get_resp = client.get(f"/deals/{deal_id}")
+    deal = get_resp.json()["deal"]
+    assert deal["leadUserId"] == lead_id
+    assert deal["leadName"] == "Jamie Lead"
+    assert deal["referredBy"] == "Jane Broker"
+
+
+def test_create_deal_rejects_lead_user_id_from_other_org(client, owner_conn, seeded_org):
+    """leadUserId must resolve under the caller's own RLS scope -- a raw FK
+    wouldn't catch a cross-org id since FK checks aren't RLS-scoped."""
+    other_clerk_org_id = f"test-tenant-{uuid.uuid4().hex[:8]}"
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO organisation (clerk_org_id, name, created_at) VALUES (%s, %s, now()) "
+            "RETURNING id",
+            (other_clerk_org_id, "Other Org"),
+        )
+        other_org_pk = cur.fetchone()[0]
+    other_user_id = _seed_user(owner_conn, other_org_pk, other_clerk_org_id)
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    resp = client.post(
+        "/deals",
+        json={
+            "name": "Bad Lead Co",
+            "gpSource": None,
+            "dealSizeMinUsd": None,
+            "dealSizeMaxUsd": None,
+            "sectorTags": None,
+            "leadUserId": other_user_id,
+        },
+    )
+    assert resp.status_code == 422
+
+    with owner_conn.cursor() as cur:
+        cur.execute("DELETE FROM users WHERE id = %s", (other_user_id,))
+        cur.execute("DELETE FROM organisation WHERE id = %s", (other_org_pk,))
+
+
+def test_patch_deal_sets_lead_and_referred_by(client, owner_conn, seeded_org):
+    lead_id = _seed_user(
+        owner_conn, seeded_org["org_pk"], seeded_org["clerk_org_id"], name="Sam Owner"
+    )
+    deal_id = _seed_deal(owner_conn, seeded_org["org_pk"])
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    resp = client.patch(
+        f"/deals/{deal_id}", json={"leadUserId": lead_id, "referredBy": "Proprietary outreach"}
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["leadUserId"] == lead_id
+    assert body["leadName"] == "Sam Owner"
+    assert body["referredBy"] == "Proprietary outreach"
+
+
+# --- org-members -----------------------------------------------------------
+
+
+def test_list_org_members_scoped_to_caller_org(client, owner_conn, seeded_org):
+    """Excludes admin-removed (inactive) members and other orgs' members --
+    the dropdown must never leak either."""
+    member_id = _seed_user(
+        owner_conn, seeded_org["org_pk"], seeded_org["clerk_org_id"], name="Jamie Lead"
+    )
+    inactive_id = _seed_user(
+        owner_conn,
+        seeded_org["org_pk"],
+        seeded_org["clerk_org_id"],
+        name="Gone",
+        status="inactive",
+    )
+
+    other_clerk_org_id = f"test-tenant-{uuid.uuid4().hex[:8]}"
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO organisation (clerk_org_id, name, created_at) VALUES (%s, %s, now()) "
+            "RETURNING id",
+            (other_clerk_org_id, "Other Org"),
+        )
+        other_org_pk = cur.fetchone()[0]
+    other_member_id = _seed_user(owner_conn, other_org_pk, other_clerk_org_id, name="Outsider")
+
+    _authed(seeded_org["clerk_org_id"], "user-1")
+    resp = client.get("/org-members")
+    assert resp.status_code == 200
+    ids = {row["id"] for row in resp.json()}
+    assert member_id in ids
+    assert inactive_id not in ids
+    assert other_member_id not in ids
+
+    with owner_conn.cursor() as cur:
+        cur.execute("DELETE FROM users WHERE id = %s", (other_member_id,))
+        cur.execute("DELETE FROM organisation WHERE id = %s", (other_org_pk,))
 
 
 # --- history -------------------------------------------------------------

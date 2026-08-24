@@ -38,9 +38,20 @@ class Deal(Base):
     user_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey(Users.id), nullable=True, index=True
     )
+    # Internal owner of the deal, picked from an org-scoped dropdown at
+    # creation time (GET /org-members) — unlike user_id above, this one IS
+    # used for display (DealRowResponse.lead_name). No ORM relationship()
+    # here, matching this codebase's no-relationships convention (see
+    # app/models/mandate.py) — the route layer joins the name via UserRepo.
+    lead_user_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey(Users.id), nullable=True, index=True
+    )
 
     name: Mapped[str] = mapped_column(Text, nullable=False)
     gp_source: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Outside source that brought the deal in (a broker, a firm, "proprietary
+    # outreach", ...) — free text, deliberately unstructured, display only.
+    referred_by: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Integer cents, per repo convention (no floats for money).
     deal_size_min_usd: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
