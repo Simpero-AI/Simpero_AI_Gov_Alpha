@@ -127,6 +127,13 @@ class DealRowResponse(CamelModel):
     sector: str | None
     hq_geography: str | None
     state: str
+    # lead_user_id/lead_name travel together so the frontend can render the
+    # picked lead's name without a second round trip to GET /org-members.
+    # lead_name is a live join at read time (not stored) -- it goes stale-safe
+    # to null if the referenced user is later removed, rather than 500ing.
+    lead_user_id: int | None
+    lead_name: str | None
+    referred_by: str | None
     created_at: datetime
     updated_at: datetime
 
@@ -152,6 +159,11 @@ class CreateDealRequest(CamelModel):
     sector_tags: list[str] | None
     sector: str | None = None
     hq_geography: str | None = None
+    # Must reference a user visible under the caller's own RLS scope, i.e. one
+    # who actually shares the caller's org_id -- checked at the route via
+    # UserRepo.get_by_id, not by a DB constraint (FK checks aren't RLS-scoped).
+    lead_user_id: int | None = None
+    referred_by: str | None = None
 
 
 class CreateDealResponse(CamelModel):
@@ -163,10 +175,13 @@ class UpdateDealRequest(CamelModel):
     default: `model_dump(exclude_unset=True)` on the route only applies keys
     the client actually included in the JSON body, so a field entirely
     omitted stays untouched while an explicit `null` clears it. Lets a human
-    fill in sector/hq_geography on a legacy deal."""
+    fill in sector/hq_geography on a legacy deal, or reassign
+    lead_user_id/referred_by after creation."""
 
     sector: str | None = None
     hq_geography: str | None = None
+    lead_user_id: int | None = None
+    referred_by: str | None = None
 
 
 class StartAnalysisRequest(CamelModel):

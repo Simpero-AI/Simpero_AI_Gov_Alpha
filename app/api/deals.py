@@ -109,7 +109,7 @@ def _no_job_status() -> DealStatusResponse:
     )
 
 
-def _deal_row_response(deal: Deal) -> DealRowResponse:
+def _deal_row_response(deal: Deal, lead_name: str | None) -> DealRowResponse:
     return DealRowResponse(
         id=str(deal.id),
         name=deal.name,
@@ -123,9 +123,30 @@ def _deal_row_response(deal: Deal) -> DealRowResponse:
         sector=deal.sector,
         hq_geography=deal.hq_geography,
         state=deal.status,
+        lead_user_id=deal.lead_user_id,
+        lead_name=lead_name,
+        referred_by=deal.referred_by,
         created_at=deal.created_at,
         updated_at=deal.updated_at,
     )
+
+
+async def _validate_lead_user_id(db: AsyncSession, lead_user_id: int) -> None:
+    """lead_user_id must resolve under the caller's own RLS scope -- i.e.
+    actually be a user in the caller's org, not just any users.id (a raw FK
+    constraint wouldn't catch this: FK checks aren't RLS-scoped)."""
+    if await UserRepo(db).get_by_id(lead_user_id) is None:
+        raise HTTPException(status_code=422, detail="Invalid leadUserId")
+
+
+async def _lead_name(db: AsyncSession, lead_user_id: int | None) -> str | None:
+    """Read-side join for DealRowResponse.lead_name -- deliberately doesn't
+    raise if the user is gone (e.g. later removed): a stale lead reference
+    should degrade to a null name, not break GET/PATCH on the deal."""
+    if lead_user_id is None:
+        return None
+    user = await UserRepo(db).get_by_id(lead_user_id)
+    return user.name if user else None
 
 
 @router.post("", response_model=CreateDealResponse, status_code=status.HTTP_201_CREATED)
@@ -137,6 +158,9 @@ async def create_deal(
     """deals.create. fund_id stays null — the frontend's contract has no fund
     field yet (see the comment on Deal.fund_id)."""
     org_id, actor_id, actor_email, user_id = await _actor(db, claims)
+
+    if body.lead_user_id is not None:
+        await _validate_lead_user_id(db, body.lead_user_id)
 
     deal = await DealRepo(db).create(
         {
@@ -150,6 +174,8 @@ async def create_deal(
             "sector_tags": body.sector_tags,
             "sector": body.sector,
             "hq_geography": body.hq_geography,
+            "lead_user_id": body.lead_user_id,
+            "referred_by": body.referred_by,
         }
     )
     await HumanAuditRepo(db).append(
@@ -254,8 +280,9 @@ async def get_deal(
             memo_json=json.dumps(latest_session.memo_json),
             created_at=latest_session.created_at,
         )
+    lead_name = await _lead_name(db, deal.lead_user_id)
     return DealWithLatestMemoResponse(
-        deal=_deal_row_response(deal), latest_memo_session=latest_memo_session
+        deal=_deal_row_response(deal, lead_name), latest_memo_session=latest_memo_session
     )
 
 
@@ -275,6 +302,9 @@ async def update_deal(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
 
     updates = body.model_dump(exclude_unset=True)
+    if updates.get("lead_user_id") is not None:
+        await _validate_lead_user_id(db, updates["lead_user_id"])
+
     updated = await DealRepo(db).update(deal_id, updates)
     assert updated is not None  # just confirmed the row exists, above
 
@@ -290,7 +320,8 @@ async def update_deal(
         }
     )
 
-    return _deal_row_response(updated)
+    lead_name = await _lead_name(db, updated.lead_user_id)
+    return _deal_row_response(updated, lead_name)
 
 
 @router.get("/{deal_id}/screening", response_model=ScreeningResultResponse)

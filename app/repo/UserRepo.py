@@ -22,6 +22,15 @@ class UserRepo(BaseRepo[Users, dict]):
     async def get_by_clerk_id(self, clerk_user_id: str) -> Users | None:
         return await self.session.scalar(select(Users).where(Users.clerk_user_id == clerk_user_id))
 
+    async def list_active(self) -> list[Users]:
+        """Org-scoped member list (RLS -- no WHERE org_id here) for the
+        deal-creation lead picker. Excludes admin-removed (status ==
+        'inactive') members, same filter app/api/admin/members.py uses."""
+        result = await self.session.execute(
+            select(Users).where(Users.status == "active").order_by(Users.name)
+        )
+        return list(result.scalars().all())
+
     async def upsert(self, data: dict) -> None:
         """JIT-provisioning insert: ON CONFLICT DO NOTHING on clerk_user_id,
         not a full insert-or-update — an existing user row is never
