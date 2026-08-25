@@ -134,6 +134,36 @@ async def test_unknown_deal_breaker_does_not_auto_decline(monkeypatch):
     assert result.triggered_by is None
 
 
+# --- Path B: mandate gating (only_rule_ids) ---------------------------------
+
+
+async def test_only_rule_ids_runs_just_the_selected_rules(monkeypatch):
+    """Gating: only the selected rules are evaluated, still deal-breaker-first,
+    and nothing else is even called."""
+    calls: list[str] = []
+    _stub_evaluators(monkeypatch, {}, calls=calls)
+    result = await screen_deal(
+        _UNUSED_SESSION, _UNUSED_DEAL, RULEBOOK, only_rule_ids={"gs_03", "db_04"}
+    )
+
+    assert calls == ["db_04", "gs_03"]  # breaker first, then green; nothing else
+    assert {r.rule_id for r in result.results} == {"gs_03", "db_04"}
+    # gs_03 passes (Y), db_04 does not apply (N) -> a clean green.
+    assert result.recommendation == "green"
+
+
+async def test_empty_only_rule_ids_is_human_review_not_a_vacuous_green(monkeypatch):
+    """An empty selection must never green a deal by evaluating nothing; it
+    routes to human review without calling a single evaluator."""
+    calls: list[str] = []
+    _stub_evaluators(monkeypatch, {}, calls=calls)
+    result = await screen_deal(_UNUSED_SESSION, _UNUSED_DEAL, RULEBOOK, only_rule_ids=set())
+
+    assert calls == []
+    assert result.recommendation == "human_review"
+    assert result.results == ()
+
+
 async def test_unknown_deal_breaker_also_blocks_green(monkeypatch):
     """The other half, and the dangerous one. db_09 is the OFAC sanctions
     screen: if it times out it returns `unknown`, and every green signal can

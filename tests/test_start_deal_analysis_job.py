@@ -144,7 +144,9 @@ async def test_all_documents_parsed_marks_run_successful(
     )
     run_id = _seed_run(owner_conn, seeded_org["org_pk"], seeded_deal)
 
-    async def fake_enqueue(storage_key: str, *, entity: str, known_sha256s=None) -> str:
+    async def fake_enqueue(
+        storage_key: str, *, entity: str, known_sha256s=None, sector_options=None, geo_options=None
+    ) -> str:
         assert known_sha256s is None  # D12: never the document's own fingerprint
         assert entity == "Job Test Deal"  # deal.name, per point 3
         return "job-key-1"
@@ -188,6 +190,45 @@ async def test_all_documents_parsed_marks_run_successful(
     assert kwargs["timeout"] == 7200
 
 
+async def test_enqueue_receives_the_orgs_approved_mandate_options(
+    owner_conn, seeded_org, seeded_deal, monkeypatch, mocked_verification_enqueue
+):
+    """Path B: the org's approved sectors/geographies are loaded once and passed
+    to the parser so it can classify each document's sector/HQ against them."""
+    from app.services.screening.workspace_config import WorkspaceConfig
+
+    _seed_verified_data_source(owner_conn, seeded_org["org_pk"], seeded_deal, "org/a.pdf")
+    run_id = _seed_run(owner_conn, seeded_org["org_pk"], seeded_deal)
+
+    async def fake_load_config(session):
+        return WorkspaceConfig(
+            approved_sectors=["Fintech"], approved_geographies=["Canada", "United States"]
+        )
+
+    captured: dict[str, Any] = {}
+
+    async def fake_enqueue(
+        storage_key: str, *, entity: str, known_sha256s=None, sector_options=None, geo_options=None
+    ) -> str:
+        captured["sector_options"] = sector_options
+        captured["geo_options"] = geo_options
+        return "job-key-1"
+
+    async def fake_get_job(job_key: str) -> _FakeSaqJob:
+        return _FakeSaqJob(Status.COMPLETE, {"status": "parsed", "bucket": "b", "key": "k"})
+
+    monkeypatch.setattr(job_module, "load_workspace_config", fake_load_config)
+    monkeypatch.setattr(job_module, "enqueue_process_document_job", fake_enqueue)
+    monkeypatch.setattr(job_module, "get_parse_job", fake_get_job)
+
+    await job_module.start_deal_analysis(
+        {}, analysis_run_id=run_id, deal_id=seeded_deal, clerk_org_id=seeded_org["clerk_org_id"]
+    )
+
+    assert captured["sector_options"] == ["Fintech"]
+    assert captured["geo_options"] == ["Canada", "United States"]
+
+
 async def test_all_documents_rejected_no_extractable_text_marks_ocr_needed_and_run_failed(
     owner_conn, seeded_org, seeded_deal, monkeypatch, mocked_verification_enqueue
 ):
@@ -200,7 +241,9 @@ async def test_all_documents_rejected_no_extractable_text_marks_ocr_needed_and_r
     )
     run_id = _seed_run(owner_conn, seeded_org["org_pk"], seeded_deal)
 
-    async def fake_enqueue(storage_key: str, *, entity: str, known_sha256s=None) -> str:
+    async def fake_enqueue(
+        storage_key: str, *, entity: str, known_sha256s=None, sector_options=None, geo_options=None
+    ) -> str:
         return "job-key-2"
 
     # Real message from Simpero_Gov_AI_Services' docling_parser.py:461 --
@@ -249,7 +292,9 @@ async def test_mixed_outcomes_mark_run_successful_not_failed(
     results_by_key: dict[str, _FakeSaqJob] = {}
     counter = {"n": 0}
 
-    async def fake_enqueue(storage_key: str, *, entity: str, known_sha256s=None) -> str:
+    async def fake_enqueue(
+        storage_key: str, *, entity: str, known_sha256s=None, sector_options=None, geo_options=None
+    ) -> str:
         counter["n"] += 1
         key = f"job-key-{counter['n']}"
         if "scan" in storage_key:
@@ -287,7 +332,9 @@ async def test_saq_level_job_failure_falls_back_to_generic_comment(
     )
     run_id = _seed_run(owner_conn, seeded_org["org_pk"], seeded_deal)
 
-    async def fake_enqueue(storage_key: str, *, entity: str, known_sha256s=None) -> str:
+    async def fake_enqueue(
+        storage_key: str, *, entity: str, known_sha256s=None, sector_options=None, geo_options=None
+    ) -> str:
         return "job-key-broken"
 
     async def fake_get_job(job_key: str) -> _FakeSaqJob:

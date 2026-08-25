@@ -48,6 +48,7 @@ from app.core.database import AsyncSessionLocal
 from app.jobs.queue import get_queue
 from app.models import Claim, Edge
 from app.repo.AnalysisRunRepo import AnalysisRunRepo
+from app.repo.DealRepo import DealRepo
 from app.repo.HumanAuditRepo import HumanAuditRepo
 from app.services.consistency import reconcile_consistency
 from app.services.corroboration import (
@@ -55,6 +56,7 @@ from app.services.corroboration import (
     CORROBORATION_SOURCES,
     run_corroboration,
 )
+from app.services.deal_profile import deal_profile_updates
 from app.services.reconciliation import reconcile_same_fact
 from app.services.span_promotion import promote_exact_span
 from app.services.status_rollup import roll_up_deal
@@ -261,12 +263,17 @@ async def _run_verification(
 
         job_comments: list[dict] = []
         verified_data_source_ids: list[UUID] = []
+        deal_profiles: list[dict | None] = []
 
         for job in usable_jobs:
             data_source_id = UUID(job["data_source_id"])
             envelope = get_json_object(job["bucket"], job["key"])
             claims = envelope.get("claims", [])
             _validate_claims(claims)
+            # Path B: the parser's per-document sector/HQ classification (may be
+            # None). Merged after the loop into deal.sector/hq_geography so
+            # gs_07/gs_08 have something to screen.
+            deal_profiles.append(envelope.get("deal_profile"))
 
             # ponytail: insert-only, not idempotent against a redelivered/
             # retried job (inherits ingest_claims.py's SIM-367 gap -- a crash
@@ -298,6 +305,13 @@ async def _run_verification(
                     f"from extraction, {len(skipped_edges)} edge(s) skipped.",
                 }
             )
+
+        # Path B: write the deal's sector/HQ from the documents' classification so
+        # gs_07/gs_08 can screen them. Conservative -- only resolvable dimensions
+        # are set (see deal_profile_updates); a no-op when nothing resolved.
+        profile_updates = deal_profile_updates(deal_profiles)
+        if profile_updates:
+            await DealRepo(session).update(deal_uuid, profile_updates)
 
         for data_source_id in verified_data_source_ids:
             # SIM-412 first: the parser leaves every PDF claim at `proposed`,

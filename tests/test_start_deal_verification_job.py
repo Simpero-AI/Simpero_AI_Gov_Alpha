@@ -428,3 +428,64 @@ async def test_missing_run_raises(owner_conn, seeded_org, seeded_deal):
             parsing_run_id=parsing_run_id,
             clerk_org_id=seeded_org["clerk_org_id"],
         )
+
+
+def _fetch_deal_fields(owner_conn, deal_id: str) -> dict[str, Any]:
+    with owner_conn.cursor() as cur:
+        cur.execute("SELECT sector, hq_geography FROM deals WHERE id = %s", (deal_id,))
+        sector, hq_geography = cur.fetchone()
+    return {"sector": sector, "hq_geography": hq_geography}
+
+
+async def test_writes_deal_sector_and_hq_from_the_deal_profile(
+    owner_conn, seeded_org, seeded_deal, monkeypatch, mocked_screening_enqueue
+):
+    """Path B: the parser's deal_profile in the envelope is mapped onto
+    deals.sector / deals.hq_geography so gs_07/gs_08 have something to screen. A
+    'match' writes the approved option verbatim; an 'outside' read writes the raw
+    value; 'unknown' would leave the column untouched."""
+    data_source_id = _seed_data_source(owner_conn, seeded_org["org_pk"], seeded_deal, "cim.pdf")
+    parse_jobs = [
+        {
+            "data_source_id": data_source_id,
+            "filename": "cim.pdf",
+            "storage_key": "org/cim.pdf",
+            "job_key": "job-1",
+            "outcome": "parsed",
+            "code": None,
+            "message": None,
+            "bucket": "test-bucket",
+            "key": "claims/cim.json",
+        }
+    ]
+    parsing_run_id = _seed_parsing_run(owner_conn, seeded_org["org_pk"], seeded_deal, parse_jobs)
+    run_id = _seed_verification_run(owner_conn, seeded_org["org_pk"], seeded_deal)
+
+    envelope = {
+        "run_id": parsing_run_id,
+        "sha256": "a" * 64,
+        "source_file": "cim.pdf",
+        "claims": [_claim_json("c1", page=1)],
+        "edges": [],
+        "deal_profile": {
+            "sector": "vertical SaaS for dental clinics",
+            "sector_evidence": "a vertical SaaS platform for clinics",
+            "hq_geography": "Berlin, Germany",
+            "hq_evidence": "headquartered in Berlin",
+            "sector_fit": {"status": "match", "option": "Healthcare IT"},
+            "hq_fit": {"status": "outside", "option": None},
+        },
+    }
+
+    monkeypatch.setattr(job_module, "get_json_object", lambda bucket, key: envelope)
+
+    await job_module.start_deal_verification(
+        {},
+        analysis_run_id=run_id,
+        parsing_run_id=parsing_run_id,
+        clerk_org_id=seeded_org["clerk_org_id"],
+    )
+
+    fields = _fetch_deal_fields(owner_conn, seeded_deal)
+    assert fields["sector"] == "Healthcare IT"  # match -> the approved option verbatim
+    assert fields["hq_geography"] == "Berlin, Germany"  # outside -> the raw read

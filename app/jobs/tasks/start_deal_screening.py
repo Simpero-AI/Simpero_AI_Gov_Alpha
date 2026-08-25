@@ -33,6 +33,9 @@ from app.repo.DealRepo import DealRepo
 from app.repo.HumanAuditRepo import HumanAuditRepo
 from app.repo.ScreeningResultRepo import ScreeningResultRepo
 from app.services.screening.decision import screen_deal
+from app.services.screening.mandate_rules import selected_rule_ids
+from app.services.screening.rulebook import load_rulebook
+from app.services.screening.workspace_config import load_workspace_config
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +113,15 @@ async def _run_screening(*, analysis_run_id: str, clerk_org_id: str) -> None:
 
         await run_repo.update_progress(run_id, status="in_progress")
 
-        decision = await screen_deal(session, deal)
+        # Path B: screen the deal only on the questions the analyst selected in
+        # the mandate (must-haves + enabled deal-breakers + geography/sector
+        # policies), not the whole rulebook. When nothing is selected -- most
+        # commonly because no mandate is configured at all -- fall back to the
+        # full rulebook (`only_rule_ids=None`) rather than screening nothing.
+        rulebook = load_rulebook()
+        mandate = await load_workspace_config(session)
+        selected = selected_rule_ids(rulebook, mandate)
+        decision = await screen_deal(session, deal, rulebook, only_rule_ids=selected or None)
         await ScreeningResultRepo(session).record(
             decision, org_id=org_id, deal_id=deal_uuid, analysis_run_id=run_id
         )

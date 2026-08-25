@@ -118,17 +118,39 @@ async def evaluate_rule(
 
 
 async def screen_deal(
-    session: AsyncSession, deal: Deal, rulebook: Rulebook | None = None
+    session: AsyncSession,
+    deal: Deal,
+    rulebook: Rulebook | None = None,
+    *,
+    only_rule_ids: set[str] | None = None,
 ) -> ScreeningDecision:
     """Run the rulebook against one deal and recommend.
 
     `session` must already be RLS-scoped by the caller (`SET LOCAL
     app.org_id`), same contract as the rest of app/services/.
+
+    `only_rule_ids` gates which questions run (Path B mandate-gated screening):
+    None runs the whole rulebook (the default, unchanged); a set runs only those
+    rules, in the same deal-breaker-first order. An EMPTY set means the mandate
+    selected nothing screenable -- that routes to human review, never a vacuous
+    green (a deal with no criteria evaluated must not pass as if it met them all).
     """
     rulebook = rulebook or load_rulebook()
+
+    order = ordered_rule_ids(rulebook)
+    if only_rule_ids is not None:
+        order = [rule_id for rule_id in order if rule_id in only_rule_ids]
+        if not order:
+            logger.warning("screening: no rules selected by the mandate; routing to human review")
+            return ScreeningDecision(
+                recommendation="human_review",
+                rulebook_version=rulebook.version,
+                results=(),
+            )
+
     results: list[RuleResult] = []
 
-    for rule_id in ordered_rule_ids(rulebook):
+    for rule_id in order:
         result = await evaluate_rule(rule_id, session, deal, rulebook)
         results.append(result)
 
