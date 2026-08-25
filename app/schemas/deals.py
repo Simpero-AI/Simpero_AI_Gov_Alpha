@@ -144,6 +144,18 @@ class DealWithLatestMemoResponse(CamelModel):
     latest_memo_session: LatestMemoSessionResponse | None
 
 
+class DealDocumentResponse(CamelModel):
+    """One data_source row (P3-04). No field here distinguishes an org-side
+    upload from an external-intake upload (P3-10) -- both write through the
+    same DataSourceRepo, so the list is uniform by construction, not by a
+    filter applied here."""
+
+    id: str
+    filename: str
+    status: str
+    created_at: datetime
+
+
 class CreateDealRequest(CamelModel):
     name: str
     gp_source: str | None

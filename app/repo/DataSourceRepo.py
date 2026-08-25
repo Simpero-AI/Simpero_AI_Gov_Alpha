@@ -20,8 +20,14 @@ class DataSourceRepo(BaseRepo[DataSource, dict]):
         return await self.session.get(DataSource, id)
 
     async def list_for_deal(self, deal_id: uuid.UUID) -> list[DataSource]:
-        """RLS scopes this to the request's org — no WHERE org_id here."""
-        result = await self.session.execute(select(DataSource).where(DataSource.deal_id == deal_id))
+        """RLS scopes this to the request's org — no WHERE org_id here.
+        Ordered by created_at so GET /deals/{deal_id}/documents (P3-04)
+        returns a stable, upload-chronological list; existing callers
+        (start_analysis, start_deal_analysis) only filter/count this list
+        and don't depend on any particular order."""
+        result = await self.session.execute(
+            select(DataSource).where(DataSource.deal_id == deal_id).order_by(DataSource.created_at)
+        )
         return list(result.scalars().all())
 
     async def find_dedupe_candidate(self, deal_id: uuid.UUID, hash: str) -> DataSource | None:
