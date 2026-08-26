@@ -380,6 +380,35 @@ async def test_submitted_link_blocks_data_source_insert(
         )
 
 
+async def test_submitted_link_blocks_response_insert(
+    public_db_session, test_org_id, org_a_id, org_a_deal_id, submitted_link
+):
+    """Proves the EXISTS (... status = 'pending') guard on
+    intake_response_insert (ALTERed here, see module docstring -- the
+    original P1-02 policy had no such guard) blocks a second submission once
+    the link is submitted, even though the link row itself is still visible
+    via intake_session_lookup. MOVED here from
+    tests/test_intake_response_rls.py, where it originally lived on P1-02's
+    branch before the EXISTS guard's real dependency on this migration's
+    keyhole policies was found (see this migration's module docstring)."""
+    await _set_guc(public_db_session, "app.org_id", test_org_id)
+    await _set_guc(public_db_session, "app.intake_link_id", submitted_link["id"])
+
+    with pytest.raises(Exception, match="row-level security"):
+        await public_db_session.execute(
+            text(
+                "INSERT INTO deal_intake_response (org_id, deal_id, link_id, respondent_email) "
+                "VALUES (:org_id, :deal_id, :link_id, :email)"
+            ),
+            {
+                "org_id": org_a_id,
+                "deal_id": org_a_deal_id,
+                "link_id": submitted_link["id"],
+                "email": "respondent@org-a.example",
+            },
+        )
+
+
 async def test_data_source_scoped_to_one_org_deal_link(
     public_db_session, test_org_id, org_a_deal_id, org_a_data_source_id, org_b_docs, pending_link
 ):
