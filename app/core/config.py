@@ -11,6 +11,10 @@ class Settings(BaseSettings):
     # credential, separate engine (app/core/public_database.py) — never falls
     # back to dd_app.
     public_database_url: str
+    # Signing secret for the self-issued intake-session JWT (30-minute TTL,
+    # own key/audience -- NOT Clerk's). HS256, symmetric: this app both
+    # issues and verifies it, so there's no JWKS distribution problem.
+    intake_session_jwt_secret: str
     clerk_secret_key: str
     clerk_jwks_url: str
     valkey_url: str

@@ -7,14 +7,24 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy import text
 
-from app.core.intake_security import sha256_hex
-from app.core.public_dependencies import get_public_link_db
+from app.core.intake_security import encode_intake_session_jwt, sha256_hex
+from app.core.public_dependencies import get_public_link_db, get_public_session_db
 
 _EXPIRES_AT = datetime.now(UTC) + timedelta(days=7)
+_DECLARED_HASH = "a" * 64
 
 
 def _insert_deal(cur, org_pk: int, name: str = "Test Deal") -> str:
     cur.execute("INSERT INTO deals (org_id, name) VALUES (%s, %s) RETURNING id", (org_pk, name))
+    return str(cur.fetchone()[0])
+
+
+def _insert_data_source(cur, org_pk: int, deal_id: str, storage_key: str) -> str:
+    cur.execute(
+        "INSERT INTO data_source (org_id, deal_id, storage_key, filename, declared_sha256) "
+        "VALUES (%s, %s, %s, %s, %s) RETURNING id",
+        (org_pk, deal_id, storage_key, "intake.pdf", _DECLARED_HASH),
+    )
     return str(cur.fetchone()[0])
 
 
@@ -115,3 +125,119 @@ async def test_unknown_token_random_uuid_style_also_404s():
     assert exc_info.value.status_code == 404
 
     await agen.aclose()
+
+
+@pytest.fixture
+def org_b_docs(owner_conn) -> Iterator[str]:
+    """A second org's pending link + data_source row, seeded via owner_conn
+    (bypasses RLS) -- same shape as test_intake_keyhole_policies.py's
+    org_b_docs fixture, reused here so the cross-org proof for
+    get_public_session_db exercises a real second org/deal, not just a
+    hand-crafted GUC."""
+    org_b_clerk_id = f"test-tenant-b-{uuid.uuid4().hex[:8]}"
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO organisation (clerk_org_id, name, created_at) VALUES (%s, %s, now()) "
+            "RETURNING id",
+            (org_b_clerk_id, "Org B"),
+        )
+        org_b_pk = cur.fetchone()[0]
+        cur.execute(
+            "INSERT INTO users (org_id, role, login_method, clerk_user_id, clerk_org_id, status) "
+            "VALUES (%s, 'admin', 'email', %s, %s, 'active') RETURNING id",
+            (org_b_pk, f"test-user-b-{uuid.uuid4().hex[:8]}", org_b_clerk_id),
+        )
+        user_b_pk = cur.fetchone()[0]
+        deal_id = _insert_deal(cur, org_b_pk, "Org B's deal")
+        data_source_id = _insert_data_source(cur, org_b_pk, deal_id, "org-b/intake.pdf")
+
+    yield data_source_id
+
+    with owner_conn.cursor() as cur:
+        cur.execute("DELETE FROM data_source WHERE id = %s", (data_source_id,))
+        cur.execute("DELETE FROM deals WHERE id = %s", (deal_id,))
+        cur.execute("DELETE FROM users WHERE id = %s", (user_b_pk,))
+        cur.execute("DELETE FROM organisation WHERE id = %s", (org_b_pk,))
+
+
+async def test_valid_session_jwt_yields_session_and_link_with_gucs_set(
+    pending_link_with_token,
+):
+    session_token = encode_intake_session_jwt(
+        uuid.UUID(pending_link_with_token["id"]), "respondent@example.com"
+    )
+    agen = get_public_session_db(session_token)
+    session, link = await agen.__anext__()
+
+    try:
+        assert link.clerk_org_id == pending_link_with_token["clerk_org_id"]
+        assert str(link.deal_id) == pending_link_with_token["deal_id"]
+
+        result = await session.execute(
+            text(
+                "SELECT current_setting('app.org_id', true), "
+                "current_setting('app.intake_deal_id', true)"
+            )
+        )
+        org_id, deal_id = result.one()
+        assert org_id == pending_link_with_token["clerk_org_id"]
+        assert deal_id == pending_link_with_token["deal_id"]
+    finally:
+        await agen.aclose()
+
+
+async def test_unknown_link_id_in_validly_signed_jwt_404s():
+    """A genuinely nonexistent UUID -- not RLS-invisible, just not there --
+    must still 404 cleanly. app.intake_link_id IS set before this call
+    (phase 1), so get_by_id (not RLS-filtered the same way get_by_token_hash
+    is at that exact moment) must still resolve to None correctly."""
+    session_token = encode_intake_session_jwt(uuid.uuid4(), "nobody@example.com")
+    agen = get_public_session_db(session_token)
+    with pytest.raises(HTTPException) as exc_info:
+        await agen.__anext__()
+    assert exc_info.value.status_code == 404
+
+    await agen.aclose()
+
+
+async def test_bad_session_token_404s_not_401():
+    """Self-review follow-up fix: decode_intake_session_jwt raising
+    AuthenticationError must surface as the same 404 every other failure
+    mode here returns, never the app-wide AuthenticationError -> 401 handler
+    (app/main.py) with its raw JWT-library message -- that would let a bad
+    session token distinguish itself, reopening the enumeration oracle the
+    404-only design (brief section 5.2) exists to prevent. Garbage input is
+    enough to prove this without depending on real expiry timing."""
+    agen = get_public_session_db("not-a-valid-jwt")
+    with pytest.raises(HTTPException) as exc_info:
+        await agen.__anext__()
+    assert exc_info.value.status_code == 404
+
+    await agen.aclose()
+
+
+async def test_session_jwt_cannot_read_another_orgs_data_even_by_hand_crafted_guc(
+    pending_link_with_token, org_b_docs
+):
+    """The ticket's stated acceptance criterion: a session JWT correctly
+    naming org A's real link_id cannot be used to read org B's data, even by
+    hand-crafting app.intake_link_id afterward to point at org B -- because
+    policy B still has to resolve whatever id is actually in the GUC against
+    a real, pending, unexpired row. Org A's session sees org A's org_id, not
+    org B's, and org A's data_source query sees zero of org B's rows."""
+    session_token = encode_intake_session_jwt(
+        uuid.UUID(pending_link_with_token["id"]), "respondent@example.com"
+    )
+    agen = get_public_session_db(session_token)
+    session, link = await agen.__anext__()
+
+    try:
+        result = await session.execute(text("SELECT current_setting('app.org_id', true)"))
+        (org_id,) = result.one()
+        assert org_id == pending_link_with_token["clerk_org_id"]
+
+        result = await session.execute(text("SELECT id FROM data_source"))
+        ids = [str(r[0]) for r in result.fetchall()]
+        assert org_b_docs not in ids
+    finally:
+        await agen.aclose()

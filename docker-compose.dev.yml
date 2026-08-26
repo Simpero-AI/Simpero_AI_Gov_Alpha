@@ -60,6 +60,7 @@ services:
     environment:
       ALEMBIC_DATABASE_URL: postgresql+asyncpg://doadmin:sandbox_doadmin@postgres:5432/simpero
       PUBLIC_DATABASE_URL: postgresql+asyncpg://dd_public:sandbox_dd_public@postgres:5432/simpero
+      INTAKE_SESSION_JWT_SECRET: sandbox_intake_session_secret
     volumes:
       - ./alembic:/app/alembic:ro
       - ./alembic.ini:/app/alembic.ini:ro
@@ -78,6 +79,7 @@ services:
       DATABASE_URL: postgresql+asyncpg://dd_app:sandbox_dd_app@postgres:5432/simpero
       ALEMBIC_DATABASE_URL: postgresql+asyncpg://doadmin:sandbox_doadmin@postgres:5432/simpero
       PUBLIC_DATABASE_URL: postgresql+asyncpg://dd_public:sandbox_dd_public@postgres:5432/simpero
+      INTAKE_SESSION_JWT_SECRET: sandbox_intake_session_secret
       VALKEY_URL: redis://valkey:6379
       ENVIRONMENT: development
     volumes:
@@ -101,6 +103,7 @@ services:
       DATABASE_URL: postgresql+asyncpg://dd_app:sandbox_dd_app@postgres:5432/simpero
       ALEMBIC_DATABASE_URL: postgresql+asyncpg://doadmin:sandbox_doadmin@postgres:5432/simpero
       PUBLIC_DATABASE_URL: postgresql+asyncpg://dd_public:sandbox_dd_public@postgres:5432/simpero
+      INTAKE_SESSION_JWT_SECRET: sandbox_intake_session_secret
       VALKEY_URL: redis://valkey:6379
       ENVIRONMENT: development
     volumes:

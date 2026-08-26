@@ -4,7 +4,8 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.intake_security import sha256_hex
+from app.core.exceptions import AuthenticationError
+from app.core.intake_security import decode_intake_session_jwt, sha256_hex
 from app.core.public_database import PublicAsyncSessionLocal
 from app.models.deal_intake_link import DealIntakeLink
 from app.repo.IntakeLinkRepo import IntakeLinkRepo
@@ -44,6 +45,50 @@ async def get_public_link_db(
         # isn't set yet, and organisation's own policy would return nothing.
         # Both GUCs set in the SAME statement, before any tenant-table query
         # runs after this point.
+        await session.execute(
+            text(
+                "SELECT set_config('app.org_id', :tid, true), "
+                "set_config('app.intake_deal_id', :did, true)"
+            ),
+            {"tid": link.clerk_org_id, "did": str(link.deal_id)},
+        )
+        yield session, link
+
+
+async def get_public_session_db(
+    session_token: str,
+) -> AsyncGenerator[tuple[AsyncSession, DealIntakeLink], None]:
+    """Used by every route AFTER /session (all P3): /questions, /answers,
+    /uploads/*, /submit. The raw link token is never sent again past this
+    point -- only this short-lived, app-signed session token.
+
+    decode_intake_session_jwt raising AuthenticationError on a bad token IS
+    caught here (self-review follow-up fix, see
+    docs/plans/external-deal-intake-link-status.md's P1-06 row): app/main.py
+    has a global AuthenticationError -> 401 handler with the raw JWT-library
+    message in the body, and any P3 route wiring this dependency in would
+    otherwise surface a distinguishable 401 instead of the same 404 every
+    other failure mode returns -- reopening the enumeration oracle the
+    404-only design (brief section 5.2) exists to prevent. Matches
+    get_public_link_db's own existing pattern of raising HTTPException(404)
+    directly, never deferring to the caller.
+    """
+    try:
+        claims = decode_intake_session_jwt(session_token)
+    except AuthenticationError as exc:
+        raise HTTPException(status_code=404, detail="Not found") from exc
+    async with PublicAsyncSessionLocal() as session, session.begin():
+        # Phase 1. FIRST statement. Keyhole policy B (intake_session_lookup),
+        # keyed on link_id from the verified session claim.
+        await session.execute(
+            text("SELECT set_config('app.intake_link_id', :lid, true)"),
+            {"lid": str(claims.link_id)},
+        )
+        link = await IntakeLinkRepo(session).get_by_id(claims.link_id)
+        if link is None:
+            raise HTTPException(status_code=404, detail="Not found")
+
+        # Phase 2. Same clerk_org_id column, same reasoning as get_public_link_db.
         await session.execute(
             text(
                 "SELECT set_config('app.org_id', :tid, true), "
