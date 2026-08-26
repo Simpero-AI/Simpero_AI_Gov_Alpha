@@ -24,9 +24,18 @@ class DataSourceRepo(BaseRepo[DataSource, dict]):
         Ordered by created_at so GET /deals/{deal_id}/documents (P3-04)
         returns a stable, upload-chronological list; existing callers
         (start_analysis, start_deal_analysis) only filter/count this list
-        and don't depend on any particular order."""
+        and don't depend on any particular order.
+
+        created_at alone has no tie-breaker for rows inserted in the same
+        transaction (it defaults to now(), i.e. transaction-start time, not
+        clock_timestamp()) -- every write today is one document per request,
+        so this doesn't happen in practice, but id as a secondary sort key
+        makes the order deterministic regardless of how documents get
+        inserted in the future (e.g. a batch-upload path)."""
         result = await self.session.execute(
-            select(DataSource).where(DataSource.deal_id == deal_id).order_by(DataSource.created_at)
+            select(DataSource)
+            .where(DataSource.deal_id == deal_id)
+            .order_by(DataSource.created_at, DataSource.id)
         )
         return list(result.scalars().all())
 

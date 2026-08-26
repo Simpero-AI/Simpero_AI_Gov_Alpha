@@ -1,6 +1,6 @@
 import json
 import uuid
-from typing import Any
+from typing import Any, cast
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.exc import IntegrityError
@@ -24,6 +24,7 @@ from app.schemas.deals import (
     DashboardStatsResponse,
     DdCompletionStat,
     DealDocumentResponse,
+    DealDocumentStatus,
     DealRowResponse,
     DealStatusResponse,
     DealWithLatestMemoResponse,
@@ -531,7 +532,7 @@ async def list_deal_documents(
         DealDocumentResponse(
             id=str(document.id),
             filename=document.filename,
-            status=document.status,
+            status=cast(DealDocumentStatus, document.status),
             created_at=document.created_at,
         )
         for document in documents

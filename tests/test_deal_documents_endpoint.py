@@ -154,6 +154,39 @@ def test_ordered_by_upload_time(client, owner_conn, seeded_org, seeded_deal):
     assert [document["id"] for document in resp.json()] == [first, second]
 
 
+def test_ordering_is_deterministic_for_identical_created_at(
+    client, owner_conn, seeded_org, seeded_deal
+):
+    """Review finding: created_at alone has no tie-breaker for rows
+    inserted in the same transaction (it's now(), transaction-start time,
+    not clock_timestamp()) -- id as a secondary sort key makes the order
+    deterministic regardless."""
+    same_timestamp = "2026-08-01T00:00:00+00:00"
+    lower_id = "00000000-0000-0000-0000-000000000001"
+    higher_id = "00000000-0000-0000-0000-000000000002"
+    _seed_data_source(
+        owner_conn,
+        seeded_org["org_pk"],
+        seeded_deal,
+        "second.pdf",
+        id=higher_id,
+        created_at=same_timestamp,
+    )
+    _seed_data_source(
+        owner_conn,
+        seeded_org["org_pk"],
+        seeded_deal,
+        "first.pdf",
+        id=lower_id,
+        created_at=same_timestamp,
+    )
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    resp = client.get(f"/deals/{seeded_deal}/documents")
+
+    assert [document["id"] for document in resp.json()] == [lower_id, higher_id]
+
+
 def test_scoped_to_the_caller_org(client, owner_conn, seeded_org, seeded_deal):
     """RLS: a second org can't see this deal at all -- 404, not an empty
     list, same idiom as GET /deals/{deal_id}."""
