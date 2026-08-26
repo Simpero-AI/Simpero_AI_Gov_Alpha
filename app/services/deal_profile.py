@@ -17,6 +17,7 @@ documents the strongest signal wins (a match beats an outside beats nothing),
 since sector/HQ are deal-wide but each document is classified on its own.
 """
 
+from collections.abc import Sequence
 from typing import Any
 
 # Strength order for merging per-document reads: a confident approved match wins
@@ -56,7 +57,7 @@ def _resolve(profiles: list[dict], fit_key: str, raw_key: str) -> str | None:
     return best[1] if best is not None else None
 
 
-def deal_profile_updates(profiles: list[dict | None]) -> dict[str, str]:
+def deal_profile_updates(profiles: Sequence[dict | None]) -> dict[str, str]:
     """The `deal` columns to SET from the documents' deal_profile envelopes.
 
     Only resolvable dimensions appear in the result; pass the returned dict

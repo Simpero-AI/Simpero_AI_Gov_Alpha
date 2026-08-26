@@ -290,21 +290,27 @@ async def test_evaluate_rule_degrades_to_unknown_when_its_evaluator_raises(monke
 
 
 async def test_out_of_scope_rules_are_unknown_with_a_no_evidence_reason(db_session, org_a_id):
-    """13 rules are out of scope for the deterministic CIM-only screener
-    (evaluator: none -- SIM-405/406 descoped). Their honest verdict is
-    `unknown` -> human review, reported under evaluator "none" with a uniform
-    "No evidence found in the documents" reason."""
+    """The external/placeholder rules still out of scope (evaluator: none, e.g.
+    db_05 litigation, db_09 sanctions) report `unknown` -> human review under
+    evaluator "none" with the uniform "No evidence found in the documents"
+    reason. A document (llm) rule with no finding on the deal reports the same
+    verdict/reason, but under its own "llm" provenance."""
     deal = await DealRepo(db_session).create({"org_id": org_a_id, "name": "Unevaluated"})
     await db_session.flush()
 
     result = await screen_deal(db_session, deal, RULEBOOK)
     by_id = {r.rule_id: r for r in result.results}
 
+    for rule_id in ("db_05", "db_09"):
+        assert by_id[rule_id].verdict == "unknown"
+        assert by_id[rule_id].evaluator == "none"
+        assert by_id[rule_id].reason == "No evidence found in the documents"
+
+    # gs_01 is now a document-searched (llm) rule; with no finding persisted it is
+    # unknown with the same reason, but reported under "llm" provenance.
     assert by_id["gs_01"].verdict == "unknown"
-    assert by_id["gs_01"].evaluator == "none"
+    assert by_id["gs_01"].evaluator == "llm"
     assert by_id["gs_01"].reason == "No evidence found in the documents"
-    assert by_id["db_09"].evaluator == "none"
-    assert by_id["db_09"].reason == "No evidence found in the documents"
 
 
 async def test_structurally_unverifiable_rules_report_the_policy_not_a_ticket(db_session, org_a_id):

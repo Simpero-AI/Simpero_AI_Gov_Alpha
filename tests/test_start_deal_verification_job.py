@@ -432,9 +432,15 @@ async def test_missing_run_raises(owner_conn, seeded_org, seeded_deal):
 
 def _fetch_deal_fields(owner_conn, deal_id: str) -> dict[str, Any]:
     with owner_conn.cursor() as cur:
-        cur.execute("SELECT sector, hq_geography FROM deals WHERE id = %s", (deal_id,))
-        sector, hq_geography = cur.fetchone()
-    return {"sector": sector, "hq_geography": hq_geography}
+        cur.execute(
+            "SELECT sector, hq_geography, qualitative_findings FROM deals WHERE id = %s", (deal_id,)
+        )
+        sector, hq_geography, qualitative_findings = cur.fetchone()
+    return {
+        "sector": sector,
+        "hq_geography": hq_geography,
+        "qualitative_findings": qualitative_findings,
+    }
 
 
 async def test_writes_deal_sector_and_hq_from_the_deal_profile(
@@ -475,6 +481,12 @@ async def test_writes_deal_sector_and_hq_from_the_deal_profile(
             "sector_fit": {"status": "match", "option": "Healthcare IT"},
             "hq_fit": {"status": "outside", "option": None},
         },
+        # Path B "search just in case": grounded document verdicts, persisted so
+        # the document evaluators can screen gs_01/db_03. The unknown one is dropped.
+        "qualitative_findings": {
+            "gs_01": {"verdict": "Y", "evidence": "The founders are full-time."},
+            "db_03": {"verdict": "unknown", "evidence": ""},
+        },
     }
 
     monkeypatch.setattr(job_module, "get_json_object", lambda bucket, key: envelope)
@@ -489,3 +501,7 @@ async def test_writes_deal_sector_and_hq_from_the_deal_profile(
     fields = _fetch_deal_fields(owner_conn, seeded_deal)
     assert fields["sector"] == "Healthcare IT"  # match -> the approved option verbatim
     assert fields["hq_geography"] == "Berlin, Germany"  # outside -> the raw read
+    # Only the decisive verdict is persisted; the unknown one is dropped.
+    assert fields["qualitative_findings"] == {
+        "gs_01": {"verdict": "Y", "evidence": "The founders are full-time."}
+    }

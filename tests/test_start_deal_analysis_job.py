@@ -145,7 +145,13 @@ async def test_all_documents_parsed_marks_run_successful(
     run_id = _seed_run(owner_conn, seeded_org["org_pk"], seeded_deal)
 
     async def fake_enqueue(
-        storage_key: str, *, entity: str, known_sha256s=None, sector_options=None, geo_options=None
+        storage_key: str,
+        *,
+        entity: str,
+        known_sha256s=None,
+        sector_options=None,
+        geo_options=None,
+        screen_criteria=None,
     ) -> str:
         assert known_sha256s is None  # D12: never the document's own fingerprint
         assert entity == "Job Test Deal"  # deal.name, per point 3
@@ -193,8 +199,10 @@ async def test_all_documents_parsed_marks_run_successful(
 async def test_enqueue_receives_the_orgs_approved_mandate_options(
     owner_conn, seeded_org, seeded_deal, monkeypatch, mocked_verification_enqueue
 ):
-    """Path B: the org's approved sectors/geographies are loaded once and passed
-    to the parser so it can classify each document's sector/HQ against them."""
+    """Path B: the org's approved sectors/geographies AND the selected qualitative
+    (llm) rules' questions are loaded once and passed to the parser -- so it can
+    classify sector/HQ and search the document for the analyst's selected
+    qualitative criteria."""
     from app.services.screening.workspace_config import WorkspaceConfig
 
     _seed_verified_data_source(owner_conn, seeded_org["org_pk"], seeded_deal, "org/a.pdf")
@@ -202,16 +210,26 @@ async def test_enqueue_receives_the_orgs_approved_mandate_options(
 
     async def fake_load_config(session):
         return WorkspaceConfig(
-            approved_sectors=["Fintech"], approved_geographies=["Canada", "United States"]
+            approved_sectors=["Fintech"],
+            approved_geographies=["Canada", "United States"],
+            # A must-have that maps to an llm (document-searched) rule.
+            must_have_options=["Founder(s) full-time on the business"],
         )
 
     captured: dict[str, Any] = {}
 
     async def fake_enqueue(
-        storage_key: str, *, entity: str, known_sha256s=None, sector_options=None, geo_options=None
+        storage_key: str,
+        *,
+        entity: str,
+        known_sha256s=None,
+        sector_options=None,
+        geo_options=None,
+        screen_criteria=None,
     ) -> str:
         captured["sector_options"] = sector_options
         captured["geo_options"] = geo_options
+        captured["screen_criteria"] = screen_criteria
         return "job-key-1"
 
     async def fake_get_job(job_key: str) -> _FakeSaqJob:
@@ -227,6 +245,10 @@ async def test_enqueue_receives_the_orgs_approved_mandate_options(
 
     assert captured["sector_options"] == ["Fintech"]
     assert captured["geo_options"] == ["Canada", "United States"]
+    # gs_01 was selected (must-have) and is an llm rule -> its question is searched.
+    assert captured["screen_criteria"] == [
+        {"rule_id": "gs_01", "question": "Founder(s) full-time on the business"}
+    ]
 
 
 async def test_all_documents_rejected_no_extractable_text_marks_ocr_needed_and_run_failed(
@@ -242,7 +264,13 @@ async def test_all_documents_rejected_no_extractable_text_marks_ocr_needed_and_r
     run_id = _seed_run(owner_conn, seeded_org["org_pk"], seeded_deal)
 
     async def fake_enqueue(
-        storage_key: str, *, entity: str, known_sha256s=None, sector_options=None, geo_options=None
+        storage_key: str,
+        *,
+        entity: str,
+        known_sha256s=None,
+        sector_options=None,
+        geo_options=None,
+        screen_criteria=None,
     ) -> str:
         return "job-key-2"
 
@@ -293,7 +321,13 @@ async def test_mixed_outcomes_mark_run_successful_not_failed(
     counter = {"n": 0}
 
     async def fake_enqueue(
-        storage_key: str, *, entity: str, known_sha256s=None, sector_options=None, geo_options=None
+        storage_key: str,
+        *,
+        entity: str,
+        known_sha256s=None,
+        sector_options=None,
+        geo_options=None,
+        screen_criteria=None,
     ) -> str:
         counter["n"] += 1
         key = f"job-key-{counter['n']}"
@@ -333,7 +367,13 @@ async def test_saq_level_job_failure_falls_back_to_generic_comment(
     run_id = _seed_run(owner_conn, seeded_org["org_pk"], seeded_deal)
 
     async def fake_enqueue(
-        storage_key: str, *, entity: str, known_sha256s=None, sector_options=None, geo_options=None
+        storage_key: str,
+        *,
+        entity: str,
+        known_sha256s=None,
+        sector_options=None,
+        geo_options=None,
+        screen_criteria=None,
     ) -> str:
         return "job-key-broken"
 
