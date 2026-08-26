@@ -10,11 +10,10 @@ from app.core.public_database import public_engine
 
 
 def test_public_async_session_local_imported_by_exactly_one_module():
-    """As of this ticket (P1-07), PublicAsyncSessionLocal has zero importers
-    by design -- app/core/public_dependencies.py, the module that will
-    import it, doesn't exist until P1-04. app/core/public_database.py itself
-    defines it, it doesn't import it, so it doesn't count. Expect this count
-    to become 1 once P1-04 lands; update the assertion then, not before.
+    """As of P1-04, app/core/public_dependencies.py is the one and only
+    importer of PublicAsyncSessionLocal -- app/core/public_database.py itself
+    defines it, it doesn't import it, so it doesn't count. Updated per this
+    test's own prior note: the expected count became 1 once P1-04 landed.
     """
     importers = []
     for path in Path("app").rglob("*.py"):
@@ -27,8 +26,8 @@ def test_public_async_session_local_imported_by_exactly_one_module():
                     importers.append(str(path))
                     break
 
-    assert importers == [], (
-        f"Expected zero importers of PublicAsyncSessionLocal today, found: {importers}"
+    assert importers == ["app/core/public_dependencies.py"], (
+        f"Expected exactly one importer of PublicAsyncSessionLocal, found: {importers}"
     )
 
 
