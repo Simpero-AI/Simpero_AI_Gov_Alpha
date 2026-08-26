@@ -47,6 +47,17 @@ correctly identify that exact link, so no new privilege surface is opened
 here. The underlying GRANT SELECT, INSERT ON data_source TO dd_public stays
 in P1-00's migration (privilege-only) -- not re-granted here.
 
+deal_intake_response's intake_response_insert policy (P1-02) is ALTERed here
+to add the same EXISTS(... status = 'pending') guard, for the same reason
+and by the same architect + Vansh correction -- and for the same structural
+reason it can't live on P1-02's own migration: the EXISTS subquery needs
+dd_public to have SOME visible row in deal_intake_link, which only becomes
+true once intake_token_lookup / intake_session_lookup exist (above, this
+same migration). Confirmed against real Postgres: baking this guard into
+P1-02 directly made every response INSERT fail outright, not just
+RLS-filter correctly, because dd_public could see zero deal_intake_link rows
+at that point in the migration chain.
+
 Revision ID: b4f8e1c3a962
 Revises: 6e9c2a4f7d18
 Create Date: 2026-08-25 00:00:00.000000
@@ -142,8 +153,38 @@ def upgrade() -> None:
             )
     """)
 
+    # deal_intake_response: ALTER the P1-02 policy to add the EXISTS guard --
+    # see module docstring for why this can't live on P1-02's own migration.
+    op.execute("""
+        ALTER POLICY intake_response_insert ON deal_intake_response
+            WITH CHECK (
+                org_id = (
+                    SELECT id FROM organisation
+                    WHERE clerk_org_id = current_setting('app.org_id', true)
+                )
+                AND link_id = current_setting('app.intake_link_id', true)::uuid
+                AND EXISTS (
+                    SELECT 1 FROM deal_intake_link l
+                    WHERE l.id = deal_intake_response.link_id AND l.status = 'pending'
+                )
+            )
+    """)
+
 
 def downgrade() -> None:
+    # Revert intake_response_insert to P1-02's original WITH CHECK (no
+    # EXISTS guard) before dropping the policies it depends on.
+    op.execute("""
+        ALTER POLICY intake_response_insert ON deal_intake_response
+            WITH CHECK (
+                org_id = (
+                    SELECT id FROM organisation
+                    WHERE clerk_org_id = current_setting('app.org_id', true)
+                )
+                AND link_id = current_setting('app.intake_link_id', true)::uuid
+            )
+    """)
+
     op.execute("DROP POLICY IF EXISTS intake_deal_documents_insert ON data_source")
     op.execute("DROP POLICY IF EXISTS intake_deal_documents ON data_source")
 
