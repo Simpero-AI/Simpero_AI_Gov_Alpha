@@ -24,6 +24,7 @@ unchanged from the brief's original wording.
 """
 
 import hashlib
+import os
 import secrets
 import uuid
 from collections.abc import Iterator
@@ -40,7 +41,7 @@ from app.core.public_dependencies import get_public_link_db, get_public_session_
 _EXPIRES_AT = datetime.now(UTC) + timedelta(days=7)
 _EXPIRED_AT = datetime.now(UTC) - timedelta(days=1)
 _DECLARED_HASH = "a" * 64
-_DD_PUBLIC_DSN = "postgresql://dd_public:sandbox_dd_public@localhost:5434/simpero"
+_DD_PUBLIC_DSN = os.environ["PUBLIC_DATABASE_URL"].replace("+psycopg2", "").replace("+asyncpg", "")
 
 
 def _token_hash(seed: str) -> str:
