@@ -10,6 +10,7 @@ tests/test_dd_public_grant_matrix.py's dd_public_conn fixture.
 """
 
 import hashlib
+import os
 import uuid
 from collections.abc import Iterator
 
@@ -19,7 +20,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
-_DD_PUBLIC_DSN = "postgresql://dd_public:sandbox_dd_public@localhost:5434/simpero"
+_DD_PUBLIC_DSN = os.environ["PUBLIC_DATABASE_URL"].replace("+psycopg2", "").replace("+asyncpg", "")
 
 
 def _token_hash(seed: str) -> str:
