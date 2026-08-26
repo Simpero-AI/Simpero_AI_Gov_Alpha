@@ -409,6 +409,64 @@ async def test_submitted_link_blocks_response_insert(
         )
 
 
+async def test_response_insert_rejects_deal_id_not_matching_the_links_real_deal(
+    public_db_session, owner_conn, test_org_id, org_a_id, pending_link
+):
+    """Self-review follow-up fix: the WITH CHECK verifies org_id, link_id,
+    and status='pending', but originally never verified that
+    deal_intake_response.deal_id actually equals the deal_id on the
+    deal_intake_link row named by link_id -- deal_id is denormalized purely
+    for read convenience (P1-02's migration docstring), so nothing at the DB
+    layer stopped a row from being written with a mismatched deal_id. Not
+    externally exploitable today (deal_id is always server-derived, never
+    client input, per P3-11), but a real gap against this feature's
+    provable-at-the-database-layer design pillar (brief section 5.6).
+    org_id/link_id/status are all otherwise valid here -- only deal_id is
+    wrong (a second, real deal in the same org, so this isn't just an FK
+    violation in disguise)."""
+    with owner_conn.cursor() as cur:
+        wrong_deal_id = _insert_deal(cur, org_a_id, "Org A's OTHER deal")
+
+    await _set_guc(public_db_session, "app.org_id", test_org_id)
+    await _set_guc(public_db_session, "app.intake_link_id", pending_link["id"])
+
+    with pytest.raises(Exception, match="row-level security"):
+        await public_db_session.execute(
+            text(
+                "INSERT INTO deal_intake_response (org_id, deal_id, link_id, respondent_email) "
+                "VALUES (:org_id, :deal_id, :link_id, :email)"
+            ),
+            {
+                "org_id": org_a_id,
+                "deal_id": wrong_deal_id,
+                "link_id": pending_link["id"],
+                "email": "respondent@org-a.example",
+            },
+        )
+
+
+async def test_submitted_link_blocks_data_source_select(
+    public_db_session, test_org_id, org_a_id, org_a_deal_id, org_a_data_source_id, submitted_link
+):
+    """Also-while-here test-coverage fix from the same self-review: the
+    EXISTS (... status = 'pending') guard on intake_deal_documents (the
+    SELECT policy) was only ever proven via
+    test_submitted_link_blocks_data_source_insert -- the INSERT policy's
+    identical guard. Proves the SELECT side independently: a submitted
+    link's session sees zero data_source rows for its own deal, even though
+    org_a_data_source_id is a real row that WOULD be visible while the link
+    was still pending (see test_data_source_scoped_to_one_org_deal_link
+    below, which proves the pending-link case)."""
+    await _set_guc(public_db_session, "app.org_id", test_org_id)
+    await _set_guc(public_db_session, "app.intake_deal_id", org_a_deal_id)
+    await _set_guc(public_db_session, "app.intake_link_id", submitted_link["id"])
+
+    result = await public_db_session.execute(
+        text("SELECT id FROM data_source WHERE id = :id"), {"id": org_a_data_source_id}
+    )
+    assert result.first() is None
+
+
 async def test_data_source_scoped_to_one_org_deal_link(
     public_db_session, test_org_id, org_a_deal_id, org_a_data_source_id, org_b_docs, pending_link
 ):
