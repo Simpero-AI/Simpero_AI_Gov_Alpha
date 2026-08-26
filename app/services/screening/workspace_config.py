@@ -99,6 +99,20 @@ SECTOR = _CategoryTarget(
     # environments whose taxonomy was hand-created before the slug enum.
     name_aliases=frozenset({"target sectors", "target sector", "sectors", "sector"}),
 )
+# Path B mandate-gated screening: the analyst's selected must-have green-signals
+# and enabled deal-breakers. Unlike sectors/geographies these are not matched by
+# membership -- they are mapped onto rule ids (see mandate_rules.py) to decide
+# which questions a deal is screened on at all.
+MUST_HAVE = _CategoryTarget(
+    slug="must_have",
+    name_aliases=frozenset({"must have", "must-have", "must have criteria", "must-have criteria"}),
+)
+DEAL_BREAKER = _CategoryTarget(
+    slug="deal_breaker",
+    name_aliases=frozenset(
+        {"deal breaker", "deal-breaker", "deal breaker criteria", "deal-breaker criteria"}
+    ),
+)
 
 
 @dataclass(frozen=True)
@@ -121,6 +135,13 @@ class WorkspaceConfig:
     # below instead -- use approves_*(), never a bare `in`.
     approved_sectors: list[str] | None
     approved_geographies: list[str] | None
+    # Selected must-have green-signals and enabled deal-breakers, as raw option
+    # display strings (sub-tree expanded), or None when the org configured no
+    # policy for that section. Mapped onto rule ids by mandate_rules.py to gate
+    # which questions a deal is screened on. Defaulted so existing construction
+    # sites (approved_sectors/geographies only) keep working.
+    must_have_options: list[str] | None = None
+    deal_breaker_options: list[str] | None = None
 
     _sector_keys: frozenset[str] = field(init=False, repr=False, compare=False, default=frozenset())
     _geography_keys: frozenset[str] = field(
@@ -376,12 +397,12 @@ def _merge(indexes: list[_CategoryIndex]) -> _CategoryIndex:
 async def _load_targets(
     session: AsyncSession,
 ) -> dict[str, tuple[set[str], _CategoryIndex]]:
-    """The two categories screening reads -> (their ids, their option index).
+    """The categories screening reads -> (their ids, their option index).
     Two SELECTs against the global (un-RLS'd) reference tables."""
     categories = await MandateCategoryRepo(session).list()
     resolved = {
         target.slug: [row for row in categories if _is_category(row, target)]
-        for target in (GEOGRAPHY, SECTOR)
+        for target in (GEOGRAPHY, SECTOR, MUST_HAVE, DEAL_BREAKER)
     }
 
     wanted_ids = [row.id for rows in resolved.values() for row in rows]
@@ -413,6 +434,8 @@ async def load_workspace_config(session: AsyncSession) -> WorkspaceConfig:
     targets = await _load_targets(session)
     geography_ids, geography_index = targets[GEOGRAPHY.slug]
     sector_ids, sector_index = targets[SECTOR.slug]
+    must_have_ids, must_have_index = targets[MUST_HAVE.slug]
+    deal_breaker_ids, deal_breaker_index = targets[DEAL_BREAKER.slug]
 
     return WorkspaceConfig(
         approved_sectors=_approved_labels(
@@ -420,5 +443,11 @@ async def load_workspace_config(session: AsyncSession) -> WorkspaceConfig:
         ),
         approved_geographies=_approved_labels(
             _matching_entries(blob, GEOGRAPHY, geography_ids), geography_index
+        ),
+        must_have_options=_approved_labels(
+            _matching_entries(blob, MUST_HAVE, must_have_ids), must_have_index
+        ),
+        deal_breaker_options=_approved_labels(
+            _matching_entries(blob, DEAL_BREAKER, deal_breaker_ids), deal_breaker_index
         ),
     )
