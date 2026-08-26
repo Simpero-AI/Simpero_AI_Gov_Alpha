@@ -106,6 +106,12 @@ jobs:
     env:
       DATABASE_URL: "postgresql+asyncpg://dd_app:ci_dd_app_pw@localhost:5432/simpero"
       ALEMBIC_DATABASE_URL: "postgresql+psycopg2://doadmin:ci_doadmin_pw@localhost:5432/simpero"
+      # dd_public's own connection string -- this job's "Create dd_public role"
+      # step below sets this exact password. Tests that connect directly as
+      # dd_public (tests/test_dd_public_grant_matrix.py and friends) read this
+      # via os.environ, same as owner_conn reads ALEMBIC_DATABASE_URL -- not a
+      # hardcoded localhost DSN, which only matches docker-compose.dev.yml's
+      # port, not this job's Postgres service (port 5432).
       PUBLIC_DATABASE_URL: "postgresql+asyncpg://dd_public:ci_dd_public_pw@localhost:5432/simpero"
       INTAKE_SESSION_JWT_SECRET: "ci-intake-secret"
       CLERK_SECRET_KEY: "ci-dummy"
