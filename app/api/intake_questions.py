@@ -1,3 +1,5 @@
+from typing import Any
+
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,20 +18,21 @@ from app.schemas.intake_question import IntakeQuestionResponse
 router = APIRouter(tags=["intake-questions"])
 
 
+def _response(question: Any) -> IntakeQuestionResponse:
+    return IntakeQuestionResponse(
+        id=str(question.id),
+        question_key=question.question_key,
+        prompt=question.prompt,
+        help_text=question.help_text,
+        input_type=question.input_type,
+        required=question.required,
+        display_order=question.display_order,
+    )
+
+
 @router.get("/intake-questions", response_model=list[IntakeQuestionResponse])
 async def list_intake_questions(
     db: AsyncSession = Depends(get_db),
 ) -> list[IntakeQuestionResponse]:
     questions = await DealIntakeQuestionRepo(db).list_active()
-    return [
-        IntakeQuestionResponse(
-            id=str(question.id),
-            question_key=question.question_key,
-            prompt=question.prompt,
-            help_text=question.help_text,
-            input_type=question.input_type,
-            required=question.required,
-            display_order=question.display_order,
-        )
-        for question in questions
-    ]
+    return [_response(question) for question in questions]
