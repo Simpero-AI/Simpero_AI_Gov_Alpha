@@ -163,6 +163,10 @@ def upgrade() -> None:
                     WHERE clerk_org_id = current_setting('app.org_id', true)
                 )
                 AND link_id = current_setting('app.intake_link_id', true)::uuid
+                AND deal_id = (
+                    SELECT deal_id FROM deal_intake_link
+                    WHERE id = current_setting('app.intake_link_id', true)::uuid
+                )
                 AND EXISTS (
                     SELECT 1 FROM deal_intake_link l
                     WHERE l.id = deal_intake_response.link_id AND l.status = 'pending'
