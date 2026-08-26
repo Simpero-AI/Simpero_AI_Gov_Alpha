@@ -4,6 +4,7 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.exceptions import AuthenticationError
 from app.core.intake_security import decode_intake_session_jwt, sha256_hex
 from app.core.public_database import PublicAsyncSessionLocal
 from app.models.deal_intake_link import DealIntakeLink
@@ -61,11 +62,21 @@ async def get_public_session_db(
     /uploads/*, /submit. The raw link token is never sent again past this
     point -- only this short-lived, app-signed session token.
 
-    decode_intake_session_jwt raising AuthenticationError on a bad token is
-    NOT caught/converted to HTTPException here -- that's a P3 route-handler
-    concern (wrapping this dependency), not this dependency's.
+    decode_intake_session_jwt raising AuthenticationError on a bad token IS
+    caught here (self-review follow-up fix, see
+    docs/plans/external-deal-intake-link-status.md's P1-06 row): app/main.py
+    has a global AuthenticationError -> 401 handler with the raw JWT-library
+    message in the body, and any P3 route wiring this dependency in would
+    otherwise surface a distinguishable 401 instead of the same 404 every
+    other failure mode returns -- reopening the enumeration oracle the
+    404-only design (brief section 5.2) exists to prevent. Matches
+    get_public_link_db's own existing pattern of raising HTTPException(404)
+    directly, never deferring to the caller.
     """
-    claims = decode_intake_session_jwt(session_token)
+    try:
+        claims = decode_intake_session_jwt(session_token)
+    except AuthenticationError as exc:
+        raise HTTPException(status_code=404, detail="Not found") from exc
     async with PublicAsyncSessionLocal() as session, session.begin():
         # Phase 1. FIRST statement. Keyhole policy B (intake_session_lookup),
         # keyed on link_id from the verified session claim.
