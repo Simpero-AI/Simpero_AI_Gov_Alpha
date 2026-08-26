@@ -15,17 +15,19 @@ behavioral scoping test belongs with the policies that actually implement it,
 tested at head.
 
 dd_public has no app-level session pool yet (PublicAsyncSessionLocal is
-P1-07), so this connects directly with the sandbox/CI credential
-sandbox/init/02-public-role.sql creates, same host/port docker-compose.dev.yml
-exposes Postgres on.
+P1-07), so this connects directly, using the same PUBLIC_DATABASE_URL env
+var the app itself will use once P1-07 lands -- not a hardcoded localhost
+DSN, so this matches whatever Postgres CI's job env or docker-compose.dev.yml
+actually points at.
 """
 
+import os
 from collections.abc import Iterator
 
 import psycopg2
 import pytest
 
-_DD_PUBLIC_DSN = "postgresql://dd_public:sandbox_dd_public@localhost:5434/simpero"
+_DD_PUBLIC_DSN = os.environ["PUBLIC_DATABASE_URL"].replace("+psycopg2", "").replace("+asyncpg", "")
 
 
 @pytest.fixture
