@@ -261,7 +261,9 @@ def test_case_difference_is_not_a_policy_rejection(client, owner_conn, seeded_or
 
 
 def test_unknown_only_when_the_mandate_is_genuinely_unset(owner_conn, seeded_org, taxonomy):
-    """No PUT at all: the rules stay unknown, and say why."""
+    """No PUT at all: with nothing selected, screening falls back to the full
+    rulebook rather than screening nothing, so gs_07/gs_08 run and stay unknown
+    (no policy to check against), and say why."""
     results = _screen(owner_conn, seeded_org, hq_geography="Canada", sector="SaaS")
 
     assert results["gs_07"]["verdict"] == "unknown"
@@ -270,9 +272,10 @@ def test_unknown_only_when_the_mandate_is_genuinely_unset(owner_conn, seeded_org
     assert results["gs_07"]["confidence"] == 0.0
 
 
-def test_a_sector_only_mandate_leaves_geography_unknown(client, owner_conn, seeded_org, taxonomy):
-    """Per-category: saving sectors must not auto-fail every deal on a
-    geography policy the firm never wrote."""
+def test_a_sector_only_mandate_does_not_screen_geography(client, owner_conn, seeded_org, taxonomy):
+    """Per-category gating: saving sectors selects gs_08 but not gs_07 -- a
+    geography policy the firm never wrote is simply not screened, rather than run
+    and auto-failing (or marked unknown on) every deal."""
     _authed(seeded_org["clerk_org_id"], "user-1")
     resp = client.put(
         "/mandate",
@@ -291,7 +294,7 @@ def test_a_sector_only_mandate_leaves_geography_unknown(client, owner_conn, seed
     results = _screen(owner_conn, seeded_org, hq_geography="France", sector="SaaS")
 
     assert results["gs_08"]["verdict"] == "Y"
-    assert results["gs_07"]["verdict"] == "unknown"
+    assert "gs_07" not in results
 
 
 def test_a_sub_option_mandate_excludes_its_siblings(client, owner_conn, seeded_org, taxonomy):
