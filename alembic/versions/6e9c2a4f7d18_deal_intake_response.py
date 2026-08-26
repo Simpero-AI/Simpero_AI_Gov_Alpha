@@ -16,13 +16,17 @@ WITH CHECK binding every inserted row to the org named by app.org_id AND the
 exact link named by app.intake_link_id -- self-contained (does not depend on
 P1-04/P1-06's dependency functions existing yet).
 
-APPROVED DESIGN CORRECTION (confirmed by architect + Vansh, see
-docs/plans/external-deal-intake-link-status.md's Flagged section, landed
-alongside P1-03's keyhole-policy fix): intake_response_insert's WITH CHECK
-now also requires EXISTS (... deal_intake_link ... status = 'pending') --
-a response can only be inserted while the link is still pending. This means
-the future P3 /submit route must INSERT the response row *before* flipping
-deal_intake_link.status to 'submitted' in the same transaction.
+NOTE on the EXISTS(... status = 'pending') guard from the P1-03 design
+correction (architect + Vansh, docs/plans/external-deal-intake-link-status.md's
+Flagged section): that guard is added by P1-03's migration, not here.
+deal_intake_link has RLS+FORCE enabled (P1-01) but dd_public holds no SELECT
+policy on it until P1-03 adds the keyhole policies -- an EXISTS subquery
+against deal_intake_link baked into THIS migration would see zero rows for
+dd_public regardless of the link's real status, rejecting every otherwise-
+legitimate INSERT. Confirmed against real Postgres: this is not a hypothetical,
+it broke every test in this file that inserts a response. Keep this
+migration's WITH CHECK to org_id + link_id only; P1-03 ALTERs the policy once
+dd_public can actually see deal_intake_link rows.
 
 Revision ID: 6e9c2a4f7d18
 Revises: 3d7b1f5a8c94
@@ -113,10 +117,6 @@ def upgrade() -> None:
                     WHERE clerk_org_id = current_setting('app.org_id', true)
                 )
                 AND link_id = current_setting('app.intake_link_id', true)::uuid
-                AND EXISTS (
-                    SELECT 1 FROM deal_intake_link l
-                    WHERE l.id = deal_intake_response.link_id AND l.status = 'pending'
-                )
             )
     """)
 

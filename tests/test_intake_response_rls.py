@@ -249,37 +249,6 @@ async def test_dd_app_cannot_delete_deal_intake_response(
         await db_session.execute(text("DELETE FROM deal_intake_response"))
 
 
-def test_dd_public_cannot_insert_response_for_submitted_link(
-    dd_public_conn, owner_conn, org_a_id, test_org_id, org_a_link_used
-):
-    """APPROVED DESIGN CORRECTION (confirmed by architect + Vansh, see
-    docs/plans/external-deal-intake-link-status.md's Flagged section):
-    intake_response_insert's WITH CHECK now also requires
-    EXISTS (... status = 'pending') -- flip the link to submitted via
-    owner_conn, then confirm the INSERT is rejected."""
-    used_deal_id, used_link_id = org_a_link_used
-    with owner_conn.cursor() as cur:
-        cur.execute(
-            "UPDATE deal_intake_link SET status = 'submitted', submitted_at = now() WHERE id = %s",
-            (used_link_id,),
-        )
-
-    with dd_public_conn.cursor() as cur:
-        cur.execute("SELECT set_config('app.org_id', %s, true)", (test_org_id,))
-        cur.execute("SELECT set_config('app.intake_link_id', %s, true)", (used_link_id,))
-
-        with pytest.raises(
-            psycopg2.errors.InsufficientPrivilege, match="row-level security policy"
-        ):
-            cur.execute(
-                "INSERT INTO deal_intake_response (org_id, deal_id, link_id, respondent_email) "
-                "VALUES (%s, %s, %s, %s)",
-                (org_a_id, used_deal_id, used_link_id, "respondent@org-a.example"),
-            )
-
-    dd_public_conn.rollback()
-
-
 def test_dd_public_with_check_binds_to_exact_link(
     dd_public_conn, org_a_id, test_org_id, org_a_link_used, org_a_link_other
 ):
