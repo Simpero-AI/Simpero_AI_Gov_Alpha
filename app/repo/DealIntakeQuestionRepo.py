@@ -1,4 +1,4 @@
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.deal_intake_question import DealIntakeQuestion
@@ -43,6 +43,17 @@ class DealIntakeQuestionRepo(BaseRepo[DealIntakeQuestion, dict]):
         return list(result.scalars().all())
 
     async def next_display_order(self) -> int:
+        """Read-then-insert would otherwise race: two concurrent creates
+        can both read the same MAX and commit the same display_order, with
+        nothing at the DB level to catch the collision after the fact. An
+        xact-scoped advisory lock serializes callers on this table for the
+        rest of the current transaction (auto-released at commit/rollback,
+        same as get_admin_db's transaction scoping) -- covers the empty-
+        table case too, where there's no existing max row to lock instead.
+        """
+        await self.session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext('deal_intake_questions_display_order'))")
+        )
         result = await self.session.execute(select(func.max(DealIntakeQuestion.display_order)))
         current_max = result.scalar_one_or_none()
         return 0 if current_max is None else current_max + 1

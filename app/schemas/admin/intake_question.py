@@ -1,6 +1,17 @@
+from typing import Literal
+
 from pydantic import Field
 
 from app.schemas.common import CamelModel
+
+# Mirrors the DB-level ck_deal_intake_questions_input_type CHECK constraint
+# (app/models/deal_intake_question.py) -- constrained here too so a bad
+# value gets a 422 at the request boundary instead of reaching the DB at
+# all. Matters more than usual for this column specifically: a link's
+# questions_snapshot freezes input_type at generation time, so a bad value
+# doesn't just fail on read, it gets baked into every link issued while
+# the row is active.
+IntakeQuestionInputType = Literal["text", "textarea"]
 
 
 class DealIntakeQuestionResponse(CamelModel):
@@ -23,7 +34,7 @@ class CreateIntakeQuestionRequest(CamelModel):
     question_key: str = Field(min_length=1, max_length=100)
     prompt: str = Field(min_length=1, max_length=500)
     help_text: str | None = None
-    input_type: str = Field(min_length=1, max_length=50)
+    input_type: IntakeQuestionInputType
     required: bool = False
 
 
@@ -34,7 +45,7 @@ class UpdateIntakeQuestionRequest(CamelModel):
 
     prompt: str = Field(min_length=1, max_length=500)
     help_text: str | None = None
-    input_type: str = Field(min_length=1, max_length=50)
+    input_type: IntakeQuestionInputType
     required: bool
 
 

@@ -133,7 +133,13 @@ async def reorder_questions(
     current = await repo.list_all()
     current_by_id = {str(question.id): question for question in current}
 
-    if set(payload.question_ids) != set(current_by_id.keys()):
+    # Length check catches a duplicate id (same set, wrong list -- e.g. [A, A, B]
+    # against {A, B} passes a set-only comparison and would otherwise silently
+    # overwrite A's display_order twice, last write wins); the set check still
+    # catches a wrong-identity substitution the length check alone would miss.
+    if len(payload.question_ids) != len(current_by_id) or set(payload.question_ids) != set(
+        current_by_id.keys()
+    ):
         raise HTTPException(
             status_code=422,
             detail="question_ids must contain exactly the current set of question ids",

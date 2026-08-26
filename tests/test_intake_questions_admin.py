@@ -364,3 +364,50 @@ def test_reorder_rejects_missing_id(client, owner_conn, platform_org):
     resp = client.put("/admin/intake-questions/reorder", json={"questionIds": [first["id"]]})
 
     assert resp.status_code == 422
+
+
+def test_reorder_rejects_duplicate_id(client, owner_conn, platform_org):
+    """Review finding: a duplicate id (same set as the current table, wrong
+    list) passed a set-only comparison and silently overwrote one row's
+    display_order twice instead of 422ing."""
+    _as_platform_admin(owner_conn, platform_org)
+    first = _create_question(client)
+    second = _create_question(client)
+
+    resp = client.put(
+        "/admin/intake-questions/reorder",
+        json={"questionIds": [first["id"], first["id"]]},
+    )
+
+    assert resp.status_code == 422
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "SELECT display_order FROM deal_intake_questions WHERE id = %s", (second["id"],)
+        )
+        assert cur.fetchone()[0] == 1
+
+
+# --- input_type validation --------------------------------------------------
+
+
+def test_create_rejects_unsupported_input_type(client, owner_conn, platform_org):
+    _as_platform_admin(owner_conn, platform_org)
+
+    resp = client.post(
+        "/admin/intake-questions",
+        json={"questionKey": "company_name", "prompt": "x", "inputType": "dropdown"},
+    )
+
+    assert resp.status_code == 422
+
+
+def test_update_rejects_unsupported_input_type(client, owner_conn, platform_org):
+    _as_platform_admin(owner_conn, platform_org)
+    question = _create_question(client)
+
+    resp = client.patch(
+        f"/admin/intake-questions/{question['id']}",
+        json={"prompt": "x", "helpText": None, "inputType": "dropdown", "required": False},
+    )
+
+    assert resp.status_code == 422
