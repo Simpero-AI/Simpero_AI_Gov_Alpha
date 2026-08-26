@@ -132,6 +132,15 @@ jobs:
           psql -h localhost -U doadmin -d simpero -c "CREATE ROLE dd_app WITH LOGIN PASSWORD 'ci_dd_app_pw'"
           psql -h localhost -U doadmin -d simpero -c "GRANT CONNECT ON DATABASE simpero TO dd_app"
 
+      # dd_public is the External Deal Intake Link feature's RLS-restricted
+      # external-facing role — mirrors sandbox/init/02-public-role.sql.
+      - name: Create dd_public role
+        env:
+          PGPASSWORD: ci_doadmin_pw
+        run: |
+          psql -h localhost -U doadmin -d simpero -c "CREATE ROLE dd_public WITH LOGIN PASSWORD 'ci_dd_public_pw'"
+          psql -h localhost -U doadmin -d simpero -c "GRANT CONNECT ON DATABASE simpero TO dd_public"
+
       - name: Apply migrations
         run: uv run alembic upgrade head
 
