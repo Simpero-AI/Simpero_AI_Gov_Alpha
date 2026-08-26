@@ -10,6 +10,11 @@ scoped to active rows via a partial index rather than a plain unique column
 -- deactivating a question (soft toggle, never a hard delete -- P2-02) frees
 its key for reuse without touching rows a past snapshot still points at.
 
+input_type is CHECK-constrained to the currently supported set (review
+comment on this PR): a link's questions_snapshot freezes input_type at
+generation time, so an invalid value here doesn't just fail on read -- it
+gets baked into every link issued while the row is active.
+
 Revision ID: 67e5302afcfe
 Revises: 1a2b3c4d5e6f
 Create Date: 2026-08-25 00:00:00.000000
@@ -52,6 +57,9 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.PrimaryKeyConstraint("id"),
+        sa.CheckConstraint(
+            "input_type IN ('text', 'textarea')", name="ck_deal_intake_questions_input_type"
+        ),
     )
     op.create_index(
         "uq_deal_intake_questions_active_key",
