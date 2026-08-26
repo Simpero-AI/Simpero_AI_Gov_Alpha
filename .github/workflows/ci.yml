@@ -106,6 +106,7 @@ jobs:
     env:
       DATABASE_URL: "postgresql+asyncpg://dd_app:ci_dd_app_pw@localhost:5432/simpero"
       ALEMBIC_DATABASE_URL: "postgresql+psycopg2://doadmin:ci_doadmin_pw@localhost:5432/simpero"
+      PUBLIC_DATABASE_URL: "postgresql+asyncpg://dd_public:ci_dd_public_pw@localhost:5432/simpero"
       CLERK_SECRET_KEY: "ci-dummy"
       CLERK_JWKS_URL: "https://example.test/.well-known/jwks.json"
       VALKEY_URL: "redis://localhost:6379/0"
@@ -158,6 +159,7 @@ jobs:
     env:
       DATABASE_URL: "postgresql+asyncpg://ci:ci@localhost:5432/ci"
       ALEMBIC_DATABASE_URL: "postgresql+psycopg2://ci:ci@localhost:5432/ci"
+      PUBLIC_DATABASE_URL: "postgresql+asyncpg://dd_public:ci_dd_public_pw@localhost:5432/simpero"
       CLERK_SECRET_KEY: "ci-dummy"
       CLERK_JWKS_URL: "https://example.test/.well-known/jwks.json"
       VALKEY_URL: "redis://localhost:6379/0"

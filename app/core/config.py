@@ -7,6 +7,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     database_url: str
     alembic_database_url: str
+    # dd_public — the external-facing, RLS-keyhole-restricted role. Separate
+    # credential, separate engine (app/core/public_database.py) — never falls
+    # back to dd_app.
+    public_database_url: str
     clerk_secret_key: str
     clerk_jwks_url: str
     valkey_url: str
