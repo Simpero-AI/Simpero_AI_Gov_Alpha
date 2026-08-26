@@ -200,6 +200,22 @@ async def test_unknown_link_id_in_validly_signed_jwt_404s():
     await agen.aclose()
 
 
+async def test_bad_session_token_404s_not_401():
+    """Self-review follow-up fix: decode_intake_session_jwt raising
+    AuthenticationError must surface as the same 404 every other failure
+    mode here returns, never the app-wide AuthenticationError -> 401 handler
+    (app/main.py) with its raw JWT-library message -- that would let a bad
+    session token distinguish itself, reopening the enumeration oracle the
+    404-only design (brief section 5.2) exists to prevent. Garbage input is
+    enough to prove this without depending on real expiry timing."""
+    agen = get_public_session_db("not-a-valid-jwt")
+    with pytest.raises(HTTPException) as exc_info:
+        await agen.__anext__()
+    assert exc_info.value.status_code == 404
+
+    await agen.aclose()
+
+
 async def test_session_jwt_cannot_read_another_orgs_data_even_by_hand_crafted_guc(
     pending_link_with_token, org_b_docs
 ):
