@@ -103,6 +103,7 @@ def _claim_json(claim_ref: str, page: int, normalized: float = 100.0) -> dict[st
         "claim_type": "numerical",
         "entity": "Acme Corp",
         "attribute": "revenue",
+        "attribute_raw": "Revenues: | Net revenues | 2025",
         "value": {
             "raw": str(normalized),
             "normalized": normalized,
@@ -196,6 +197,14 @@ async def test_ingests_claims_and_reconciles_same_page_fact(
     assert run["status"] == "successful"
     assert run["error_message"] is None
     assert _count_claims(owner_conn, seeded_org["org_pk"]) == 2
+
+    # Inspector foundation: the parser's pre-canonicalization label is persisted.
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "SELECT DISTINCT attribute_raw FROM claims WHERE org_id = %s",
+            (seeded_org["org_pk"],),
+        )
+        assert cur.fetchone()[0] == "Revenues: | Net revenues | 2025"
 
     edges = _fetch_edges(owner_conn, seeded_org["org_pk"])
     assert ("same_fact", "reconciliation") in edges
@@ -433,13 +442,16 @@ async def test_missing_run_raises(owner_conn, seeded_org, seeded_deal):
 def _fetch_deal_fields(owner_conn, deal_id: str) -> dict[str, Any]:
     with owner_conn.cursor() as cur:
         cur.execute(
-            "SELECT sector, hq_geography, qualitative_findings FROM deals WHERE id = %s", (deal_id,)
+            "SELECT sector, hq_geography, qualitative_findings, dashboard_structure "
+            "FROM deals WHERE id = %s",
+            (deal_id,),
         )
-        sector, hq_geography, qualitative_findings = cur.fetchone()
+        sector, hq_geography, qualitative_findings, dashboard_structure = cur.fetchone()
     return {
         "sector": sector,
         "hq_geography": hq_geography,
         "qualitative_findings": qualitative_findings,
+        "dashboard_structure": dashboard_structure,
     }
 
 
@@ -487,6 +499,15 @@ async def test_writes_deal_sector_and_hq_from_the_deal_profile(
             "gs_01": {"verdict": "Y", "evidence": "The founders are full-time."},
             "db_03": {"verdict": "unknown", "evidence": ""},
         },
+        # Pipeline Inspector: the parser's grounded organizing pass, persisted so
+        # the Inspector renders subjects/metric order instead of hardcoding them.
+        "dashboard_structure": {
+            "subjects": [
+                {"name": "Consolidated", "kind": "consolidated", "entities": ["DentalCo"]},
+                {"name": "Clinics", "kind": "segment", "entities": ["Clinic Network"]},
+            ],
+            "metric_order": ["revenue", "ebitda"],
+        },
     }
 
     monkeypatch.setattr(job_module, "get_json_object", lambda bucket, key: envelope)
@@ -504,4 +525,12 @@ async def test_writes_deal_sector_and_hq_from_the_deal_profile(
     # Only the decisive verdict is persisted; the unknown one is dropped.
     assert fields["qualitative_findings"] == {
         "gs_01": {"verdict": "Y", "evidence": "The founders are full-time."}
+    }
+    # The single document's structure is persisted verbatim through the merge.
+    assert fields["dashboard_structure"] == {
+        "subjects": [
+            {"name": "Consolidated", "kind": "consolidated", "entities": ["DentalCo"]},
+            {"name": "Clinics", "kind": "segment", "entities": ["Clinic Network"]},
+        ],
+        "metric_order": ["revenue", "ebitda"],
     }

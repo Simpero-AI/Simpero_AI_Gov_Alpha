@@ -10,8 +10,21 @@ scoped to active rows via a partial index rather than a plain unique column
 -- deactivating a question (soft toggle, never a hard delete -- P2-02) frees
 its key for reuse without touching rows a past snapshot still points at.
 
+input_type is CHECK-constrained to the currently supported set (review
+comment on this PR): a link's questions_snapshot freezes input_type at
+generation time, so an invalid value here doesn't just fail on read -- it
+gets baked into every link issued while the row is active.
+
+Re-pointed onto d1f3b6e28a94, staging's head as of 2026-08-27 (the P1
+intake migrations #125-134 plus the inspector dashboard's #135 all landed
+after this branch was last synced). This table is independent of every one
+of them, so it stays a plain linear child of whatever staging's head is
+rather than a merge revision -- same move as the earlier re-point off
+1a2b3c4d5e6f, which two migrations had branched from independently and
+left as two heads with nothing joining them.
+
 Revision ID: 67e5302afcfe
-Revises: b4f8e1c3a962
+Revises: d1f3b6e28a94
 Create Date: 2026-08-25 00:00:00.000000
 
 """
@@ -23,7 +36,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "67e5302afcfe"
-down_revision: str | Sequence[str] | None = "b4f8e1c3a962"
+down_revision: str | Sequence[str] | None = "d1f3b6e28a94"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -52,6 +65,9 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.PrimaryKeyConstraint("id"),
+        sa.CheckConstraint(
+            "input_type IN ('text', 'textarea')", name="ck_deal_intake_questions_input_type"
+        ),
     )
     op.create_index(
         "uq_deal_intake_questions_active_key",

@@ -1,9 +1,8 @@
-from typing import Any
-
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dependencies import get_db
+from app.models.deal_intake_question import DealIntakeQuestion
 from app.repo.DealIntakeQuestionRepo import DealIntakeQuestionRepo
 from app.schemas.intake_question import IntakeQuestionResponse
 
@@ -18,7 +17,7 @@ from app.schemas.intake_question import IntakeQuestionResponse
 router = APIRouter(tags=["intake-questions"])
 
 
-def _response(question: Any) -> IntakeQuestionResponse:
+def _response(question: DealIntakeQuestion) -> IntakeQuestionResponse:
     return IntakeQuestionResponse(
         id=str(question.id),
         question_key=question.question_key,
