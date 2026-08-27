@@ -171,5 +171,8 @@ def test_consolidated_label_is_deterministic_first_seen() -> None:
             "metric_order": [],
         },
     ]
-    assert _consolidated(merge_dashboard_structures(docs))["name"] == "Acme Group"
-    assert _consolidated(merge_dashboard_structures(list(reversed(docs))))["name"] == "Acme Inc"
+    forward = merge_dashboard_structures(docs)
+    reverse = merge_dashboard_structures(list(reversed(docs)))
+    assert forward is not None and reverse is not None
+    assert _consolidated(forward)["name"] == "Acme Group"
+    assert _consolidated(reverse)["name"] == "Acme Inc"
