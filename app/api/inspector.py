@@ -30,11 +30,27 @@ from app.models.claim import Claim
 from app.models.edge import Edge
 from app.repo.DataSourceRepo import DataSourceRepo
 from app.repo.DealRepo import DealRepo
+from app.services.uploads.spaces import presign_get
 
 router = APIRouter(prefix="/inspector", tags=["inspector"])
 
 _TEMPLATE = (Path(__file__).parent / "templates" / "pipeline_inspector.html").read_text()
 _PLACEHOLDER = "__PIPELINE_DATA__"
+
+# A signed source-document URL lives about as long as a review session. The
+# inspector page is a detached blob with no auth context, so it opens the source
+# straight from this pre-signed URL rather than through an authed endpoint.
+_SOURCE_URL_TTL_SECONDS = 3600
+
+
+def _source_url(storage_key: str, filename: str) -> str | None:
+    """A short-lived signed URL to open the document inline in the browser, or
+    None if signing fails (the inspector then just shows the location as text)."""
+    content_type = "application/pdf" if filename.lower().endswith(".pdf") else None
+    try:
+        return presign_get(storage_key, _SOURCE_URL_TTL_SECONDS, content_type=content_type)
+    except Exception:  # noqa: BLE001 -- a missing source must not break the whole page
+        return None
 
 
 def _location(claim: Claim) -> dict[str, Any]:
@@ -54,6 +70,7 @@ def _claim_json(claim: Claim, same_fact_count: int, contradicts: bool) -> dict[s
         "id": str(claim.id),
         "entity": claim.entity,
         "attribute": claim.attribute,
+        "attribute_raw": claim.attribute_raw,
         "value": claim.value,
         "period_year": claim.period_year,
         "period_kind": claim.period_kind,
@@ -61,6 +78,8 @@ def _claim_json(claim: Claim, same_fact_count: int, contradicts: bool) -> dict[s
         "verification_method": claim.verification_method,
         "section": claim.section,
         "claim_type": claim.claim_type,
+        "claim_kind": claim.claim_kind,
+        "assertion_class": claim.assertion_class,
         "flags": list(claim.flags or []),
         "data_source_id": str(claim.data_source_id) if claim.data_source_id else None,
         "location": _location(claim),
@@ -119,11 +138,23 @@ async def pipeline_inspector(
                     conflicting.add(endpoint)
 
     data_sources = await DataSourceRepo(db).list_for_deal(deal_id)
-    documents = [{"data_source_id": str(ds.id), "filename": ds.filename} for ds in data_sources]
+    documents = [
+        {
+            "data_source_id": str(ds.id),
+            "filename": ds.filename,
+            # A signed URL so a fact can open its source page (PDF #page=N) in a tab.
+            "source_url": _source_url(ds.storage_key, ds.filename),
+        }
+        for ds in data_sources
+    ]
 
     data = {
         "deal": {"id": str(deal.id), "name": deal.name},
         "documents": documents,
+        # The parser's grounded organizing pass, if this deal has one. The page
+        # folds entities into these subjects and leads with this metric order;
+        # when it is null the page falls back to deterministic frequency grouping.
+        "dashboard_structure": deal.dashboard_structure,
         "generated_at": datetime.now(UTC).isoformat(),
         "claims": [
             # A same_fact edge is counted once per endpoint above, so a claim

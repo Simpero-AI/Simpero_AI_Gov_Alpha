@@ -2,6 +2,7 @@ from fastapi import APIRouter
 
 from app.api.admin import (
     context,
+    intake_questions,
     invitations,
     mandates,
     members,
@@ -13,6 +14,7 @@ from app.api.admin import (
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 router.include_router(context.router)
+router.include_router(intake_questions.router)
 router.include_router(invitations.router)
 router.include_router(mandates.router)
 router.include_router(members.router)
