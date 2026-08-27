@@ -9,6 +9,7 @@ from app.api import (
     health,
     history,
     inspector,
+    intake_questions,
     investment_profile,
     logs,
     mandates,
@@ -66,6 +67,7 @@ app.include_router(history.router, prefix=API_PREFIX)
 app.include_router(investment_profile.router, prefix=API_PREFIX)
 app.include_router(logs.router, prefix=API_PREFIX)
 app.include_router(mandates.router, prefix=API_PREFIX)
+app.include_router(intake_questions.router, prefix=API_PREFIX)
 app.include_router(admin.router, prefix=API_PREFIX)
 app.include_router(uploads.router, prefix=API_PREFIX)
 app.include_router(inspector.router, prefix=API_PREFIX)
