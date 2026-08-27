@@ -1,3 +1,5 @@
+import uuid
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,3 +24,24 @@ class IntakeLinkRepo(BaseRepo[DealIntakeLink, dict]):
             select(DealIntakeLink).where(DealIntakeLink.token_hash == token_hash)
         )
         return result.scalars().first()
+
+    async def get_pending_for_deal(self, deal_id: uuid.UUID) -> DealIntakeLink | None:
+        """Locked read -- load-bearing. Without FOR UPDATE, two concurrent
+        generate calls on the same deal can both read the same stale-pending
+        row and both try to flip it to `expired`; the second writer then hits
+        the one-way-status trigger's RAISE EXCEPTION, surfacing as an
+        unhandled 500 instead of a clean 409. Do not drop this lock."""
+        result = await self.session.execute(
+            select(DealIntakeLink)
+            .where(DealIntakeLink.deal_id == deal_id)
+            .where(DealIntakeLink.status == "pending")
+            .with_for_update()
+        )
+        return result.scalars().first()
+
+    async def mark_expired(self, link: DealIntakeLink) -> DealIntakeLink:
+        """Sets status on the passed, already-tracked ORM instance. Does not
+        flush -- the caller flushes explicitly so the UPDATE commits within
+        the transaction before the reissue's INSERT is attempted."""
+        link.status = "expired"
+        return link
