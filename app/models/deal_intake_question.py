@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, Integer, String, Text, func, text
+from sqlalchemy import Boolean, CheckConstraint, Integer, String, Text, func, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.schema import Index
@@ -13,6 +13,12 @@ from app.core.database import Base
 # same idiom as mandate_categories/mandate_options. Read-only on the product
 # portal; full CRUD on the admin portal, platform admins only (see
 # app/api/admin/intake_questions.py, P2-02).
+
+# Currently supported input_type values -- CHECK-constrained (same idiom as
+# DataSource._STATUSES) because a link's questions_snapshot freezes
+# input_type at generation time: a bad value here doesn't just fail on
+# read, it gets baked into every link issued while the row is active.
+_INPUT_TYPES = ("text", "textarea")
 
 
 class DealIntakeQuestion(Base):
@@ -51,5 +57,9 @@ class DealIntakeQuestion(Base):
             "question_key",
             unique=True,
             postgresql_where=text("is_active"),
+        ),
+        CheckConstraint(
+            "input_type IN ('" + "', '".join(_INPUT_TYPES) + "')",
+            name="ck_deal_intake_questions_input_type",
         ),
     )

@@ -213,3 +213,29 @@ def test_rls_hides_another_orgs_claims(client, owner_conn, seeded_org):
 def test_unknown_deal_is_404(client, owner_conn, seeded_org):
     _authed(seeded_org["clerk_org_id"])
     assert client.get(f"/inspector/{uuid.uuid4()}").status_code == 404
+
+
+def test_dashboard_structure_is_carried_into_the_data_island(client, owner_conn, seeded_org):
+    """The deal's organizing structure reaches the page so it renders subjects
+    and metric order from it; a deal without one carries null (the page then
+    falls back to deterministic frequency grouping)."""
+    deal_id = _seed_deal(owner_conn, seeded_org["org_pk"])
+    _seed_claim(owner_conn, seeded_org["org_pk"], deal_id)
+    structure = {
+        "subjects": [{"name": "Consolidated", "kind": "consolidated", "entities": ["Acme Corp"]}],
+        "metric_order": ["revenue", "ebitda"],
+    }
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "UPDATE deals SET dashboard_structure = %s::jsonb WHERE id = %s",
+            (json.dumps(structure), deal_id),
+        )
+    _authed(seeded_org["clerk_org_id"])
+
+    data = _data_island(client.get(f"/inspector/{deal_id}").text)
+    assert data["dashboard_structure"] == structure
+
+    bare = _seed_deal(owner_conn, seeded_org["org_pk"], name="No Structure")
+    _seed_claim(owner_conn, seeded_org["org_pk"], bare)
+    data = _data_island(client.get(f"/inspector/{bare}").text)
+    assert data["dashboard_structure"] is None

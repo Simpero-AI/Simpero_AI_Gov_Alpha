@@ -2,7 +2,7 @@ import json
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.exc import IntegrityError
@@ -28,6 +28,8 @@ from app.schemas.deals import (
     CreateDealResponse,
     DashboardStatsResponse,
     DdCompletionStat,
+    DealDocumentResponse,
+    DealDocumentStatus,
     DealRowResponse,
     DealStatusResponse,
     DealWithLatestMemoResponse,
@@ -517,6 +519,33 @@ async def _compute_deal_status(db: AsyncSession, deal_id: uuid.UUID) -> DealStat
         error_message=run.error_message,
         job_comments=run.job_comments,
     )
+
+
+@router.get("/{deal_id}/documents", response_model=list[DealDocumentResponse])
+async def list_deal_documents(
+    deal_id: uuid.UUID, db: AsyncSession = Depends(get_db)
+) -> list[DealDocumentResponse]:
+    """deals.documents -> DealDocumentResponse[]. The TODO in
+    useUploadDocument.ts and the "no listing endpoint exists yet" callouts
+    in MaterialsCard/DataRoomPane/OverviewPane (Simpero_AI_Gov_Web) are what
+    this closes. Org-side and external-intake uploads (P3-10) both land in
+    data_source through the same DataSourceRepo, so this list is identical
+    regardless of which path a document came in through -- nothing here
+    filters or tags by origin."""
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    documents = await DataSourceRepo(db).list_for_deal(deal_id)
+    return [
+        DealDocumentResponse(
+            id=str(document.id),
+            filename=document.filename,
+            status=cast(DealDocumentStatus, document.status),
+            created_at=document.created_at,
+        )
+        for document in documents
+    ]
 
 
 @router.get("/{deal_id}/status", response_model=DealStatusResponse)
