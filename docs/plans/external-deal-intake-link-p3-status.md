@@ -24,12 +24,31 @@ left out, per the brief's own note in section 0.2 — not a P3 dependency.
   here since it's Suraj's PR; I didn't touch #107, only my local integration copy.
 - P2-02 not in `p3-base` (per brief section 0.2) — P3-01's tests insert `deal_intake_questions` rows
   directly via the ORM/fixtures, not through the admin router.
+- **P3-01's implementer found the "known gap" I'd flagged (missing partial unique index /
+  `dd_public` grant) was wrong** — both already exist from P1-01
+  (`ux_deal_intake_link_pending_deal`, the narrow `UPDATE` grant). No migration was needed for
+  P3-01; `alembic heads` stayed single (`67e5302afcfe`) throughout. Correcting my own instructions
+  here for whoever reads this next.
+- **P3-01 product decision, resolved**: the 409-on-existing-`analysis_run` check uses
+  `AnalysisRunRepo.latest_for_deal` (ANY status, not just active) — confirmed with Vansh
+  (2026-08-27): once a deal has ever had any analysis run, even a long-finished one, it can never
+  get a fresh external intake link. Kept as built, no code change.
+- **Pre-existing test-isolation bug found during P3-01 (not fixed, not in scope)**:
+  `tests/test_memory_scope_rls.py` and `tests/test_retrieval_rls.py` each `DROP TABLE IF EXISTS
+  chunks CASCADE` at setup/teardown without recreating it, permanently dropping the real
+  migration-created `chunks` table for any DB used afterward in the same run. Needs its own
+  follow-up ticket outside P3 (fix: recreate in teardown, or use a savepoint/transaction instead of
+  raw DDL).
+- **Separate infra finding during P3-01 (not fixed, not in scope)**: the checked-in `.env`'s
+  `ALEMBIC_DATABASE_URL` points at a live DigitalOcean cluster that's several migrations behind
+  head — surfaced a `DuplicateObjectError` when alembic ran against it once with real `.env`
+  values (rolled back clean, transactional DDL, no damage). Worth checking independently of P3.
 
 ## Tickets
 
 | Ticket | Owner | Status | Branch | Based on | Pushed? | Tested against | Notes |
 |---|---|---|---|---|---|---|---|
-| P3-01 | Vansh | | | p3-base | | | |
+| P3-01 | Vansh | Done | `p3-01-intake-link-generate` | p3-base | No | Real Postgres (dev, port 5434) | Shared effective-status helper: `app/services/intake_links.py::compute_intake_link_effective_status(link) -> str` — P3-02/06/14 import this. 20/20 new tests + full suite (742/743, 1 pre-existing unrelated failure) + pyright 0 errors. |
 | P3-05 | Suraj | | | p3-base | | | |
 | P3-07 | Vansh | | | p3-base | | | |
 | P3-10 | Suraj | | | p3-base | | | |
