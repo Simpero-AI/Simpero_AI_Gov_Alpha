@@ -105,6 +105,8 @@
 
   .meta { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; margin-top: 4px; color: var(--ink-soft); font-size: 12.5px; }
   .where { font-family: var(--mono); font-size: 12px; color: var(--ink-soft); background: var(--line-soft); border-radius: 6px; padding: 2px 7px; }
+  a.where-link { color: var(--accent); text-decoration: none; cursor: pointer; }
+  a.where-link:hover { background: var(--accent-soft); text-decoration: underline; }
   .raw { color: var(--ink-faint); }
   .raw b { color: var(--ink-soft); font-weight: 600; font-family: var(--mono); }
   .xcheck { display: inline-flex; align-items: center; gap: 5px; }
@@ -276,7 +278,11 @@
   document.title = "Pipeline Inspector — " + ((DATA.deal && DATA.deal.name) || "deal");
 
   var docsById = {};
-  (DATA.documents || []).forEach(function (d) { docsById[d.data_source_id] = d.filename || "document"; });
+  var docUrlById = {};
+  (DATA.documents || []).forEach(function (d) {
+    docsById[d.data_source_id] = d.filename || "document";
+    if (d.source_url) docUrlById[d.data_source_id] = d.source_url;
+  });
   var docsBox = document.getElementById("docs");
   (DATA.documents || []).forEach(function (d) {
     var chip = el("span", "doc-chip");
@@ -393,7 +399,21 @@
     var w = whereText(c);
     if (w) {
       var docName = docsById[c.data_source_id];
-      meta.appendChild(el("span", "where", (docName ? docName + " — " : "") + w));
+      var label = (docName ? docName + " — " : "") + w;
+      var url = docUrlById[c.data_source_id];
+      var loc = c.location || {};
+      if (url && c.status !== "missing") {
+        // Open the source document; jump to the page for a PDF. #page is honored
+        // by the browser's native PDF viewer.
+        var href = url + (loc.kind === "pdf" && loc.page != null ? "#page=" + loc.page : "");
+        var a = el("a", "where where-link", label + " ↗");
+        a.href = href;
+        a.target = "_blank";
+        a.rel = "noopener";
+        meta.appendChild(a);
+      } else {
+        meta.appendChild(el("span", "where", label));
+      }
     }
     if (c.value && c.value.raw != null && String(c.value.raw) !== "") {
       var raw = el("span", "raw");
