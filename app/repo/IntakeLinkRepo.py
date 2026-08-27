@@ -39,6 +39,20 @@ class IntakeLinkRepo(BaseRepo[DealIntakeLink, dict]):
         )
         return result.scalars().first()
 
+    async def get_pending_for_deal_unlocked(self, deal_id: uuid.UUID) -> DealIntakeLink | None:
+        """Same shape as get_pending_for_deal but WITHOUT `.with_for_update()` --
+        for read-only guard checks (e.g. start_analysis's pending-link gate)
+        that must not hold a row lock across an unrelated, multi-statement
+        transaction (analysis_run insert + SAQ enqueue + audit write). Do not
+        reuse this for any caller that goes on to write to the returned row --
+        that still needs get_pending_for_deal's lock."""
+        result = await self.session.execute(
+            select(DealIntakeLink)
+            .where(DealIntakeLink.deal_id == deal_id)
+            .where(DealIntakeLink.status == "pending")
+        )
+        return result.scalars().first()
+
     async def mark_expired(self, link: DealIntakeLink) -> DealIntakeLink:
         """Sets status on the passed, already-tracked ORM instance. Does not
         flush -- the caller flushes explicitly so the UPDATE commits within
