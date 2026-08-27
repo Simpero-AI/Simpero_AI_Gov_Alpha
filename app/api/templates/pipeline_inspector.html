@@ -314,7 +314,11 @@
       STRUCTURE.subjects.forEach(function (s) {
         if (!s || !s.name) return;
         SUBJECT_ORDER.push(s.name);
-        (s.entities || []).forEach(function (e) { if (e) ENTITY_SUBJECT[e] = s.name; });
+        // First subject to claim an entity keeps it; consolidated leads, so a
+        // whole-company entity is never overwritten by a later segment.
+        (s.entities || []).forEach(function (e) {
+          if (e && !(e in ENTITY_SUBJECT)) ENTITY_SUBJECT[e] = s.name;
+        });
       });
     } else {
       var freq = {};

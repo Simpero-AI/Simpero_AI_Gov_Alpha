@@ -31,6 +31,7 @@ def merge_dashboard_structures(per_document: list[Any]) -> dict[str, Any] | None
     # name so the same segment across documents merges instead of duplicating.
     consolidated_entities: list[str] = []
     consolidated_name = "Consolidated"
+    consolidated_named = False  # first document to name the whole company wins the label
     segments: dict[str, dict[str, Any]] = {}  # norm(name) -> {"name", "entities": [...]}
     metric_order: list[str] = []
     seen_metric: set[str] = set()
@@ -52,7 +53,9 @@ def merge_dashboard_structures(per_document: list[Any]) -> dict[str, Any] | None
             if not isinstance(name, str) or not name.strip():
                 continue
             if subject.get("kind") == "consolidated":
-                consolidated_name = name.strip()
+                if not consolidated_named:
+                    consolidated_name = name.strip()
+                    consolidated_named = True
                 _extend(consolidated_entities, subject.get("entities"))
             else:
                 bucket = segments.setdefault(_norm(name), {"name": name.strip(), "entities": []})
@@ -62,6 +65,11 @@ def merge_dashboard_structures(per_document: list[Any]) -> dict[str, Any] | None
                 seen_metric.add(metric)
                 metric_order.append(metric)
 
+    # Single-bucket invariant: file each entity under exactly one subject. Across
+    # documents an entity can land in consolidated in one and a segment in another;
+    # the whole-company total wins (its headline numbers must not be demoted into a
+    # segment), then the first segment to claim an entity keeps it.
+    claimed: set[str] = set(consolidated_entities)
     subjects: list[dict[str, Any]] = []
     if consolidated_entities or segments:
         # A consolidated anchor always leads so the Inspector has a whole-company
@@ -70,10 +78,10 @@ def merge_dashboard_structures(per_document: list[Any]) -> dict[str, Any] | None
             {"name": consolidated_name, "kind": "consolidated", "entities": consolidated_entities}
         )
     for bucket in segments.values():
-        if bucket["entities"]:
-            subjects.append(
-                {"name": bucket["name"], "kind": "segment", "entities": bucket["entities"]}
-            )
+        entities = [e for e in bucket["entities"] if e not in claimed]
+        if entities:
+            claimed.update(entities)
+            subjects.append({"name": bucket["name"], "kind": "segment", "entities": entities})
 
     if not subjects and not metric_order:
         return None

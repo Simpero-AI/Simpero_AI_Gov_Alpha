@@ -111,3 +111,65 @@ def test_empty_segments_are_dropped_but_consolidated_kept() -> None:
 def test_metric_order_only_still_returns_structure() -> None:
     out = merge_dashboard_structures([{"subjects": [], "metric_order": ["revenue"]}])
     assert out == {"subjects": [], "metric_order": ["revenue"]}
+
+
+def test_entity_in_consolidated_is_not_also_a_segment() -> None:
+    # One document calls "Acme" the whole company; another files it under a segment.
+    # The consolidated total wins -> the segment must not also carry it.
+    out = merge_dashboard_structures(
+        [
+            {
+                "subjects": [{"name": "Whole", "kind": "consolidated", "entities": ["Acme"]}],
+                "metric_order": [],
+            },
+            {
+                "subjects": [
+                    {"name": "North", "kind": "segment", "entities": ["Acme", "North Region"]}
+                ],
+                "metric_order": [],
+            },
+        ]
+    )
+    assert out is not None
+    assert _consolidated(out)["entities"] == ["Acme"]
+    north = next(s for s in out["subjects"] if s["name"] == "North")
+    assert north["entities"] == ["North Region"]  # "Acme" not double-filed
+    seen = [e for s in out["subjects"] for e in s["entities"]]
+    assert len(seen) == len(set(seen))  # each entity under exactly one subject
+
+
+def test_entity_in_two_segments_goes_to_the_first() -> None:
+    out = merge_dashboard_structures(
+        [
+            {
+                "subjects": [
+                    {"name": "Consolidated", "kind": "consolidated", "entities": ["Acme"]},
+                    {"name": "North", "kind": "segment", "entities": ["Shared Unit"]},
+                    {"name": "South", "kind": "segment", "entities": ["Shared Unit"]},
+                ],
+                "metric_order": [],
+            }
+        ]
+    )
+    assert out is not None
+    north = next(s for s in out["subjects"] if s["name"] == "North")
+    assert north["entities"] == ["Shared Unit"]
+    south = [s for s in out["subjects"] if s["name"] == "South"]
+    assert south == []  # its only entity was already claimed by North
+
+
+def test_consolidated_label_is_deterministic_first_seen() -> None:
+    # Two documents name the whole company differently; the first-seen label wins
+    # (last-write-wins would make the header depend on document order).
+    docs = [
+        {
+            "subjects": [{"name": "Acme Group", "kind": "consolidated", "entities": ["A"]}],
+            "metric_order": [],
+        },
+        {
+            "subjects": [{"name": "Acme Inc", "kind": "consolidated", "entities": ["B"]}],
+            "metric_order": [],
+        },
+    ]
+    assert _consolidated(merge_dashboard_structures(docs))["name"] == "Acme Group"
+    assert _consolidated(merge_dashboard_structures(list(reversed(docs))))["name"] == "Acme Inc"
