@@ -8,6 +8,7 @@ from app.api import (
     deals,
     health,
     history,
+    inspector,
     intake_questions,
     investment_profile,
     logs,
@@ -69,6 +70,7 @@ app.include_router(mandates.router, prefix=API_PREFIX)
 app.include_router(intake_questions.router, prefix=API_PREFIX)
 app.include_router(admin.router, prefix=API_PREFIX)
 app.include_router(uploads.router, prefix=API_PREFIX)
+app.include_router(inspector.router, prefix=API_PREFIX)
 
 # Do not open DB connections at startup. PgBouncer transaction pooling requires sessions to be
 # opened per-transaction, not per-application-lifecycle. A startup DB connection would hold a

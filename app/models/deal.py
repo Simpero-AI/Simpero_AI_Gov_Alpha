@@ -64,6 +64,23 @@ class Deal(Base):
     sector: Mapped[str | None] = mapped_column(Text, nullable=True)
     hq_geography: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # Path B "search just in case": the parser's grounded verdict per qualitative
+    # (llm) screening rule that has no deterministic evaluator -- shaped
+    # {rule_id: {"verdict": "Y"|"N"|"unknown", "evidence": "<quote>"}}. Written at
+    # verification ingest from the documents' findings; read by the document
+    # evaluators (app/services/screening/evaluators/document.py). Nullable: a deal
+    # whose mandate selected no such rule (or that predates this pass) simply has
+    # none, and every document rule then reads as unknown.
+    qualitative_findings: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
+    # Pipeline Inspector: how to organize THIS deal's facts into a dashboard --
+    # {"subjects": [{"name", "kind", "entities": [...]}], "metric_order": [...]}.
+    # The parser's grounded organizing pass produces it (it only arranges cited
+    # facts, never invents a value); the Inspector renders subjects/metric order
+    # from it and falls back to deterministic frequency grouping when it is null
+    # (a deal that predates the pass, or whose organization was skipped).
+    dashboard_structure: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default=DEFAULT_DEAL_STATUS)
 
     created_at: Mapped[datetime] = mapped_column(

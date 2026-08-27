@@ -25,6 +25,7 @@ from app.services.screening.claims_lookup import (
     select_claim,
     share_as_fraction,
 )
+from app.services.screening.evaluators.document import DOCUMENT_EVALUATORS
 from app.services.screening.rulebook import Rulebook
 from app.services.screening.types import DealField, RuleResult
 from app.services.screening.workspace_config import load_workspace_config
@@ -252,4 +253,8 @@ EVALUATORS: dict[str, Callable[[AsyncSession, Deal, Rulebook], Awaitable[RuleRes
     "db_02": evaluate_db_02_gate,
     "db_04": evaluate_db_04,
     "db_07": evaluate_db_07,
+    # Document-search (llm) rules read the parser's grounded finding off the deal;
+    # they make no model call here (see evaluators/document.py). Merged in so the
+    # dispatcher (decision.evaluate_rule) resolves them like any other evaluator.
+    **DOCUMENT_EVALUATORS,
 }
