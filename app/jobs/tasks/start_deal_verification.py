@@ -112,6 +112,7 @@ def _row_from_claim(claim: dict, *, org_id: int, deal_id: UUID, data_source_id: 
         data_source_id=data_source_id,
         entity=claim["entity"],
         attribute=claim["attribute"],
+        attribute_raw=claim.get("attribute_raw"),
         claim_ref=claim.get("claim_ref"),
         claim_type=claim.get("claim_type", "unknown"),
         value=claim["value"],

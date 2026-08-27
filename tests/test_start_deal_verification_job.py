@@ -103,6 +103,7 @@ def _claim_json(claim_ref: str, page: int, normalized: float = 100.0) -> dict[st
         "claim_type": "numerical",
         "entity": "Acme Corp",
         "attribute": "revenue",
+        "attribute_raw": "Revenues: | Net revenues | 2025",
         "value": {
             "raw": str(normalized),
             "normalized": normalized,
@@ -196,6 +197,14 @@ async def test_ingests_claims_and_reconciles_same_page_fact(
     assert run["status"] == "successful"
     assert run["error_message"] is None
     assert _count_claims(owner_conn, seeded_org["org_pk"]) == 2
+
+    # Inspector foundation: the parser's pre-canonicalization label is persisted.
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "SELECT DISTINCT attribute_raw FROM claims WHERE org_id = %s",
+            (seeded_org["org_pk"],),
+        )
+        assert cur.fetchone()[0] == "Revenues: | Net revenues | 2025"
 
     edges = _fetch_edges(owner_conn, seeded_org["org_pk"])
     assert ("same_fact", "reconciliation") in edges
