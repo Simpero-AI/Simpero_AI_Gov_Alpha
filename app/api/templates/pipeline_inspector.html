@@ -296,22 +296,37 @@
   var CATCHALL = { operating_metric: 1, core_unmapped: 1 };
   function isCanonical(a) { return !!a && !CATCHALL[a]; }
 
-  // Fold the noisy free-text entity into a handful of subjects (order matters).
-  var SUBJECT_RULES = [
-    [/stratosphere/i, "Stratosphere"],
-    [/aquarius|flamingo laughlin/i, "Aquarius"],
-    [/arizona charlie'?s? boulder/i, "Arizona Charlie's Boulder"],
-    [/arizona charlie'?s? decatur|\bdecatur\b/i, "Arizona Charlie's Decatur"],
-    [/\bacep\b|american casino|the compan|consolidated|target co|propert/i, "Consolidated"],
-  ];
-  function subjectOf(c) {
-    var e = c.entity || "";
-    for (var i = 0; i < SUBJECT_RULES.length; i++) if (SUBJECT_RULES[i][0].test(e)) return SUBJECT_RULES[i][1];
-    return "Other";
-  }
-  var SUBJECT_ORDER = ["Consolidated", "Stratosphere", "Aquarius",
-    "Arizona Charlie's Boulder", "Arizona Charlie's Decatur", "Other"];
-  function subjectRank(s) { var i = SUBJECT_ORDER.indexOf(s); return i < 0 ? 99 : i; }
+  // Fold each noisy free-text entity into a business subject. The parser's
+  // grounded organizing pass (DATA.dashboard_structure) decides the folding when
+  // present: it maps exact entity strings to subjects and fixes their order. This
+  // cannot be hardcoded -- a casino has properties, a SaaS company product lines,
+  // a biotech programs -- so a deal without a structure (or an entity the pass
+  // left unplaced) falls back to deterministic frequency grouping: the most-
+  // mentioned entities become their own subjects and the singleton tail collapses
+  // into "Other". Grounding holds either way -- this only groups entity strings
+  // that already exist on real claims; it never invents one.
+  var STRUCTURE = (DATA.dashboard_structure && Array.isArray(DATA.dashboard_structure.subjects))
+    ? DATA.dashboard_structure : null;
+  var ENTITY_SUBJECT = {};   // exact entity string -> subject name
+  var SUBJECT_ORDER = [];     // subject display order (lead first, "Other" last)
+  (function () {
+    if (STRUCTURE) {
+      STRUCTURE.subjects.forEach(function (s) {
+        if (!s || !s.name) return;
+        SUBJECT_ORDER.push(s.name);
+        (s.entities || []).forEach(function (e) { if (e) ENTITY_SUBJECT[e] = s.name; });
+      });
+    } else {
+      var freq = {};
+      CLAIMS.forEach(function (c) { if (c.entity) freq[c.entity] = (freq[c.entity] || 0) + 1; });
+      Object.keys(freq).filter(function (e) { return freq[e] >= 2; })
+        .sort(function (a, b) { return freq[b] - freq[a] || (a < b ? -1 : 1); })
+        .forEach(function (e) { ENTITY_SUBJECT[e] = e; SUBJECT_ORDER.push(e); });
+    }
+    SUBJECT_ORDER.push("Other");
+  })();
+  function subjectOf(c) { return ENTITY_SUBJECT[c.entity || ""] || "Other"; }
+  function subjectRank(s) { var i = SUBJECT_ORDER.indexOf(s); return i < 0 ? 98 : i; }
 
   var STATUS_RANK = { conflicted: 0, inconclusive: 1, rejected: 2, proposed: 3, missing: 4, cited: 5, partially_verified: 6, verified: 7 };
   function isTrusted(c) { return c.status === "verified" || c.status === "partially_verified" || c.status === "cited"; }
@@ -504,11 +519,22 @@
   }
 
   // ---- financial trends (per-subject canonical-metric time series) --------
-  var METRIC_ORDER = { revenue: 0, cogs: 1, gross_profit: 2, opex: 3, ebitda: 4,
+  // The parser's per-deal metric_order leads when present (which metrics matter
+  // most for THIS company); the canonical income-statement-then-balance-sheet
+  // order is the sector-neutral fallback for anything it omitted.
+  var CANON_ORDER = { revenue: 0, cogs: 1, gross_profit: 2, opex: 3, ebitda: 4,
     ebitda_margin: 5, ebit: 6, net_income: 7, capex: 8, operating_cash_flow: 9,
     cash_and_equivalents: 10, total_assets: 11, total_liabilities: 12,
     total_equity: 13, total_debt: 14 };
-  function metricRank(a) { return METRIC_ORDER[a] == null ? 99 : METRIC_ORDER[a]; }
+  var METRIC_RANK = {};
+  (function () {
+    var i = 0;
+    if (STRUCTURE && Array.isArray(STRUCTURE.metric_order))
+      STRUCTURE.metric_order.forEach(function (m) { if (m && METRIC_RANK[m] == null) METRIC_RANK[m] = i++; });
+    Object.keys(CANON_ORDER).sort(function (a, b) { return CANON_ORDER[a] - CANON_ORDER[b]; })
+      .forEach(function (m) { if (METRIC_RANK[m] == null) METRIC_RANK[m] = i++; });
+  })();
+  function metricRank(a) { return METRIC_RANK[a] == null ? 99 : METRIC_RANK[a]; }
   function sparkline(nums) {
     var NS = "http://www.w3.org/2000/svg";
     var svg = document.createElementNS(NS, "svg");
@@ -551,7 +577,7 @@
     head.appendChild(el("span", "section-note", "canonical metrics that appear across years — click a value to open its source"));
     box.appendChild(head);
     subjects.forEach(function (subj) {
-      var det = el("details", "trend-group"); if (subj === "Consolidated") det.open = true;
+      var det = el("details", "trend-group"); if (subj === SUBJECT_ORDER[0]) det.open = true;
       det.appendChild(el("summary", "trend-subj", subj));
       var rows = el("div", "trend-rows");
       bySubject[subj].sort(function (a, b) { return metricRank(a.attribute) - metricRank(b.attribute); });

@@ -151,6 +151,10 @@ async def pipeline_inspector(
     data = {
         "deal": {"id": str(deal.id), "name": deal.name},
         "documents": documents,
+        # The parser's grounded organizing pass, if this deal has one. The page
+        # folds entities into these subjects and leads with this metric order;
+        # when it is null the page falls back to deterministic frequency grouping.
+        "dashboard_structure": deal.dashboard_structure,
         "generated_at": datetime.now(UTC).isoformat(),
         "claims": [
             # A same_fact edge is counted once per endpoint above, so a claim
