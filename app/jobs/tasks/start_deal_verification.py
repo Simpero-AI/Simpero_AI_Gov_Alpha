@@ -57,6 +57,7 @@ from app.services.corroboration import (
     CORROBORATION_SOURCES,
     run_corroboration,
 )
+from app.services.dashboard_structure import merge_dashboard_structures
 from app.services.deal_profile import deal_profile_updates
 from app.services.qualitative_findings import merge_qualitative_findings
 from app.services.reconciliation import reconcile_same_fact
@@ -112,6 +113,7 @@ def _row_from_claim(claim: dict, *, org_id: int, deal_id: UUID, data_source_id: 
         data_source_id=data_source_id,
         entity=claim["entity"],
         attribute=claim["attribute"],
+        attribute_raw=claim.get("attribute_raw"),
         claim_ref=claim.get("claim_ref"),
         claim_type=claim.get("claim_type", "unknown"),
         value=claim["value"],
@@ -267,6 +269,7 @@ async def _run_verification(
         verified_data_source_ids: list[UUID] = []
         deal_profiles: list[dict | None] = []
         qualitative_findings: list[dict] = []
+        dashboard_structures: list[dict | None] = []
 
         for job in usable_jobs:
             data_source_id = UUID(job["data_source_id"])
@@ -281,6 +284,10 @@ async def _run_verification(
             # selected qualitative (llm) rules. Merged after the loop into
             # deal.qualitative_findings for the document evaluators.
             qualitative_findings.append(envelope.get("qualitative_findings") or {})
+            # Pipeline Inspector: the parser's per-document organizing pass (may be
+            # None). Merged after the loop into deal.dashboard_structure so the
+            # Inspector renders subjects/metric order instead of hardcoding them.
+            dashboard_structures.append(envelope.get("dashboard_structure"))
 
             # ponytail: insert-only, not idempotent against a redelivered/
             # retried job (inherits ingest_claims.py's SIM-367 gap -- a crash
@@ -321,6 +328,9 @@ async def _run_verification(
         merged_findings = merge_qualitative_findings(qualitative_findings)
         if merged_findings:
             deal_updates["qualitative_findings"] = merged_findings
+        merged_structure = merge_dashboard_structures(dashboard_structures)
+        if merged_structure is not None:
+            deal_updates["dashboard_structure"] = merged_structure
         if deal_updates:
             await DealRepo(session).update(deal_uuid, deal_updates)
 
