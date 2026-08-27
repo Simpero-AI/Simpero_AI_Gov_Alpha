@@ -1,5 +1,7 @@
 import os
+import secrets
 from collections.abc import AsyncGenerator, Iterator
+from datetime import UTC, datetime, timedelta
 
 import psycopg2
 import pytest
@@ -7,10 +9,12 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import AsyncSessionLocal
+from app.core.intake_security import sha256_hex
 from app.core.public_database import PublicAsyncSessionLocal
 
 TEST_org_id = "test-tenant-00000000"
 TEST_user_id = "test-user-00000000"
+_INTAKE_LINK_EXPIRES_AT = datetime.now(UTC) + timedelta(days=7)
 
 
 @pytest.fixture(scope="session")
@@ -65,6 +69,61 @@ def user_a_id(owner_conn, org_a_id, test_org_id) -> int:
         )
         cur.execute("SELECT id FROM users WHERE clerk_user_id = %s", (TEST_user_id,))
         return cur.fetchone()[0]
+
+
+def _insert_deal(cur, org_pk: int, name: str = "Test Deal") -> str:
+    cur.execute("INSERT INTO deals (org_id, name) VALUES (%s, %s) RETURNING id", (org_pk, name))
+    return str(cur.fetchone()[0])
+
+
+@pytest.fixture
+def org_a_deal_id(owner_conn, org_a_id) -> str:
+    """Moved here from tests/test_public_dependencies.py (its original home,
+    same reasoning as org_a_id above) since tests/test_public_intake_session.py
+    now needs it too. No teardown, deliberately -- same reasoning as
+    test_intake_link_rls.py's org_a_deal_id."""
+    with owner_conn.cursor() as cur:
+        return _insert_deal(cur, org_a_id, "Org A's deal")
+
+
+@pytest.fixture
+def pending_link_with_token(
+    owner_conn, org_a_id, org_a_deal_id, user_a_id, test_org_id
+) -> Iterator[dict]:
+    """Moved here from tests/test_public_dependencies.py -- same reasoning as
+    org_a_deal_id above. A pending, unexpired deal_intake_link row seeded via
+    owner_conn (bypasses RLS) -- we control the raw token here (never
+    stored), and seed only its SHA-256 into token_hash, mirroring how the
+    real create-link route (P3) would produce it."""
+    raw_token = secrets.token_urlsafe(32)
+    token_hash = sha256_hex(raw_token)
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO deal_intake_link "
+            "(org_id, clerk_org_id, deal_id, token_hash, recipient_email, expires_at, "
+            "created_by_user_id, status) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending') RETURNING id",
+            (
+                org_a_id,
+                test_org_id,
+                org_a_deal_id,
+                token_hash,
+                "recipient@org-a.example",
+                _INTAKE_LINK_EXPIRES_AT,
+                user_a_id,
+            ),
+        )
+        link_id = str(cur.fetchone()[0])
+
+    yield {
+        "id": link_id,
+        "raw_token": raw_token,
+        "clerk_org_id": test_org_id,
+        "deal_id": org_a_deal_id,
+    }
+
+    with owner_conn.cursor() as cur:
+        cur.execute("DELETE FROM deal_intake_link WHERE id = %s", (link_id,))
 
 
 @pytest.fixture
