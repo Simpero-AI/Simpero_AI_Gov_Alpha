@@ -18,7 +18,6 @@ import sqlalchemy as sa
 
 from alembic import op
 
-
 revision: str = "965c3096f497"
 # str | Sequence[str] rather than just str: a merge migration's down_revision
 # is a tuple of the heads it joins, not a single revision id.
