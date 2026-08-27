@@ -41,6 +41,20 @@ class DealField:
         return {"kind": "deal_field", "field": self.field, "value": self.value}
 
 
+@dataclass(frozen=True)
+class DocumentQuote:
+    """A verbatim sentence from the parsed document that backs a qualitative
+    (llm) verdict -- e.g. gs_01/db_03's grounded "search just in case". The quote
+    was verified present in the source before it reached here (parser
+    screen_criteria._grounds), so it is a real span a human can locate, not a
+    model paraphrase."""
+
+    quote: str
+
+    def to_json(self) -> dict:
+        return {"kind": "document", "quote": self.quote}
+
+
 EvaluatorKind = Literal["deterministic", "llm", "external", "hybrid", "none"]
 
 
@@ -50,7 +64,7 @@ class RuleResult:
     verdict: Verdict
     # What backed a Y/N verdict. None on `unknown` -- there's nothing to
     # point at.
-    evidence: ClaimRef | DealField | None
+    evidence: ClaimRef | DealField | DocumentQuote | None
     # Which KIND of evaluator produced this verdict. Widened past
     # "deterministic" for #4's benefit: when a rule has no evaluator built
     # yet, the engine still emits a RuleResult for it, and labelling that

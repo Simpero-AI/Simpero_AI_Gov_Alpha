@@ -146,6 +146,29 @@ class DealWithLatestMemoResponse(CamelModel):
     latest_memo_session: LatestMemoSessionResponse | None
 
 
+# Mirrors DataSource._STATUSES (app/models/data_source.py) -- exported so
+# the route can `cast` the ORM column's plain `str` into this type at
+# construction time, since the DB CHECK constraint already guarantees it,
+# not just the Pydantic model that types the field.
+DealDocumentStatus = Literal["pending", "verified", "quarantined", "ocr_needed", "mismatch"]
+
+
+class DealDocumentResponse(CamelModel):
+    """One data_source row (P3-04). No field here distinguishes an org-side
+    upload from an external-intake upload (P3-10) -- both write through the
+    same DataSourceRepo, so the list is uniform by construction, not by a
+    filter applied here."""
+
+    id: str
+    filename: str
+    # A Literal here just echoes an already DB-constrained column back out
+    # (this endpoint never writes it), but makes the OpenAPI schema
+    # self-documenting for whoever builds the frontend's status list
+    # (Step 3, P5-05) instead of them having to go find _STATUSES.
+    status: DealDocumentStatus
+    created_at: datetime
+
+
 class CreateDealRequest(CamelModel):
     name: str
     gp_source: str | None

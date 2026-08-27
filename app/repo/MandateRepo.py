@@ -34,6 +34,13 @@ class MandateRepo(BaseRepo[Mandate, dict]):
                 index_elements=["org_id"],
                 set_={"user_id": data["user_id"], "mandate": data["mandate"]},
             )
-            .returning(Mandate)
+            .returning(Mandate),
+            # Without this the ORM hands back the instance already in the
+            # identity map -- and PUT /mandate always loads the previous row
+            # (for the audit diff) before calling this, so the RETURNING values
+            # were being discarded and the response echoed the OLD mandate back
+            # to the caller. The row on disk was always correct; only what the
+            # frontend got to render was stale.
+            execution_options={"populate_existing": True},
         )
         return result.scalar_one()

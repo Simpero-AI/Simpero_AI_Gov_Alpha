@@ -348,12 +348,14 @@ async def test_page_less_claims_are_left_to_e1() -> None:
 
 
 @requires_db
-async def test_operating_metric_is_never_reconciled_as_same_fact() -> None:
-    # SIM-383: operating_metric is E2/SIM-344's catch-all -- two such claims for
-    # one (entity, period) are almost never the same fact (one is slot machines,
-    # the next is hotel rooms). A disagreeing pair that WOULD contradict on any
-    # real attribute must write no edge; a real-attribute pair beside it still
-    # reconciles, so the guard is specific to the catch-all, not a blanket skip.
+async def test_catch_all_attributes_are_never_reconciled_as_same_fact() -> None:
+    # SIM-383 + Inspector fix: operating_metric AND core_unmapped are E2/SIM-344's
+    # two catch-alls -- two such claims for one (entity, period) are almost never
+    # the same fact (slot machines vs hotel rooms; an income-statement line on one
+    # page vs a cash-flow line on another). A disagreeing pair that WOULD contradict
+    # on any real attribute must write no edge; a real-attribute pair beside them
+    # still reconciles, so the guard is specific to the catch-alls, not a blanket
+    # skip.
     _delete_org(ORG)
     try:
         ids = await _seed(
@@ -361,13 +363,16 @@ async def test_operating_metric_is_never_reconciled_as_same_fact() -> None:
             {
                 "om_a": _claim(attribute="operating_metric", normalized=1_309, page=3),
                 "om_b": _claim(attribute="operating_metric", normalized=2_444, page=11),
+                "cu_a": _claim(attribute="core_unmapped", normalized=7_200_000, page=48),
+                "cu_b": _claim(attribute="core_unmapped", normalized=1_800_000, page=49),
                 "rev_a": _claim(attribute="revenue", normalized=15_000_000, page=3),
                 "rev_b": _claim(attribute="revenue", normalized=12_000_000, page=11),
             },
         )
         summary = await _run_reconciliation(ORG, "run-1")
         assert summary.same_fact_edges == 0
-        assert summary.contradicts_edges == 1  # revenue only; operating_metric excluded
+        # revenue only; both catch-alls excluded.
+        assert summary.contradicts_edges == 1
 
         edges, _ = await _edges_and_claims(ORG)
         assert len(edges) == 1

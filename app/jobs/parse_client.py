@@ -41,7 +41,13 @@ def get_parse_queue() -> Queue:
 
 
 async def enqueue_process_document_job(
-    spaces_key: str, *, entity: str, known_sha256s: list[str] | None = None
+    spaces_key: str,
+    *,
+    entity: str,
+    known_sha256s: list[str] | None = None,
+    sector_options: list[str] | None = None,
+    geo_options: list[str] | None = None,
+    screen_criteria: list[dict] | None = None,
 ) -> str:
     """Enqueue the combined parse+extract+audit job for the document already
     uploaded to Spaces at `spaces_key`. Returns the SAQ job key for status
@@ -60,6 +66,21 @@ async def enqueue_process_document_job(
     see start_deal_analysis.py) — required by extract_claims on the other
     side, no default.
 
+    `sector_options` / `geo_options` are the org's approved mandate options
+    (post sub-tree expansion, from load_workspace_config) for Path B mandate-fit
+    classification: the parser judges the target's sector/HQ against these exact
+    lists so the backend can write a deal.sector/hq_geography that fold-matches
+    gs_08/gs_07. `None` (org has no mandate policy for that dimension) skips the
+    fit and the parser reports the raw sector/HQ only.
+
+    `screen_criteria` are the SELECTED qualitative (llm) rules to search the
+    document for -- a list of {"rule_id", "question"} (Path B "search just in
+    case"). The parser returns a grounded Y/N/unknown per rule, which the backend
+    persists and its document evaluators surface. `None`/empty skips the search.
+
+    Kwarg names here must match process_document's parameters exactly — SAQ
+    dispatches by keyword.
+
     Uploading the document to Spaces first is the caller's responsibility —
     this function intentionally does no upload of its own.
     """
@@ -69,6 +90,9 @@ async def enqueue_process_document_job(
         entity=entity,
         known_sha256s=known_sha256s,
         audit=True,
+        sector_options=sector_options,
+        geo_options=geo_options,
+        screen_criteria=screen_criteria,
     )
     assert job is not None, (
         "enqueue() only returns None if the job already exists uniquely and was skipped"

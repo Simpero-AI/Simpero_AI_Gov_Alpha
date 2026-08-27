@@ -130,6 +130,15 @@ class Claim(Base):
 
     entity: Mapped[str] = mapped_column(Text, nullable=False)
     attribute: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    # The parser's pre-canonicalization label -- the table's own path to the cell
+    # ("Revenues: | Casino | 2002") or the prose phrase. `attribute` above is the
+    # canonical bucket (revenue/ebitda/... or the operating_metric/core_unmapped
+    # catch-alls); `attribute_raw` is what actually distinguishes two claims that
+    # canonicalize to the SAME bucket -- so it is what the Pipeline Inspector groups
+    # a narrative on and what reconciliation will one day key the catch-alls by
+    # (SIM-381). Nullable: legacy rows (and any pre-field payload) have none, and
+    # it is not recoverable from a stored row -- a re-ingest backfills it.
+    attribute_raw: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     period_year: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # A=Actual, E=Estimate, P=Projected.
