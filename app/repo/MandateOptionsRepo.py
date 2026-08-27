@@ -1,3 +1,5 @@
+from collections.abc import Sequence
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -31,6 +33,20 @@ class MandateOptionsRepo(BaseRepo[MandateOptions, dict]):
         result = await self.session.execute(
             select(MandateOptions)
             .where(MandateOptions.category_id == category_id)
+            .order_by(MandateOptions.option)
+        )
+        return list(result.scalars().all())
+
+    async def list_by_categories(self, category_ids: Sequence[object]) -> list[MandateOptions]:
+        """Plural sibling of list_by_category, for screening's sub-option
+        expansion (app/services/screening/workspace_config.py): the two
+        categories gs_07/gs_08 read, in one SELECT rather than one per
+        category or a list_all() over the whole taxonomy."""
+        if not category_ids:
+            return []
+        result = await self.session.execute(
+            select(MandateOptions)
+            .where(MandateOptions.category_id.in_(category_ids))
             .order_by(MandateOptions.option)
         )
         return list(result.scalars().all())

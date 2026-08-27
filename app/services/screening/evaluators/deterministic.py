@@ -25,6 +25,7 @@ from app.services.screening.claims_lookup import (
     select_claim,
     share_as_fraction,
 )
+from app.services.screening.evaluators.document import DOCUMENT_EVALUATORS
 from app.services.screening.rulebook import Rulebook
 from app.services.screening.types import DealField, RuleResult
 from app.services.screening.workspace_config import load_workspace_config
@@ -120,9 +121,12 @@ async def evaluate_gs_07(session: AsyncSession, deal: Deal, rulebook: Rulebook) 
             "unknown",
             None,
             "deterministic",
-            reason="approved_geographies not configured for this workspace",
+            reason="no approved geographies in the org's mandate",
         )
-    verdict = "Y" if deal.hq_geography in config.approved_geographies else "N"
+    # approves_geography(), not `in`: matching folds case/whitespace on both
+    # sides (workspace_config.normalize_label). The evidence below stays the
+    # RAW deal string -- what the deal actually says, not the folded key.
+    verdict = "Y" if config.approves_geography(deal.hq_geography) else "N"
     return RuleResult(
         "gs_07", verdict, DealField("hq_geography", deal.hq_geography), "deterministic"
     )
@@ -141,9 +145,9 @@ async def evaluate_gs_08(session: AsyncSession, deal: Deal, rulebook: Rulebook) 
             "unknown",
             None,
             "deterministic",
-            reason="approved_sectors not configured for this workspace",
+            reason="no approved sectors in the org's mandate",
         )
-    verdict = "Y" if deal.sector in config.approved_sectors else "N"
+    verdict = "Y" if config.approves_sector(deal.sector) else "N"
     return RuleResult("gs_08", verdict, DealField("sector", deal.sector), "deterministic")
 
 
@@ -249,4 +253,8 @@ EVALUATORS: dict[str, Callable[[AsyncSession, Deal, Rulebook], Awaitable[RuleRes
     "db_02": evaluate_db_02_gate,
     "db_04": evaluate_db_04,
     "db_07": evaluate_db_07,
+    # Document-search (llm) rules read the parser's grounded finding off the deal;
+    # they make no model call here (see evaluators/document.py). Merged in so the
+    # dispatcher (decision.evaluate_rule) resolves them like any other evaluator.
+    **DOCUMENT_EVALUATORS,
 }

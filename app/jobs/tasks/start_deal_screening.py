@@ -20,6 +20,8 @@ carrying the breaker that fired and its evidence; acting on it is a human's
 call, and nothing here writes to `deals.status`.
 """
 
+import asyncio
+import logging
 from uuid import UUID
 
 from saq.types import Context
@@ -31,6 +33,17 @@ from app.repo.DealRepo import DealRepo
 from app.repo.HumanAuditRepo import HumanAuditRepo
 from app.repo.ScreeningResultRepo import ScreeningResultRepo
 from app.services.screening.decision import screen_deal
+from app.services.screening.mandate_rules import selected_rule_ids
+from app.services.screening.rulebook import load_rulebook
+from app.services.screening.workspace_config import load_workspace_config
+
+logger = logging.getLogger(__name__)
+
+# Per-statement ceiling for the screening job's own transaction, set well under
+# its SAQ job timeout so a blocked or runaway query aborts as a normal error
+# (caught and recorded as `failed` by the wrapper) instead of hanging the job --
+# and the UI -- indefinitely. Mirrors start_deal_verification._STATEMENT_TIMEOUT.
+_STATEMENT_TIMEOUT = "120s"
 
 
 async def _set_org(session, clerk_org_id: str) -> None:
@@ -46,11 +59,33 @@ async def start_deal_screening(
     analysis_run_id: str,
     clerk_org_id: str,
 ) -> None:
+    """SAQ entrypoint. Thin wrapper whose only job is to guarantee that ANY
+    failure of the screening work -- an exception inside the rulebook/decision
+    engine, or the SAQ timeout cancelling this coroutine -- durably records a
+    terminal `failed` status. The work itself runs in one transaction
+    (_run_screening); when that transaction rolls back it takes its own
+    `in_progress` marker with it, so without this wrapper the run reverts to
+    `queued` and stays non-terminal -- and GET /deals/{id}/status then reports
+    `processing` forever, leaving the frontend stuck on "loading results".
+    Exactly the hang start_deal_verification's wrapper already prevents.
+    CancelledError is caught alongside Exception because SAQ enforces its job
+    timeout by cancelling this coroutine, and CancelledError is a
+    BaseException."""
+    run_id = UUID(analysis_run_id)
+    try:
+        await _run_screening(analysis_run_id=analysis_run_id, clerk_org_id=clerk_org_id)
+    except (Exception, asyncio.CancelledError) as exc:
+        await _mark_run_failed(run_id, clerk_org_id, exc)
+        raise
+
+
+async def _run_screening(*, analysis_run_id: str, clerk_org_id: str) -> None:
     """`deal_id` is deliberately not a parameter -- org_id/deal_id both come
     from the run row itself, same reasoning as start_deal_verification."""
     run_id = UUID(analysis_run_id)
 
     async with AsyncSessionLocal() as session, session.begin():
+        await session.execute(text(f"SET LOCAL statement_timeout = '{_STATEMENT_TIMEOUT}'"))
         await _set_org(session, clerk_org_id)
         run_repo = AnalysisRunRepo(session)
 
@@ -63,6 +98,8 @@ async def start_deal_screening(
         # second screening_result row for the same run. Rows here are
         # append-only by design, so nothing would fail loudly -- it would
         # just silently duplicate the record of a decision, which is worse.
+        # It also makes the wrapper's `failed` write terminal: a retry after
+        # a recorded failure returns here cleanly instead of re-raising.
         if run.status in ("successful", "failed"):
             return
 
@@ -76,7 +113,15 @@ async def start_deal_screening(
 
         await run_repo.update_progress(run_id, status="in_progress")
 
-        decision = await screen_deal(session, deal)
+        # Path B: screen the deal only on the questions the analyst selected in
+        # the mandate (must-haves + enabled deal-breakers + geography/sector
+        # policies), not the whole rulebook. When nothing is selected -- most
+        # commonly because no mandate is configured at all -- fall back to the
+        # full rulebook (`only_rule_ids=None`) rather than screening nothing.
+        rulebook = load_rulebook()
+        mandate = await load_workspace_config(session)
+        selected = selected_rule_ids(rulebook, mandate)
+        decision = await screen_deal(session, deal, rulebook, only_rule_ids=selected or None)
         await ScreeningResultRepo(session).record(
             decision, org_id=org_id, deal_id=deal_uuid, analysis_run_id=run_id
         )
@@ -110,6 +155,44 @@ async def start_deal_screening(
                 },
             }
         )
+
+
+async def _mark_run_failed(run_id: UUID, clerk_org_id: str, exc: BaseException) -> None:
+    """Record a terminal `failed` status for the run in its OWN fresh
+    transaction -- the work transaction has already rolled back, so its
+    in_progress marker is gone and the run would otherwise sit non-terminal
+    (the frontend hangs on "loading results" indefinitely). Idempotent (skips a
+    run that already reached a terminal status, so a SAQ retry after this is a
+    clean no-op via _run_screening's own guard) and best-effort: if even this
+    write fails it is logged, never raised, so it can never mask the real
+    failure that the caller re-raises. error_message carries only the exception
+    TYPE -- never str(exc) -- to keep document-derived content out of a
+    persisted field. Mirrors start_deal_verification._mark_run_failed."""
+    try:
+        async with AsyncSessionLocal() as session, session.begin():
+            await session.execute(text("SET LOCAL statement_timeout = '30s'"))
+            await _set_org(session, clerk_org_id)
+            run_repo = AnalysisRunRepo(session)
+            run = await run_repo.get_by_id(run_id)
+            if run is None or run.status in ("successful", "failed"):
+                return
+            await run_repo.update_progress(
+                run_id,
+                status="failed",
+                error_message=f"screening failed: {type(exc).__name__}",
+            )
+            await HumanAuditRepo(session).append(
+                {
+                    "org_id": run.org_id,
+                    "actor_id": "Internal System",
+                    "actor_email": "Internal System",
+                    "event_type": "analysis_screening_completed",
+                    "deal_id": run.deal_id,
+                    "payload": {"analysis_run_id": str(run_id), "status": "failed"},
+                }
+            )
+    except Exception:
+        logger.exception("could not record screening failure for run %s", run_id)
 
 
 def _summarize(decision) -> str:
