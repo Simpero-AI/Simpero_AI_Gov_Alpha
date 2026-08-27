@@ -1,0 +1,667 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Pipeline Inspector</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --panel-2: #fbfbfc; --ink: #16181d;
+    --ink-soft: #5b616e; --ink-faint: #8a909c; --line: #e6e8ec; --line-soft: #eef0f3;
+    --accent: #3b5bdb; --accent-soft: #e7ecfd;
+    --good: #1e9e6a; --good-soft: #e3f5ec; --info: #2f6fed; --info-soft: #e6eefc;
+    --warn: #c07a12; --warn-soft: #fbf0dc; --bad: #d1435b; --bad-soft: #fbe4e8;
+    --muted: #8a909c; --muted-soft: #eef0f3;
+    --shadow: 0 1px 2px rgba(16,18,29,.06), 0 1px 1px rgba(16,18,29,.04);
+    --radius: 12px;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0e0f13; --panel: #16181d; --panel-2: #1b1e24; --ink: #eceef2;
+      --ink-soft: #a2a9b6; --ink-faint: #6f7684; --line: #262a31; --line-soft: #20242b;
+      --accent: #6f8bff; --accent-soft: #1d2440;
+      --good: #46c78a; --good-soft: #12281f; --info: #6f9bff; --info-soft: #16203a;
+      --warn: #e0a13c; --warn-soft: #2c2110; --bad: #f2637c; --bad-soft: #2e141b;
+      --muted: #8a909c; --muted-soft: #22262d;
+      --shadow: 0 1px 2px rgba(0,0,0,.4);
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--bg); color: var(--ink); font-family: var(--sans);
+    font-size: 14px; line-height: 1.5; -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent); }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 28px 20px 80px; }
+
+  /* Header */
+  header.top { margin-bottom: 20px; }
+  .eyebrow { font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-faint); font-weight: 600; }
+  h1 { font-size: 24px; margin: 4px 0 6px; letter-spacing: -.01em; }
+  .subline { color: var(--ink-soft); }
+  .docs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  .doc-chip { font-size: 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px; color: var(--ink-soft); }
+  .doc-chip b { color: var(--ink); font-weight: 600; }
+
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); }
+
+  /* Summary */
+  .summary { padding: 18px; margin: 18px 0; }
+  .summary .headline { font-size: 15px; margin-bottom: 14px; }
+  .summary .headline b { font-weight: 700; }
+  .bar { display: flex; height: 12px; border-radius: 999px; overflow: hidden; background: var(--line-soft); }
+  .bar > span { display: block; height: 100%; }
+  .legend-counts { display: flex; flex-wrap: wrap; gap: 8px 14px; margin-top: 14px; }
+  .count { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; color: var(--ink-soft); cursor: pointer; user-select: none; border: 1px solid transparent; border-radius: 8px; padding: 2px 6px; }
+  .count:hover { border-color: var(--line); }
+  .count.off { opacity: .38; }
+  .dot { width: 9px; height: 9px; border-radius: 3px; flex: none; }
+  .count b { color: var(--ink); font-variant-numeric: tabular-nums; }
+
+  .tone-good { --c: var(--good); --cs: var(--good-soft); }
+  .tone-info { --c: var(--info); --cs: var(--info-soft); }
+  .tone-warn { --c: var(--warn); --cs: var(--warn-soft); }
+  .tone-bad  { --c: var(--bad);  --cs: var(--bad-soft); }
+  .tone-muted{ --c: var(--muted);--cs: var(--muted-soft); }
+
+  /* Controls */
+  .controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 0 0 14px; }
+  .controls input[type=search], .controls select {
+    font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line);
+    border-radius: 8px; padding: 7px 10px;
+  }
+  .controls input[type=search] { min-width: 220px; flex: 1; }
+  .controls .spacer { flex: 1; }
+  .muted-note { color: var(--ink-faint); font-size: 12px; }
+
+  details.legend { margin: 0 0 16px; }
+  details.legend > summary { cursor: pointer; color: var(--ink-soft); font-size: 13px; padding: 4px 0; list-style: none; }
+  details.legend > summary::-webkit-details-marker { display: none; }
+  details.legend > summary::before { content: "▸ "; color: var(--ink-faint); }
+  details.legend[open] > summary::before { content: "▾ "; }
+  .legend-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; margin-top: 10px; }
+  .legend-item { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--panel-2); }
+  .legend-item .badge { margin-bottom: 6px; }
+  .legend-item p { margin: 0; color: var(--ink-soft); font-size: 12.5px; }
+
+  /* Group */
+  .group-h { margin: 24px 0 10px; display: flex; align-items: baseline; gap: 10px; }
+  .group-h h2 { font-size: 14px; margin: 0; }
+  .group-h .n { color: var(--ink-faint); font-size: 12px; }
+
+  /* Claim card */
+  .claim { padding: 14px 16px; margin-bottom: 10px; display: grid; grid-template-columns: 1fr auto; gap: 6px 16px; }
+  .claim .fact { font-size: 15px; grid-column: 1; }
+  .claim .fact .ent { color: var(--ink-soft); }
+  .claim .fact .attr { font-weight: 600; }
+  .claim .fact .val { font-weight: 700; }
+  .claim .fact .period { color: var(--ink-faint); font-size: 12.5px; font-weight: 500; }
+  .badge { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; padding: 3px 9px; border-radius: 999px; color: var(--c); background: var(--cs); white-space: nowrap; }
+  .badge .dot { background: var(--c); }
+  .claim .status-wrap { grid-column: 2; grid-row: 1; text-align: right; }
+
+  .meta { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; margin-top: 4px; color: var(--ink-soft); font-size: 12.5px; }
+  .where { font-family: var(--mono); font-size: 12px; color: var(--ink-soft); background: var(--line-soft); border-radius: 6px; padding: 2px 7px; }
+  a.where-link { color: var(--accent); text-decoration: none; cursor: pointer; }
+  a.where-link:hover { background: var(--accent-soft); text-decoration: underline; }
+
+  /* Trends */
+  .trends { margin: 18px 0; }
+  .section-title { display: flex; align-items: baseline; gap: 10px; margin: 0 0 10px; flex-wrap: wrap; }
+  .section-title > span:first-child { font-size: 15px; font-weight: 700; letter-spacing: -.01em; }
+  .section-note { color: var(--ink-faint); font-size: 12px; }
+  details.trend-group { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); margin-bottom: 8px; box-shadow: var(--shadow); }
+  details.trend-group > summary { cursor: pointer; padding: 10px 14px; font-weight: 600; font-size: 13px; list-style: none; }
+  details.trend-group > summary::-webkit-details-marker { display: none; }
+  details.trend-group > summary::before { content: "▸ "; color: var(--ink-faint); }
+  details.trend-group[open] > summary::before { content: "▾ "; }
+  .trend-rows { padding: 0 14px 10px; }
+  .trend-row { display: grid; grid-template-columns: 150px 62px 1fr; align-items: center; gap: 12px; padding: 7px 0; border-top: 1px solid var(--line-soft); }
+  .trend-metric { font-weight: 600; font-size: 13px; }
+  .spark { width: 60px; height: 16px; color: var(--accent); flex: none; }
+  .trend-points { display: flex; flex-wrap: wrap; gap: 4px 14px; }
+  .trend-pt { display: inline-flex; align-items: baseline; gap: 5px; font-size: 13px; font-variant-numeric: tabular-nums; }
+  .trend-yr { color: var(--ink-faint); font-size: 11px; }
+  a.src-link { color: var(--ink); text-decoration: none; border-bottom: 1px dashed var(--line); }
+  a.src-link:hover { color: var(--accent); border-bottom-color: var(--accent); }
+  @media (max-width: 620px) { .trend-row { grid-template-columns: 1fr; gap: 4px; } }
+  .raw { color: var(--ink-faint); }
+  .raw b { color: var(--ink-soft); font-weight: 600; font-family: var(--mono); }
+  .xcheck { display: inline-flex; align-items: center; gap: 5px; }
+  .flags { display: flex; flex-wrap: wrap; gap: 5px; }
+  .flag { font-size: 11px; padding: 2px 7px; border-radius: 6px; background: var(--warn-soft); color: var(--warn); font-weight: 600; }
+
+  /* Ladder */
+  .ladder { grid-column: 1 / -1; display: flex; align-items: center; gap: 0; margin-top: 8px; }
+  .step { display: flex; align-items: center; gap: 7px; }
+  .node { width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--line); background: var(--panel); flex: none; position: relative; }
+  .node.done { background: var(--good); border-color: var(--good); }
+  .node.info { background: var(--info); border-color: var(--info); }
+  .node.partial { background: var(--panel); border-color: var(--good); }
+  .node.partial::after { content: ""; position: absolute; inset: 2px; border-radius: 50%; background: conic-gradient(var(--good) 0 50%, transparent 50% 100%); }
+  .node.conflict { background: var(--bad); border-color: var(--bad); }
+  .node.warn { background: var(--warn); border-color: var(--warn); }
+  .node.failed { background: var(--bad-soft); border-color: var(--bad); }
+  .node.failed::after { content: "✕"; position: absolute; inset: -3px 0 0; text-align: center; color: var(--bad); font-size: 12px; font-weight: 700; }
+  .node.pending { background: var(--panel); border-color: var(--line); }
+  .node.na { background: var(--muted-soft); border-color: var(--muted-soft); }
+  .step .lbl { font-size: 11.5px; color: var(--ink-faint); }
+  .step .lbl.on { color: var(--ink-soft); }
+  .conn { height: 2px; width: 34px; background: var(--line); margin: 0 4px; flex: none; }
+  .conn.done { background: var(--good); }
+  .how { margin-left: 10px; font-size: 11.5px; color: var(--ink-faint); font-style: italic; }
+
+  .empty { text-align: center; color: var(--ink-faint); padding: 60px 20px; }
+  footer { margin-top: 30px; color: var(--ink-faint); font-size: 12px; text-align: center; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div class="eyebrow">Pipeline Inspector</div>
+    <h1 id="deal-name">—</h1>
+    <div class="subline" id="headline"></div>
+    <div class="docs" id="docs"></div>
+  </header>
+
+  <section class="card summary">
+    <div class="headline" id="summary-line"></div>
+    <div class="bar" id="bar"></div>
+    <div class="legend-counts" id="counts"></div>
+  </section>
+
+  <section class="trends hidden" id="trends"></section>
+
+  <details class="legend">
+    <summary>What do these stages mean?</summary>
+    <div class="legend-grid" id="legend-grid"></div>
+  </details>
+
+  <div class="controls">
+    <input type="search" id="search" placeholder="Search facts, values, sections…" autocomplete="off" />
+    <select id="doc-filter"><option value="">All documents</option></select>
+    <span class="spacer"></span>
+    <span class="muted-note" id="showing"></span>
+  </div>
+
+  <div id="groups"></div>
+  <div class="empty hidden" id="empty">No facts match the current filters.</div>
+
+  <footer id="footer"></footer>
+</div>
+
+<script id="pipeline-data" type="application/json">__PIPELINE_DATA__</script>
+<script>
+(function () {
+  "use strict";
+
+  // ---- data ---------------------------------------------------------------
+  var DATA;
+  try { DATA = JSON.parse(document.getElementById("pipeline-data").textContent); }
+  catch (e) { DATA = { deal: { name: "—" }, documents: [], claims: [] }; }
+  var CLAIMS = Array.isArray(DATA.claims) ? DATA.claims : [];
+
+  // ---- status interpretation ---------------------------------------------
+  var STATUS = {
+    verified:            { label: "Verified",            tone: "good",  blurb: "Confirmed against the document — cited to an exact spot and cross-checks agree." },
+    partially_verified:  { label: "Partly verified",     tone: "good",  blurb: "Cited and mostly confirmed, with one supporting check still open." },
+    cited:               { label: "Located",             tone: "info",  blurb: "Pinned to an exact spot in the source; corroboration not yet run." },
+    conflicted:          { label: "Conflict flagged",    tone: "bad",   blurb: "Located, but it disagrees with another figure in the deal — needs a human." },
+    inconclusive:        { label: "Inconclusive",        tone: "warn",  blurb: "Located, but the checks couldn't confirm or deny it." },
+    proposed:            { label: "Extracted only",      tone: "muted", blurb: "Read off the page, not yet pinned to an exact source span." },
+    rejected:            { label: "Rejected",            tone: "bad",   blurb: "Extracted but couldn't be tied back to the source, so it isn't trusted." },
+    missing:             { label: "Not locatable",       tone: "muted", blurb: "A figure the page referred to but that has no citable location." }
+  };
+  function statusInfo(s) { return STATUS[s] || { label: s || "unknown", tone: "muted", blurb: "" }; }
+
+  var METHOD = {
+    exact_span: "found at an exact spot in the text",
+    formula_reexecution: "re-computed from its parts",
+    direct_read: "read directly from a spreadsheet cell",
+    reranker: "matched by semantic search",
+    human_review: "confirmed by a person"
+  };
+
+  var STAGES = ["Extracted", "Located in the source", "Verified"];
+  // Per status, the state of each of the 3 nodes.
+  function ladderStates(s) {
+    switch (s) {
+      case "verified":           return ["done", "done", "done"];
+      case "partially_verified": return ["done", "done", "partial"];
+      case "cited":              return ["done", "info", "pending"];
+      case "conflicted":         return ["done", "done", "conflict"];
+      case "inconclusive":       return ["done", "done", "warn"];
+      case "proposed":           return ["done", "pending", "pending"];
+      case "rejected":           return ["done", "failed", "na"];
+      case "missing":            return ["done", "na", "na"];
+      default:                   return ["done", "pending", "pending"];
+    }
+  }
+
+  // ---- helpers ------------------------------------------------------------
+  function el(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text != null) n.textContent = text;   // textContent: never inject data as HTML
+    return n;
+  }
+  var UNIT_SYMBOL = { USD: "$", "%": "%" };
+  function fmtValue(v) {
+    if (!v || typeof v !== "object") return "—";
+    var raw = v.raw != null ? String(v.raw) : "";
+    var n = v.normalized;
+    if (typeof n === "number" && isFinite(n)) {
+      var unit = v.unit || "";
+      if (v.value_type === "currency") {
+        var abs = Math.abs(n), s;
+        if (abs >= 1e9) s = (n / 1e9).toFixed(2) + "B";
+        else if (abs >= 1e6) s = (n / 1e6).toFixed(2) + "M";
+        else if (abs >= 1e3) s = (n / 1e3).toFixed(1) + "K";
+        else s = n.toLocaleString();
+        return (UNIT_SYMBOL[unit] || "") + s;
+      }
+      if (v.value_type === "percent") return n + "%";
+      if (v.value_type === "ratio") return n + (unit && unit !== "ratio" ? " " + unit : "×");
+      return n.toLocaleString() + (unit && unit !== "count" ? " " + unit : "");
+    }
+    return raw || "—";
+  }
+  var PERIOD_KIND = { A: "Actual", E: "Estimate", P: "Projected" };
+  function fmtPeriod(c) {
+    if (c.period_year == null) return "";
+    var k = PERIOD_KIND[c.period_kind];
+    return "FY" + c.period_year + (k ? " · " + k : "");
+  }
+  function humanAttr(a) {
+    if (!a) return "value";
+    return String(a).replace(/_/g, " ").replace(/\b\w/g, function (m) { return m.toUpperCase(); });
+  }
+  function whereText(c) {
+    var loc = c.location || {};
+    if (loc.kind === "xlsx") return "Sheet " + (loc.sheet || "?") + " · cell " + (loc.cell_ref || "?");
+    if (loc.kind === "docx") return "Paragraph " + (loc.paragraph != null ? loc.paragraph : "?");
+    if (loc.page != null) {
+      var span = (loc.char_start != null && loc.char_end != null) ? " · chars " + loc.char_start + "–" + loc.char_end : "";
+      return "Page " + loc.page + span;
+    }
+    return null;
+  }
+
+  // ---- narrative helpers --------------------------------------------------
+  // The two E2 catch-alls -- everything else is a real canonical metric.
+  var CATCHALL = { operating_metric: 1, core_unmapped: 1 };
+  function isCanonical(a) { return !!a && !CATCHALL[a]; }
+
+  // Fold each noisy free-text entity into a business subject. The parser's
+  // grounded organizing pass (DATA.dashboard_structure) decides the folding when
+  // present: it maps exact entity strings to subjects and fixes their order. This
+  // cannot be hardcoded -- a casino has properties, a SaaS company product lines,
+  // a biotech programs -- so a deal without a structure (or an entity the pass
+  // left unplaced) falls back to deterministic frequency grouping: the most-
+  // mentioned entities become their own subjects and the singleton tail collapses
+  // into "Other". Grounding holds either way -- this only groups entity strings
+  // that already exist on real claims; it never invents one.
+  var STRUCTURE = (DATA.dashboard_structure && Array.isArray(DATA.dashboard_structure.subjects))
+    ? DATA.dashboard_structure : null;
+  var ENTITY_SUBJECT = {};   // exact entity string -> subject name
+  var SUBJECT_ORDER = [];     // subject display order (lead first, "Other" last)
+  (function () {
+    if (STRUCTURE) {
+      STRUCTURE.subjects.forEach(function (s) {
+        if (!s || !s.name) return;
+        SUBJECT_ORDER.push(s.name);
+        // First subject to claim an entity keeps it; consolidated leads, so a
+        // whole-company entity is never overwritten by a later segment.
+        (s.entities || []).forEach(function (e) {
+          if (e && !(e in ENTITY_SUBJECT)) ENTITY_SUBJECT[e] = s.name;
+        });
+      });
+    } else {
+      var freq = {};
+      CLAIMS.forEach(function (c) { if (c.entity) freq[c.entity] = (freq[c.entity] || 0) + 1; });
+      Object.keys(freq).filter(function (e) { return freq[e] >= 2; })
+        .sort(function (a, b) { return freq[b] - freq[a] || (a < b ? -1 : 1); })
+        .forEach(function (e) { ENTITY_SUBJECT[e] = e; SUBJECT_ORDER.push(e); });
+    }
+    SUBJECT_ORDER.push("Other");
+  })();
+  function subjectOf(c) { return ENTITY_SUBJECT[c.entity || ""] || "Other"; }
+  function subjectRank(s) { var i = SUBJECT_ORDER.indexOf(s); return i < 0 ? 98 : i; }
+
+  var STATUS_RANK = { conflicted: 0, inconclusive: 1, rejected: 2, proposed: 3, missing: 4, cited: 5, partially_verified: 6, verified: 7 };
+  function isTrusted(c) { return c.status === "verified" || c.status === "partially_verified" || c.status === "cited"; }
+
+  // ---- filter state -------------------------------------------------------
+  var offStatuses = {};   // status -> true when hidden
+  var docFilter = "";
+  var query = "";
+  var subjectFilter = "";
+
+  // ---- render: header + summary ------------------------------------------
+  document.getElementById("deal-name").textContent = (DATA.deal && DATA.deal.name) || "This deal";
+  document.title = "Pipeline Inspector — " + ((DATA.deal && DATA.deal.name) || "deal");
+
+  var docsById = {};
+  var docUrlById = {};
+  (DATA.documents || []).forEach(function (d) {
+    docsById[d.data_source_id] = d.filename || "document";
+    if (d.source_url) docUrlById[d.data_source_id] = d.source_url;
+  });
+  var docsBox = document.getElementById("docs");
+  (DATA.documents || []).forEach(function (d) {
+    var chip = el("span", "doc-chip");
+    chip.appendChild(el("b", null, d.filename || "document"));
+    docsBox.appendChild(chip);
+    var opt = el("option", null, d.filename || "document");
+    opt.value = d.data_source_id;
+    document.getElementById("doc-filter").appendChild(opt);
+  });
+
+  var counts = {};
+  CLAIMS.forEach(function (c) { counts[c.status] = (counts[c.status] || 0) + 1; });
+  var verifiedish = (counts.verified || 0) + (counts.partially_verified || 0);
+  var conflicts = counts.conflicted || 0;
+  document.getElementById("headline").textContent =
+    CLAIMS.length + " facts extracted from " + (DATA.documents || []).length + " document" +
+    ((DATA.documents || []).length === 1 ? "" : "s") + ".";
+
+  var sline = el("div");
+  sline.appendChild(document.createTextNode("Of " + CLAIMS.length + " facts, "));
+  var sb = el("b", null, verifiedish + " verified against the source");
+  sb.style.color = "var(--good)";
+  sline.appendChild(sb);
+  if (conflicts) {
+    sline.appendChild(document.createTextNode(" and "));
+    var cb = el("b", null, conflicts + (conflicts === 1 ? " conflict" : " conflicts") + " flagged");
+    cb.style.color = "var(--bad)";
+    sline.appendChild(cb);
+  }
+  sline.appendChild(document.createTextNode(". Click a status below to filter."));
+  document.getElementById("summary-line").appendChild(sline);
+
+  // stacked bar + counts, in a sensible order
+  var ORDER = ["verified", "partially_verified", "cited", "conflicted", "inconclusive", "proposed", "rejected", "missing"];
+  var bar = document.getElementById("bar");
+  var countsBox = document.getElementById("counts");
+  ORDER.forEach(function (s) {
+    var n = counts[s]; if (!n) return;
+    var info = statusInfo(s);
+    var seg = el("span", "tone-" + info.tone);
+    seg.style.width = (100 * n / CLAIMS.length) + "%";
+    seg.style.background = "var(--c)";
+    seg.title = info.label + ": " + n;
+    bar.appendChild(seg);
+
+    var pill = el("span", "count tone-" + info.tone);
+    pill.dataset.status = s;
+    pill.appendChild(el("span", "dot"));
+    var lab = el("span"); lab.appendChild(el("b", null, String(n))); lab.appendChild(document.createTextNode(" " + info.label));
+    pill.appendChild(lab);
+    pill.addEventListener("click", function () {
+      if (offStatuses[s]) delete offStatuses[s]; else offStatuses[s] = true;
+      pill.classList.toggle("off", !!offStatuses[s]);
+      render();
+    });
+    countsBox.appendChild(pill);
+  });
+
+  // legend
+  var lg = document.getElementById("legend-grid");
+  ORDER.forEach(function (s) {
+    if (!counts[s]) return;
+    var info = statusInfo(s);
+    var item = el("div", "legend-item");
+    var b = el("span", "badge tone-" + info.tone);
+    b.appendChild(el("span", "dot")); b.appendChild(document.createTextNode(info.label));
+    item.appendChild(b);
+    item.appendChild(el("p", null, info.blurb));
+    lg.appendChild(item);
+  });
+
+  // ---- render: claim card -------------------------------------------------
+  function claimCard(c) {
+    var info = statusInfo(c.status);
+    var card = el("div", "card claim");
+
+    var fact = el("div", "fact");
+    fact.appendChild(el("span", "ent", (c.entity || "—") + " · "));
+    fact.appendChild(el("span", "attr", humanAttr(c.attribute)));
+    fact.appendChild(document.createTextNode(": "));
+    fact.appendChild(el("span", "val", fmtValue(c.value)));
+    var per = fmtPeriod(c);
+    if (per) { fact.appendChild(document.createTextNode("  ")); fact.appendChild(el("span", "period", per)); }
+    card.appendChild(fact);
+
+    var sw = el("div", "status-wrap");
+    var badge = el("span", "badge tone-" + info.tone);
+    badge.appendChild(el("span", "dot")); badge.appendChild(document.createTextNode(info.label));
+    sw.appendChild(badge);
+    card.appendChild(sw);
+
+    // ladder
+    var states = ladderStates(c.status);
+    var ladder = el("div", "ladder");
+    states.forEach(function (st, i) {
+      if (i > 0) {
+        var conn = el("div", "conn" + (states[i] === "done" || states[i] === "info" || states[i] === "conflict" || states[i] === "warn" || states[i] === "partial" ? " done" : ""));
+        ladder.appendChild(conn);
+      }
+      var step = el("div", "step");
+      step.appendChild(el("div", "node " + st));
+      var on = st !== "pending" && st !== "na";
+      step.appendChild(el("div", "lbl" + (on ? " on" : ""), STAGES[i]));
+      ladder.appendChild(step);
+    });
+    if (c.status === "cited" || c.status === "verified" || c.status === "partially_verified") {
+      var how = METHOD[c.verification_method];
+      if (how) ladder.appendChild(el("div", "how", how));
+    }
+    card.appendChild(ladder);
+
+    // meta row: where / raw / cross-checks / flags
+    var meta = el("div", "meta");
+    var w = whereText(c);
+    if (w) {
+      var docName = docsById[c.data_source_id];
+      var label = (docName ? docName + " — " : "") + w;
+      var url = docUrlById[c.data_source_id];
+      var loc = c.location || {};
+      if (url && c.status !== "missing") {
+        // Open the source document; jump to the page for a PDF. #page is honored
+        // by the browser's native PDF viewer.
+        var href = url + (loc.kind === "pdf" && loc.page != null ? "#page=" + loc.page : "");
+        var a = el("a", "where where-link", label + " ↗");
+        a.href = href;
+        a.target = "_blank";
+        a.rel = "noopener";
+        meta.appendChild(a);
+      } else {
+        meta.appendChild(el("span", "where", label));
+      }
+    }
+    if (c.value && c.value.raw != null && String(c.value.raw) !== "") {
+      var raw = el("span", "raw");
+      raw.appendChild(document.createTextNode("as printed: "));
+      raw.appendChild(el("b", null, String(c.value.raw)));
+      meta.appendChild(raw);
+    }
+    if (c.same_fact_count) {
+      var x = el("span", "xcheck"); x.style.color = "var(--good)";
+      x.appendChild(document.createTextNode("✓ corroborated in " + c.same_fact_count + " other place" + (c.same_fact_count === 1 ? "" : "s")));
+      meta.appendChild(x);
+    }
+    if (c.contradicts) {
+      var xc = el("span", "xcheck"); xc.style.color = "var(--bad)";
+      xc.appendChild(document.createTextNode("⚠ conflicts with another figure"));
+      meta.appendChild(xc);
+    }
+    if (Array.isArray(c.flags) && c.flags.length) {
+      var fl = el("span", "flags");
+      c.flags.forEach(function (f) { fl.appendChild(el("span", "flag", String(f).replace(/_/g, " "))); });
+      meta.appendChild(fl);
+    }
+    if (meta.childNodes.length) card.appendChild(meta);
+    return card;
+  }
+
+  // ---- source link (shared by the trends + the cards) ---------------------
+  function sourceLink(c, labelText) {
+    var url = docUrlById[c.data_source_id];
+    var loc = c.location || {};
+    if (url && c.status !== "missing") {
+      var a = el("a", "src-link", labelText);
+      a.href = url + (loc.kind === "pdf" && loc.page != null ? "#page=" + loc.page : "");
+      a.target = "_blank"; a.rel = "noopener";
+      a.title = "Open source — " + (whereText(c) || "");
+      return a;
+    }
+    return el("span", null, labelText);
+  }
+
+  // ---- financial trends (per-subject canonical-metric time series) --------
+  // The parser's per-deal metric_order leads when present (which metrics matter
+  // most for THIS company); the canonical income-statement-then-balance-sheet
+  // order is the sector-neutral fallback for anything it omitted.
+  var CANON_ORDER = { revenue: 0, cogs: 1, gross_profit: 2, opex: 3, ebitda: 4,
+    ebitda_margin: 5, ebit: 6, net_income: 7, capex: 8, operating_cash_flow: 9,
+    cash_and_equivalents: 10, total_assets: 11, total_liabilities: 12,
+    total_equity: 13, total_debt: 14 };
+  var METRIC_RANK = {};
+  (function () {
+    var i = 0;
+    if (STRUCTURE && Array.isArray(STRUCTURE.metric_order))
+      STRUCTURE.metric_order.forEach(function (m) { if (m && METRIC_RANK[m] == null) METRIC_RANK[m] = i++; });
+    Object.keys(CANON_ORDER).sort(function (a, b) { return CANON_ORDER[a] - CANON_ORDER[b]; })
+      .forEach(function (m) { if (METRIC_RANK[m] == null) METRIC_RANK[m] = i++; });
+  })();
+  function metricRank(a) { return METRIC_RANK[a] == null ? 99 : METRIC_RANK[a]; }
+  function sparkline(nums) {
+    var NS = "http://www.w3.org/2000/svg";
+    var svg = document.createElementNS(NS, "svg");
+    svg.setAttribute("class", "spark"); svg.setAttribute("viewBox", "0 0 60 16");
+    svg.setAttribute("preserveAspectRatio", "none");
+    if (nums.length >= 2) {
+      var mn = Math.min.apply(null, nums), mx = Math.max.apply(null, nums), rng = (mx - mn) || 1;
+      var pts = nums.map(function (n, i) {
+        return (i / (nums.length - 1) * 58 + 1).toFixed(1) + "," + (15 - (n - mn) / rng * 14).toFixed(1);
+      }).join(" ");
+      var pl = document.createElementNS(NS, "polyline");
+      pl.setAttribute("points", pts); pl.setAttribute("fill", "none");
+      pl.setAttribute("stroke", "currentColor"); pl.setAttribute("stroke-width", "1.4");
+      svg.appendChild(pl);
+    }
+    return svg;
+  }
+  function buildTrends() {
+    var box = document.getElementById("trends");
+    box.textContent = "";
+    var series = {};   // subject||attribute -> {subject, attribute, years:{year->best claim}}
+    CLAIMS.forEach(function (c) {
+      if (!isCanonical(c.attribute) || c.period_year == null) return;
+      if (!c.value || typeof c.value.normalized !== "number") return;
+      var subj = subjectOf(c), key = subj + "||" + c.attribute;
+      var s = series[key] || (series[key] = { subject: subj, attribute: c.attribute, years: {} });
+      var prev = s.years[c.period_year];
+      if (!prev || (STATUS_RANK[c.status] || 0) > (STATUS_RANK[prev.status] || 0)) s.years[c.period_year] = c;
+    });
+    var bySubject = {};
+    Object.keys(series).forEach(function (k) {
+      var s = series[k];
+      if (Object.keys(s.years).length >= 2) (bySubject[s.subject] = bySubject[s.subject] || []).push(s);
+    });
+    var subjects = Object.keys(bySubject).sort(function (a, b) { return subjectRank(a) - subjectRank(b); });
+    if (!subjects.length) { box.classList.add("hidden"); return; }
+    box.classList.remove("hidden");
+    var head = el("div", "section-title");
+    head.appendChild(el("span", null, "Financial trends"));
+    head.appendChild(el("span", "section-note", "canonical metrics that appear across years — click a value to open its source"));
+    box.appendChild(head);
+    subjects.forEach(function (subj) {
+      var det = el("details", "trend-group"); if (subj === SUBJECT_ORDER[0]) det.open = true;
+      det.appendChild(el("summary", "trend-subj", subj));
+      var rows = el("div", "trend-rows");
+      bySubject[subj].sort(function (a, b) { return metricRank(a.attribute) - metricRank(b.attribute); });
+      bySubject[subj].forEach(function (s) {
+        var years = Object.keys(s.years).map(Number).sort(function (a, b) { return a - b; });
+        var row = el("div", "trend-row");
+        row.appendChild(el("div", "trend-metric", humanAttr(s.attribute)));
+        row.appendChild(sparkline(years.map(function (y) { return s.years[y].value.normalized; })));
+        var pts = el("div", "trend-points");
+        years.forEach(function (y) {
+          var c = s.years[y];
+          var pt = el("span", "trend-pt");
+          pt.appendChild(el("span", "trend-yr", "FY" + String(y).slice(2) + (c.period_kind && c.period_kind !== "A" ? "E" : "")));
+          pt.appendChild(sourceLink(c, fmtValue(c.value)));
+          pts.appendChild(pt);
+        });
+        row.appendChild(pts); rows.appendChild(row);
+      });
+      det.appendChild(rows); box.appendChild(det);
+    });
+  }
+
+  // ---- render: subject-grouped fact list + filters ------------------------
+  function passes(c) {
+    if (offStatuses[c.status]) return false;
+    if (docFilter && c.data_source_id !== docFilter) return false;
+    if (subjectFilter && subjectOf(c) !== subjectFilter) return false;
+    if (query) {
+      var hay = ((c.entity || "") + " " + (c.attribute || "") + " " + (c.attribute_raw || "") + " " +
+                 (c.section || "") + " " + (c.value ? (c.value.raw || "") : "")).toLowerCase();
+      if (hay.indexOf(query) === -1) return false;
+    }
+    return true;
+  }
+
+  function render() {
+    var groups = document.getElementById("groups");
+    groups.textContent = "";
+    var shown = 0;
+
+    var bySubj = {};
+    CLAIMS.forEach(function (c) {
+      if (!passes(c)) return;
+      shown++;
+      var s = subjectOf(c);
+      (bySubj[s] = bySubj[s] || []).push(c);
+    });
+
+    Object.keys(bySubj).sort(function (a, b) { return subjectRank(a) - subjectRank(b); }).forEach(function (subj) {
+      var list = bySubj[subj];
+      var gh = el("div", "group-h");
+      gh.appendChild(el("h2", null, subj));
+      gh.appendChild(el("span", "n", list.length + " fact" + (list.length === 1 ? "" : "s")));
+      groups.appendChild(gh);
+      // narrative (qualitative) sinks below the figures; within each, conflicts first.
+      list.sort(function (a, b) {
+        var ka = a.claim_kind === "qualitative" ? 1 : 0, kb = b.claim_kind === "qualitative" ? 1 : 0;
+        if (ka !== kb) return ka - kb;
+        var ra = STATUS_RANK[a.status] == null ? 9 : STATUS_RANK[a.status];
+        var rb = STATUS_RANK[b.status] == null ? 9 : STATUS_RANK[b.status];
+        return ra - rb;
+      });
+      list.forEach(function (c) { groups.appendChild(claimCard(c)); });
+    });
+
+    document.getElementById("empty").classList.toggle("hidden", shown > 0);
+    document.getElementById("showing").textContent = "Showing " + shown + " of " + CLAIMS.length;
+  }
+
+  document.getElementById("search").addEventListener("input", function (e) { query = e.target.value.trim().toLowerCase(); render(); });
+  document.getElementById("doc-filter").addEventListener("change", function (e) { docFilter = e.target.value; render(); });
+
+  var gen = DATA.generated_at ? new Date(DATA.generated_at) : null;
+  document.getElementById("footer").textContent =
+    "Every fact is derived live from the claims table and cited to its source. " +
+    (gen && !isNaN(gen) ? "Generated " + gen.toLocaleString() + "." : "");
+
+  buildTrends();
+  render();
+})();
+</script>
+</body>
+</html>

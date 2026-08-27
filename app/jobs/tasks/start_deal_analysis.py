@@ -37,6 +37,9 @@ from app.repo.AnalysisRunRepo import AnalysisRunRepo
 from app.repo.DataSourceRepo import DataSourceRepo
 from app.repo.DealRepo import DealRepo
 from app.repo.HumanAuditRepo import HumanAuditRepo
+from app.services.screening.mandate_rules import selected_rule_ids
+from app.services.screening.rulebook import load_rulebook
+from app.services.screening.workspace_config import load_workspace_config
 
 # D8/D9: worst case is N documents x (1800s parser timeout x 2 parser
 # retries), serialized on the parser's own concurrency:1 worker. Picked, not
@@ -176,6 +179,24 @@ async def start_deal_analysis(
         data_sources = await DataSourceRepo(session).list_for_deal(UUID(deal_id))
         usable = [ds for ds in data_sources if ds.status == "verified"]
 
+        # Path B: the org's approved mandate options, so the parser can classify
+        # each document's sector/HQ against the same expanded lists gs_07/gs_08
+        # check. Loaded once (org is fixed for this run); None when the org has no
+        # mandate policy for a dimension -> the parser reports the raw read only.
+        mandate = await load_workspace_config(session)
+
+        # Path B "search just in case": the SELECTED qualitative (llm) rules the
+        # parser should search each document for -- {rule_id, question} for every
+        # selected rule the rulebook marks `llm`. Mandate-gated, so a deal is only
+        # searched for the questions its org actually screens on; empty otherwise.
+        rulebook = load_rulebook()
+        selected = selected_rule_ids(rulebook, mandate)
+        screen_criteria = [
+            {"rule_id": r.id, "question": r.question}
+            for r in rulebook.rules
+            if r.id in selected and r.evaluator == "llm"
+        ]
+
         parse_jobs = list(run.parse_jobs or [])
         already_enqueued = {job["data_source_id"] for job in parse_jobs}
         for data_source in usable:
@@ -184,7 +205,12 @@ async def start_deal_analysis(
             # D12: known_sha256s is a duplicate-*rejection* list on the
             # parser's side -- never pass the document's own fingerprint.
             job_key = await enqueue_process_document_job(
-                data_source.storage_key, entity=deal.name, known_sha256s=None
+                data_source.storage_key,
+                entity=deal.name,
+                known_sha256s=None,
+                sector_options=mandate.approved_sectors,
+                geo_options=mandate.approved_geographies,
+                screen_criteria=screen_criteria,
             )
             parse_jobs.append(
                 {

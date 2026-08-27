@@ -13,6 +13,7 @@ services:
       - ./docker/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
     environment:
       DD_APP_PASSWORD: "${DD_APP_PASSWORD}"
+      DD_PUBLIC_PASSWORD: "${DD_PUBLIC_PASSWORD}"
     # The edoburu image MD5-hashes DB_PASSWORD before writing userlist.txt, which breaks
     # SCRAM-SHA-256 backend auth on DigitalOcean. We bypass its entrypoint and write the
     # plain text password ourselves so PgBouncer can compute the SCRAM response.
@@ -21,6 +22,7 @@ services:
       - -c
       - |
         printf '"dd_app" "%s"\n' "$$DD_APP_PASSWORD" > /etc/pgbouncer/userlist.txt
+        printf '"dd_public" "%s"\n' "$$DD_PUBLIC_PASSWORD" >> /etc/pgbouncer/userlist.txt
         exec /usr/bin/pgbouncer /etc/pgbouncer/pgbouncer.ini
     restart: unless-stopped
 
