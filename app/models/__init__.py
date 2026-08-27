@@ -17,6 +17,7 @@ from app.models.human_audit_log import HumanAuditLog
 from app.models.investment_profile import InvestmentProfile
 from app.models.mandate import Mandate, MandateCategory, MandateOptions
 from app.models.organisation import Funds, Organisation, Users
+from app.models.resolved_entity import ResolvedEntity
 from app.models.screening_result import ScreeningResult
 from app.models.session import Session
 
@@ -40,6 +41,7 @@ __all__ = [
     "Mandate",
     "MandateCategory",
     "MandateOptions",
+    "ResolvedEntity",
     "ScreeningResult",
     "Session",
     "Organisation",
