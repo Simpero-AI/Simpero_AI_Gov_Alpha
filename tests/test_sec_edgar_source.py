@@ -51,7 +51,11 @@ def _fake_fetch(facts: dict | None = None, *, fail_urls: tuple[str, ...] = ()):
 
 
 def _claim(
-    entity="Apple Inc.", attribute="revenue", period_year=2023, normalized=1000.0, unit="USD"
+    entity="Apple Inc.",
+    attribute="revenue",
+    period_year=2023,
+    normalized=1000.0,
+    unit: str | None = "USD",
 ) -> Claim:
     return Claim(
         entity=entity,
