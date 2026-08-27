@@ -10,9 +10,11 @@ from app.core.dependencies import get_claims, get_db
 from app.jobs.queue import get_queue
 from app.models.analysis_run import AnalysisRun
 from app.models.deal import Deal
+from app.models.entity_resolution import EntityResolution
 from app.repo.AnalysisRunRepo import AnalysisRunRepo
 from app.repo.DataSourceRepo import DataSourceRepo
 from app.repo.DealRepo import DealRepo
+from app.repo.EntityResolutionRepo import EntityResolutionRepo
 from app.repo.HumanAuditRepo import HumanAuditRepo
 from app.repo.ScreeningResultRepo import ScreeningResultRepo
 from app.repo.SessionRepo import SessionRepo
@@ -28,6 +30,8 @@ from app.schemas.deals import (
     DealRowResponse,
     DealStatusResponse,
     DealWithLatestMemoResponse,
+    EntityResolutionResponse,
+    FormerNameResponse,
     LatestMemoSessionResponse,
     LivePipelineRowResponse,
     PipelineStepResponse,
@@ -38,6 +42,8 @@ from app.schemas.deals import (
     ValueDelta,
 )
 from app.services.dashboard_stats import compute_month_bounds, compute_pipeline_value_delta
+from app.services.entity_resolution import get_resolver
+from app.services.entity_resolution.types import EntityResolutionError
 from app.services.memo_summary import derive_pipeline_metrics
 from app.services.pipeline_steps import no_job_steps
 from app.services.screening.rule_view import enrich_rule_results
@@ -510,6 +516,121 @@ async def _compute_deal_status(db: AsyncSession, deal_id: uuid.UUID) -> DealStat
         error_message=run.error_message,
         job_comments=run.job_comments,
     )
+
+
+def _entity_resolution_response(row: EntityResolution) -> EntityResolutionResponse:
+    return EntityResolutionResponse(
+        id=str(row.id),
+        deal_id=str(row.deal_id),
+        source=row.source,
+        # Validated against the Literal, so a status the DB CHECK allows but
+        # this schema does not fails loudly here rather than reaching a client.
+        status=row.status,  # pyright: ignore[reportArgumentType]
+        query_name=row.query_name,
+        registry_id=row.registry_id,
+        legal_name=row.legal_name,
+        # Stored shape == wire shape, so the persisted rows are validated
+        # rather than rebuilt field by field -- same call as rule_results.
+        former_names=[FormerNameResponse.model_validate(f) for f in (row.former_names or [])],
+        matched_on=row.matched_on,  # pyright: ignore[reportArgumentType]
+        reason=row.reason,
+        evidence=row.evidence,
+        created_at=row.created_at,
+    )
+
+
+@router.post(
+    "/{deal_id}/entity-resolution",
+    response_model=EntityResolutionResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def resolve_deal_entity(
+    deal_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    claims: dict[str, Any] = Depends(get_claims),
+) -> EntityResolutionResponse:
+    """SIM-262: resolve this deal's company to a registry anchor (SEC EDGAR
+    CIK) and record the attempt.
+
+    The front gate of corroboration -- SIM-408's harvest, SIM-253's reconcile
+    and SIM-254's roll-up all inherit this answer, so the resolver is
+    deliberately conservative: an ambiguous name resolves to `unresolved` and
+    checks nothing rather than guessing, because a wrong anchor poisons every
+    downstream check.
+
+    `not_found` is a 201 like any other outcome, not a 404. It is a real,
+    expected answer -- most private targets have no SEC filer -- and the row
+    recording that we looked is exactly as valuable as one recording a hit.
+    Absence is not contradiction.
+
+    Append-only: re-resolving a renamed or newly-filed company INSERTs a new
+    row, and the older rows stay as the record of how the answer changed.
+
+    Known tradeoff: the registry call happens inside this request's open
+    transaction, so a slow SEC pins a PgBouncer slot for its duration. Capped
+    by the resolver's 10s timeout (the 2026-08-16 spike ran ~2s) and fine at
+    Alpha volume. If it stops being fine, this moves to a job stage -- which
+    is SIM-253's call about pipeline placement anyway, not a decision to
+    pre-empt here.
+    """
+    org_id, actor_id, actor_email, _ = await _actor(db, claims)
+
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    try:
+        resolution = await get_resolver().resolve(deal.name)
+    except EntityResolutionError as exc:
+        # 502, not 500: the failure is upstream at SEC, and it is explicitly
+        # NOT a resolution outcome -- nothing is persisted, so a retry after
+        # the registry recovers is clean rather than appending an "error" row
+        # that later reads like a finding about the company.
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+    row = await EntityResolutionRepo(db).record(resolution, org_id=org_id, deal_id=deal_id)
+    await db.flush()
+
+    await HumanAuditRepo(db).append(
+        {
+            "org_id": org_id,
+            "actor_id": actor_id,
+            "actor_email": actor_email,
+            "event_type": "deal_entity_resolved",
+            "deal_id": deal_id,
+            # The full resolution, so the append-only trail carries the
+            # evidence independently of the entity_resolution table.
+            "payload": resolution.to_json(),
+        }
+    )
+
+    return _entity_resolution_response(row)
+
+
+@router.get("/{deal_id}/entity-resolution", response_model=EntityResolutionResponse)
+async def get_deal_entity_resolution(
+    deal_id: uuid.UUID, db: AsyncSession = Depends(get_db)
+) -> EntityResolutionResponse:
+    """SIM-262: the deal's most recent entity-resolution attempt.
+
+    404 distinguishes the two real cases in its detail: no such deal, versus a
+    deal nobody has tried to resolve yet. A deal that WAS resolved and came
+    back `not_found` is a 200 carrying that status -- "we looked and found
+    nothing" is an answer, and collapsing it into a 404 would make it
+    indistinguishable from "we never looked".
+    """
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    row = await EntityResolutionRepo(db).latest_for_deal(deal_id)
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="This deal's entity has not been resolved yet",
+        )
+
+    return _entity_resolution_response(row)
 
 
 @router.get("/{deal_id}/documents", response_model=list[DealDocumentResponse])

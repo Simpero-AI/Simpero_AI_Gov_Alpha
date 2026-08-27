@@ -12,6 +12,7 @@ from app.models.deal_intake_link import DealIntakeLink
 from app.models.deal_intake_question import DealIntakeQuestion
 from app.models.deal_intake_response import DealIntakeResponse
 from app.models.edge import Edge
+from app.models.entity_resolution import EntityResolution
 from app.models.human_audit_log import HumanAuditLog
 from app.models.investment_profile import InvestmentProfile
 from app.models.mandate import Mandate, MandateCategory, MandateOptions
@@ -33,6 +34,7 @@ __all__ = [
     "DealIntakeQuestion",
     "DealIntakeResponse",
     "Edge",
+    "EntityResolution",
     "HumanAuditLog",
     "InvestmentProfile",
     "Mandate",
