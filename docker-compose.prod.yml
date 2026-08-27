@@ -16,6 +16,7 @@ services:
     image: edoburu/pgbouncer:latest
     environment:
       DD_APP_PASSWORD: "${DD_APP_PASSWORD}"
+      DD_PUBLIC_PASSWORD: "${DD_PUBLIC_PASSWORD}"
     # Only docker-compose.prod.yml, Caddyfile, and .env live on the droplet
     # (no repo checkout — see docs/plans/do-droplet-deployment.md §1), so
     # pgbouncer.ini can't be a mounted file here the way the root dev compose
@@ -45,6 +46,7 @@ services:
         log_disconnections = 1
         EOF
         printf '"dd_app" "%s"\n' "$$DD_APP_PASSWORD" > /etc/pgbouncer/userlist.txt
+        printf '"dd_public" "%s"\n' "$$DD_PUBLIC_PASSWORD" >> /etc/pgbouncer/userlist.txt
         exec /usr/bin/pgbouncer /etc/pgbouncer/pgbouncer.ini
     env_file:
       - .env

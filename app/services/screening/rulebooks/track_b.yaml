@@ -1,12 +1,19 @@
 # Track B screener rulebook (SIM-401) -- 21 rules as versioned data.
 #
-# SCOPE 2026-08-14 (deterministic, CIM-only): `evaluator` is one of
-#   deterministic -> runs (pure code over claims + intake deal fields)
+# SCOPE: `evaluator` is one of
+#   deterministic -> pure code over claims + intake deal fields
+#   llm           -> grounded document search (Path B "search just in case"):
+#                    the parser assesses the SELECTED rule's question against the
+#                    parsed document and returns a quote-backed Y/N or unknown;
+#                    the backend's document evaluator surfaces it. Runs only when
+#                    the rule is selected in the mandate (mandate-gated screening).
+#   external      -> needs a source outside the document (OFAC, litigation
+#                    search); still out of scope -> "No evidence" (unknown).
 #   none          -> out of scope; resolves to "No evidence found in the
-#                    documents" (unknown), no evaluation. LLM/external/hybrid
-#                    rules are descoped (SIM-405/406) and set to `none`.
-# Assessable: gs_03, gs_04, gs_07, gs_08, db_04, db_07, plus db_01/db_02 as
-# deterministic gate-only advisories (surface the figure, never auto-decline).
+#                    documents" (unknown), no evaluation.
+# Deterministic: gs_03, gs_04, gs_07, gs_08, db_04, db_07, plus db_01/db_02 as
+# gate-only advisories (surface the figure, never auto-decline). Document (llm):
+# gs_01, gs_02, gs_05, gs_06, gs_09, gs_10, db_03, db_06, db_10.
 version: track_b.v1
 track: B
 rules:
@@ -14,12 +21,12 @@ rules:
   - id: gs_01
     kind: green_signal
     question: "Founder(s) full-time on the business"
-    evaluator: none
+    evaluator: llm
     evidence: {chunks: "founder role / time commitment"}
   - id: gs_02
     kind: green_signal
     question: "Founder signed 5+ year hold commitment"
-    evaluator: none
+    evaluator: llm
     evidence: {chunks: "founder hold / lock-up / commitment terms"}
   - id: gs_03
     kind: green_signal
@@ -36,12 +43,12 @@ rules:
   - id: gs_05
     kind: green_signal
     question: "Product/IP fully owned by company"
-    evaluator: none
+    evaluator: llm
     evidence: {chunks: "IP ownership / assignment"}
   - id: gs_06
     kind: green_signal
     question: "Founder retains >=10% equity post-close"
-    evaluator: none
+    evaluator: llm
     evidence: {chunks: "founder equity / post-close ownership"}
   - id: gs_07
     kind: green_signal
@@ -58,12 +65,12 @@ rules:
   - id: gs_09
     kind: green_signal
     question: "Clean cap table, no unresolved SAFEs/notes with blocking terms"
-    evaluator: none
+    evaluator: llm
     evidence: {chunks: "cap table / SAFEs / convertible notes / terms"}
   - id: gs_10
     kind: green_signal
     question: "At least one outside advisor or board observer in place"
-    evaluator: none
+    evaluator: llm
     evidence: {chunks: "board / advisors / governance"}
   - id: gs_11
     kind: green_signal
@@ -88,7 +95,7 @@ rules:
   - id: db_03
     kind: deal_breaker
     question: "Founder seeking full exit within 24 months"
-    evaluator: none
+    evaluator: llm
     evidence: {chunks: "founder exit / transition / succession"}
   - id: db_04
     kind: deal_breaker
@@ -104,7 +111,7 @@ rules:
   - id: db_06
     kind: deal_breaker
     question: "IP owned by third party, not company"
-    evaluator: none
+    evaluator: llm
     evidence: {chunks: "IP ownership / assignment"}
   - id: db_07
     kind: deal_breaker
@@ -126,5 +133,5 @@ rules:
   - id: db_10
     kind: deal_breaker
     question: "Cap table has unresolved control/blocking rights for a non-founder holder"
-    evaluator: none
+    evaluator: llm
     evidence: {chunks: "control rights / blocking / protective provisions / board control"}

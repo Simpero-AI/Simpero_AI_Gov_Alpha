@@ -77,6 +77,22 @@ def presign_put(key: str, ttl_seconds: int) -> str:
     )
 
 
+def presign_get(key: str, ttl_seconds: int, *, content_type: str | None = None) -> str:
+    """A short-lived signed GET URL for reading an object back -- used to let the
+    Pipeline Inspector open a claim's source document straight from the browser
+    (the inspector page is a detached blob with no auth context, so it can't call
+    an authed endpoint; a self-authorizing signed URL is the fit). `content_type`
+    forces inline rendering (e.g. "application/pdf" so the browser's PDF viewer
+    opens it and honors a #page=N anchor) instead of a download.
+    """
+    settings = get_settings()
+    params: dict[str, str] = {"Bucket": settings.spaces_bucket, "Key": key}
+    if content_type is not None:
+        params["ResponseContentType"] = content_type
+        params["ResponseContentDisposition"] = "inline"
+    return _client().generate_presigned_url("get_object", Params=params, ExpiresIn=ttl_seconds)
+
+
 def head_object(key: str) -> bool:
     """Existence check used at /complete to confirm the presigned PUT
     actually happened before a data_source row is created. A missing object
