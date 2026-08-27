@@ -13,10 +13,12 @@ import uuid
 
 from app.models import Claim
 from app.repo.DealRepo import DealRepo
-from app.repo.InvestmentProfileRepo import InvestmentProfileRepo
+from app.repo.MandateCategoryRepo import MandateCategoryRepo
+from app.repo.MandateOptionsRepo import MandateOptionsRepo
+from app.repo.MandateRepo import MandateRepo
 from app.services.screening.evaluators.deterministic import EVALUATORS
 from app.services.screening.rulebook import load_rulebook
-from app.services.screening.types import ClaimRef, RuleResult
+from app.services.screening.types import ClaimRef, DealField, RuleResult
 
 RULEBOOK = load_rulebook()
 
@@ -30,6 +32,35 @@ async def _seed_deal(db_session, org_a_id, **fields):
     deal = await DealRepo(db_session).create({"org_id": org_a_id, "name": "Test Deal", **fields})
     await db_session.flush()
     return deal
+
+
+async def _seed_mandate(db_session, org_a_id, user_a_id, slug: str, *options: str):
+    """gs_07/gs_08's workspace config, seeded the way the product actually
+    stores it since SIM-414: a taxonomy category (matched by its immutable
+    slug) plus the org's own `mandates` row selecting options out of it.
+    Display names are uuid-suffixed because mandate_categories.category is
+    globally unique and the taxonomy tables have no org scoping."""
+    category = await MandateCategoryRepo(db_session).create(
+        {"category": f"{slug} {uuid.uuid4().hex[:8]}", "slug": slug}
+    )
+    await db_session.flush()
+
+    items = []
+    for option in options:
+        row = await MandateOptionsRepo(db_session).create(
+            {"category_id": category.id, "option": option}
+        )
+        await db_session.flush()
+        items.append({"option": option, "option_id": str(row.id)})
+
+    await MandateRepo(db_session).create(
+        {
+            "org_id": org_a_id,
+            "user_id": user_a_id,
+            "mandate": [{"category_id": str(category.id), "slug": slug, "options": items}],
+        }
+    )
+    await db_session.flush()
 
 
 def _claim(
@@ -267,22 +298,45 @@ async def test_db_07_unknown_when_not_extracted(db_session, org_a_id):
 # --- gs_07: HQ geography ----------------------------------------------------
 
 
-async def test_gs_07_y_when_in_approved_list(db_session, org_a_id):
-    await InvestmentProfileRepo(db_session).create(
-        {"org_id": org_a_id, "mandate": {"approved_geographies": ["US", "CA"]}}
-    )
-    deal = await _seed_deal(db_session, org_a_id, hq_geography="US")
+async def test_gs_07_y_when_in_approved_list(db_session, org_a_id, user_a_id):
+    await _seed_mandate(db_session, org_a_id, user_a_id, "geographies", "United States", "Canada")
+    deal = await _seed_deal(db_session, org_a_id, hq_geography="United States")
     await db_session.flush()
 
     result = await _evaluate("gs_07", db_session, deal)
     assert result.verdict == "Y"
 
 
-async def test_gs_07_n_when_not_in_approved_list(db_session, org_a_id):
-    await InvestmentProfileRepo(db_session).create(
-        {"org_id": org_a_id, "mandate": {"approved_geographies": ["US", "CA"]}}
-    )
-    deal = await _seed_deal(db_session, org_a_id, hq_geography="FR")
+async def test_gs_07_n_when_not_in_approved_list(db_session, org_a_id, user_a_id):
+    await _seed_mandate(db_session, org_a_id, user_a_id, "geographies", "United States", "Canada")
+    deal = await _seed_deal(db_session, org_a_id, hq_geography="France")
+    await db_session.flush()
+
+    result = await _evaluate("gs_07", db_session, deal)
+    assert result.verdict == "N"
+
+
+async def test_gs_07_matches_case_and_whitespace_insensitively(db_session, org_a_id, user_a_id):
+    """The deal form and the mandate taxonomy are separate free-text
+    vocabularies (SIM-402); folding is what stops a capitalisation difference
+    reading as a deliberate policy N."""
+    await _seed_mandate(db_session, org_a_id, user_a_id, "geographies", "Canada")
+    deal = await _seed_deal(db_session, org_a_id, hq_geography="  canada ")
+    await db_session.flush()
+
+    result = await _evaluate("gs_07", db_session, deal)
+    assert result.verdict == "Y"
+    # ...but the evidence keeps the RAW deal string. Do not "helpfully"
+    # normalize this later: the audit trail records what the deal says.
+    assert result.evidence == DealField("hq_geography", "  canada ")
+
+
+async def test_gs_07_does_not_alias_country_codes(db_session, org_a_id, user_a_id):
+    """Deliberate non-goal: no synonym table. "US" against an approved
+    "United States" is an N, and the fix is a shared vocabulary, not an alias
+    map in application code."""
+    await _seed_mandate(db_session, org_a_id, user_a_id, "geographies", "United States")
+    deal = await _seed_deal(db_session, org_a_id, hq_geography="US")
     await db_session.flush()
 
     result = await _evaluate("gs_07", db_session, deal)
@@ -293,6 +347,7 @@ async def test_gs_07_unknown_when_hq_geography_unset(db_session, org_a_id):
     deal = await _seed_deal(db_session, org_a_id)
     result = await _evaluate("gs_07", db_session, deal)
     assert result.verdict == "unknown"
+    assert "hq_geography not set" in _reason(result)
 
 
 async def test_gs_07_unknown_when_workspace_config_missing(db_session, org_a_id):
@@ -301,24 +356,64 @@ async def test_gs_07_unknown_when_workspace_config_missing(db_session, org_a_id)
     deal = await _seed_deal(db_session, org_a_id, hq_geography="US")
     result = await _evaluate("gs_07", db_session, deal)
     assert result.verdict == "unknown"
+    assert "mandate" in _reason(result)
+
+
+async def test_gs_07_unknown_when_the_mandate_skipped_geographies(db_session, org_a_id, user_a_id):
+    """A firm that filled in sectors and never opened geographies has set no
+    geography policy -- resolving that to N would auto-fail every deal against
+    a policy nobody wrote."""
+    await _seed_mandate(db_session, org_a_id, user_a_id, "target_sectors", "SaaS")
+    deal = await _seed_deal(db_session, org_a_id, hq_geography="Canada")
+    await db_session.flush()
+
+    result = await _evaluate("gs_07", db_session, deal)
+    assert result.verdict == "unknown"
 
 
 # --- gs_08: approved sector -------------------------------------------------
 
 
-async def test_gs_08_y_when_in_approved_list(db_session, org_a_id):
-    await InvestmentProfileRepo(db_session).create(
-        {"org_id": org_a_id, "mandate": {"approved_sectors": ["saas", "fintech"]}}
-    )
+async def test_gs_08_y_when_in_approved_list(db_session, org_a_id, user_a_id):
+    await _seed_mandate(db_session, org_a_id, user_a_id, "target_sectors", "SaaS", "Fintech")
     deal = await _seed_deal(db_session, org_a_id, sector="saas")
     await db_session.flush()
 
     result = await _evaluate("gs_08", db_session, deal)
     assert result.verdict == "Y"
+    assert result.evidence == DealField("sector", "saas")
+
+
+async def test_gs_08_n_when_not_in_approved_list(db_session, org_a_id, user_a_id):
+    await _seed_mandate(db_session, org_a_id, user_a_id, "target_sectors", "SaaS", "Fintech")
+    deal = await _seed_deal(db_session, org_a_id, sector="biotech")
+    await db_session.flush()
+
+    result = await _evaluate("gs_08", db_session, deal)
+    assert result.verdict == "N"
 
 
 async def test_gs_08_unknown_when_sector_unset(db_session, org_a_id):
     deal = await _seed_deal(db_session, org_a_id)
+    result = await _evaluate("gs_08", db_session, deal)
+    assert result.verdict == "unknown"
+
+
+async def test_gs_08_unknown_when_the_category_is_present_but_empty(
+    db_session, org_a_id, user_a_id
+):
+    """An empty options list is indistinguishable from "the Builder rendered
+    the category and nothing was ticked" -- unknown, not a blanket N."""
+    await MandateRepo(db_session).create(
+        {
+            "org_id": org_a_id,
+            "user_id": user_a_id,
+            "mandate": [{"slug": "target_sectors", "options": []}],
+        }
+    )
+    deal = await _seed_deal(db_session, org_a_id, sector="saas")
+    await db_session.flush()
+
     result = await _evaluate("gs_08", db_session, deal)
     assert result.verdict == "unknown"
 

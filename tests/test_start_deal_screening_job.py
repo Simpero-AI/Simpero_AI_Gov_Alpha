@@ -98,7 +98,12 @@ def _audit_events(owner_conn, org_pk: int) -> list[str]:
 # --- the happy paths --------------------------------------------------------
 
 
-async def test_prohibited_sector_writes_an_auto_decline_result(owner_conn, seeded_org):
+async def test_prohibited_sector_writes_an_auto_decline_result(owner_conn, seeded_org, monkeypatch):
+    # The firm selected the prohibited-sector deal-breaker in its mandate, so
+    # db_04 is screened. (The real mandate -> rule-id path is covered end to end
+    # in test_screening_reads_the_mandate.py; here the selection is stubbed so
+    # the test stays about the job wiring the engine to the persisted record.)
+    monkeypatch.setattr(job_module, "selected_rule_ids", lambda rulebook, config: {"db_04"})
     deal_id = _seed_deal(owner_conn, seeded_org["org_pk"], sector="cannabis")
     run_id = _seed_screening_run(owner_conn, seeded_org["org_pk"], deal_id)
 
@@ -131,9 +136,15 @@ async def test_prohibited_sector_writes_an_auto_decline_result(owner_conn, seede
     assert run["job_comments"] is None
 
 
-async def test_a_bare_deal_reaches_human_review(owner_conn, seeded_org):
-    """No claims, no metadata: every rule is `unknown`, which is neither an
-    auto-decline nor a green light."""
+async def test_selected_rules_with_no_evidence_reach_human_review(
+    owner_conn, seeded_org, monkeypatch
+):
+    """A deal with no claims/metadata leaves every SELECTED rule `unknown`,
+    which is neither an auto-decline nor a green light. Only the selected rules
+    are screened (not the whole rulebook)."""
+    monkeypatch.setattr(
+        job_module, "selected_rule_ids", lambda rulebook, config: {"gs_03", "gs_04", "db_02"}
+    )
     deal_id = _seed_deal(owner_conn, seeded_org["org_pk"])
     run_id = _seed_screening_run(owner_conn, seeded_org["org_pk"], deal_id)
 
@@ -143,7 +154,7 @@ async def test_a_bare_deal_reaches_human_review(owner_conn, seeded_org):
 
     results = _fetch_results(owner_conn, seeded_org["org_pk"])
     assert results[0]["recommendation"] == "human_review"
-    assert len(results[0]["rule_results"]) == 21
+    assert {r["rule_id"] for r in results[0]["rule_results"]} == {"gs_03", "gs_04", "db_02"}
     assert all(r["verdict"] == "unknown" for r in results[0]["rule_results"])
     # An `unknown` carries no evidence and zero confidence -- never the 1.0
     # default, which would read as certainty in the audit trail.
@@ -151,9 +162,12 @@ async def test_a_bare_deal_reaches_human_review(owner_conn, seeded_org):
     assert all(r["confidence"] == 0.0 for r in results[0]["rule_results"])
 
 
-async def test_the_audit_payload_carries_the_full_per_rule_detail(owner_conn, seeded_org):
+async def test_the_audit_payload_carries_the_full_per_rule_detail(
+    owner_conn, seeded_org, monkeypatch
+):
     """The append-only trail must stand on its own -- screening_result is a
     separate table that a future DDL change could alter."""
+    monkeypatch.setattr(job_module, "selected_rule_ids", lambda rulebook, config: {"db_04"})
     deal_id = _seed_deal(owner_conn, seeded_org["org_pk"], sector="gambling")
     run_id = _seed_screening_run(owner_conn, seeded_org["org_pk"], deal_id)
 
@@ -252,6 +266,35 @@ async def test_a_missing_run_raises(seeded_org):
         await job_module.start_deal_screening(
             {}, analysis_run_id=str(uuid.uuid4()), clerk_org_id=seeded_org["clerk_org_id"]
         )
+
+
+async def test_a_midjob_failure_durably_marks_run_failed(owner_conn, seeded_org, monkeypatch):
+    """A raise anywhere in the screening work must land the run at a terminal
+    `failed` status recorded in a FRESH transaction -- NOT roll back the
+    in_progress marker to `queued` and leave the run non-terminal, which makes
+    GET /deals/{id}/status report `processing` forever and hangs the frontend
+    on "loading results". Proven by results=[] (the work transaction rolled
+    back) AND status=failed (the wrapper's separate transaction committed).
+    Mirrors test_start_deal_verification_job's durable-failure test."""
+    deal_id = _seed_deal(owner_conn, seeded_org["org_pk"], sector="cannabis")
+    run_id = _seed_screening_run(owner_conn, seeded_org["org_pk"], deal_id)
+
+    async def boom(session, deal, rulebook=None, *, only_rule_ids=None):
+        raise RuntimeError("screen exploded")
+
+    monkeypatch.setattr(job_module, "screen_deal", boom)
+
+    with pytest.raises(RuntimeError, match="screen exploded"):
+        await job_module.start_deal_screening(
+            {}, analysis_run_id=run_id, clerk_org_id=seeded_org["clerk_org_id"]
+        )
+
+    run = _fetch_run(owner_conn, run_id)
+    assert run["status"] == "failed"
+    assert run["error_message"] == "screening failed: RuntimeError"
+    # Work transaction rolled back -> no result row; the failed status came
+    # from the wrapper's separate transaction, not this one.
+    assert _fetch_results(owner_conn, seeded_org["org_pk"]) == []
 
 
 async def test_a_run_cannot_outlive_its_deal(owner_conn, seeded_org):

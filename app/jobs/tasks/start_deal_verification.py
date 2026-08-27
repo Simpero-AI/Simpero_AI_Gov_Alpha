@@ -39,6 +39,7 @@ import json
 import logging
 from collections import Counter
 from pathlib import Path
+from typing import Any
 from uuid import UUID, uuid4
 
 from saq.types import Context
@@ -48,9 +49,17 @@ from app.core.database import AsyncSessionLocal
 from app.jobs.queue import get_queue
 from app.models import Claim, Edge
 from app.repo.AnalysisRunRepo import AnalysisRunRepo
+from app.repo.DealRepo import DealRepo
 from app.repo.HumanAuditRepo import HumanAuditRepo
 from app.services.consistency import reconcile_consistency
-from app.services.corroboration import CORROBORATABLE_STATUSES
+from app.services.corroboration import (
+    CORROBORATABLE_STATUSES,
+    CORROBORATION_SOURCES,
+    run_corroboration,
+)
+from app.services.dashboard_structure import merge_dashboard_structures
+from app.services.deal_profile import deal_profile_updates
+from app.services.qualitative_findings import merge_qualitative_findings
 from app.services.reconciliation import reconcile_same_fact
 from app.services.span_promotion import promote_exact_span
 from app.services.status_rollup import roll_up_deal
@@ -104,6 +113,7 @@ def _row_from_claim(claim: dict, *, org_id: int, deal_id: UUID, data_source_id: 
         data_source_id=data_source_id,
         entity=claim["entity"],
         attribute=claim["attribute"],
+        attribute_raw=claim.get("attribute_raw"),
         claim_ref=claim.get("claim_ref"),
         claim_type=claim.get("claim_type", "unknown"),
         value=claim["value"],
@@ -257,12 +267,27 @@ async def _run_verification(
 
         job_comments: list[dict] = []
         verified_data_source_ids: list[UUID] = []
+        deal_profiles: list[dict | None] = []
+        qualitative_findings: list[dict] = []
+        dashboard_structures: list[dict | None] = []
 
         for job in usable_jobs:
             data_source_id = UUID(job["data_source_id"])
             envelope = get_json_object(job["bucket"], job["key"])
             claims = envelope.get("claims", [])
             _validate_claims(claims)
+            # Path B: the parser's per-document sector/HQ classification (may be
+            # None). Merged after the loop into deal.sector/hq_geography so
+            # gs_07/gs_08 have something to screen.
+            deal_profiles.append(envelope.get("deal_profile"))
+            # Path B "search just in case": per-document grounded verdicts for the
+            # selected qualitative (llm) rules. Merged after the loop into
+            # deal.qualitative_findings for the document evaluators.
+            qualitative_findings.append(envelope.get("qualitative_findings") or {})
+            # Pipeline Inspector: the parser's per-document organizing pass (may be
+            # None). Merged after the loop into deal.dashboard_structure so the
+            # Inspector renders subjects/metric order instead of hardcoding them.
+            dashboard_structures.append(envelope.get("dashboard_structure"))
 
             # ponytail: insert-only, not idempotent against a redelivered/
             # retried job (inherits ingest_claims.py's SIM-367 gap -- a crash
@@ -294,6 +319,20 @@ async def _run_verification(
                     f"from extraction, {len(skipped_edges)} edge(s) skipped.",
                 }
             )
+
+        # Path B: write the deal's sector/HQ from the documents' classification so
+        # gs_07/gs_08 can screen them, and the merged qualitative findings so the
+        # document evaluators (gs_01/db_03/...) can. Conservative -- only resolvable
+        # dimensions/agreed verdicts are set; a no-op when nothing resolved.
+        deal_updates: dict[str, Any] = dict(deal_profile_updates(deal_profiles))
+        merged_findings = merge_qualitative_findings(qualitative_findings)
+        if merged_findings:
+            deal_updates["qualitative_findings"] = merged_findings
+        merged_structure = merge_dashboard_structures(dashboard_structures)
+        if merged_structure is not None:
+            deal_updates["dashboard_structure"] = merged_structure
+        if deal_updates:
+            await DealRepo(session).update(deal_uuid, deal_updates)
 
         for data_source_id in verified_data_source_ids:
             # SIM-412 first: the parser leaves every PDF claim at `proposed`,
@@ -350,6 +389,14 @@ async def _run_verification(
             .where(Claim.status.in_(sorted(CORROBORATABLE_STATUSES)))
         )
         rollup_claims = list((await session.scalars(rollup_stmt)).all())
+        # SIM-415: the external corroboration pass runs HERE -- after the claims
+        # are cited/reconciled, before the roll-up -- so the roll-up reads the
+        # events it writes (agree -> has_agreement, disagree -> conflicted).
+        # CORROBORATION_SOURCES is empty until the per-source adapters (SIM-416+)
+        # register, so this is a no-op today; the flush below makes any events it
+        # does write visible to roll_up_deal's own SELECT (autoflush=False).
+        await run_corroboration(session, rollup_claims, CORROBORATION_SOURCES)
+        await session.flush()
         # Batched, not one roll_up_status call per claim: on a large deal that
         # was ~2 sequential round-trips per cited claim (the corroboration-event
         # lookup + the contradicts-edge lookup), the round-trip-per-item pattern
