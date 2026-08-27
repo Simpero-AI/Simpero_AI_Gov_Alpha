@@ -73,3 +73,31 @@ class EntityResolutionRepo(BaseRepo[EntityResolution, dict]):
             .limit(1)
         )
         return result.scalars().first()
+
+    async def latest_per_source_for_deal(self, deal_id: uuid.UUID) -> list[EntityResolution]:
+        """The most recent attempt from EACH registry that has answered for
+        this deal, newest first.
+
+        `latest_for_deal` above answers "what is the current anchor" from the
+        single newest row, which is the right question while one registry
+        exists. The fold in app/services/entity_resolution/resolved.py needs the
+        other question -- "what does every registry say" -- because a deal can
+        legitimately hold a SEC CIK *and* an ISED corporationId, and taking only
+        the newest row would drop whichever registry answered first.
+
+        DISTINCT ON (source) with the same total ordering as latest_for_deal, so
+        a superseded attempt never wins over the one that replaced it, and two
+        rows written in the same transaction still order deterministically
+        (created_at is a clock_timestamp(); `id` is a stability tiebreak only).
+        """
+        result = await self.session.execute(
+            select(EntityResolution)
+            .where(EntityResolution.deal_id == deal_id)
+            .distinct(EntityResolution.source)
+            .order_by(
+                EntityResolution.source,
+                EntityResolution.created_at.desc(),
+                EntityResolution.id.desc(),
+            )
+        )
+        return list(result.scalars().all())

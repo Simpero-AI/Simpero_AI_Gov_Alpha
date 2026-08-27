@@ -8,6 +8,12 @@ app/services/embedding.py's `get_embedder`.
 SEC EDGAR is first and alone deliberately: it is keyless (User-Agent only), so
 it needs no provisioning, and CIK is the anchor SIM-408's harvest adapter is
 built around.
+
+SIM-420's fold (`resolved.py`) is deliberately NOT re-exported here. It reads
+through app/repo/, and app/repo/EntityResolutionRepo.py already imports this
+package's `types` -- re-exporting would close that into an import cycle.
+Corroboration adapters import it by module:
+`from app.services.entity_resolution.resolved import load_resolved_entity`.
 """
 
 from functools import lru_cache
