@@ -330,12 +330,27 @@ async def test_matching_incorporation_year_agrees() -> None:
 
 
 async def test_a_wrong_incorporation_year_disagrees() -> None:
+    """A claim that unambiguously names the INCORPORATION year -- no founding
+    language, in the label or the value -- and disagrees with the register is a
+    genuine conflict."""
     src = IsedCorporationsSource(fetch=_fetch(ised_detail=_ised_record(incorporated="2019-05-14")))
-    verdict = await src.check(_FakeSession(_entity()), _claim(raw="Founded 2015"))
+    claim = _claim(attribute="Date of incorporation", raw="2015")
+    verdict = await src.check(_FakeSession(_entity()), claim)
 
     assert verdict is not None and verdict.agrees is False
-    assert verdict.result["claim_value"] == "Founded 2015"
     assert verdict.result["registry_value"] == 2019
+
+
+async def test_a_founding_year_that_predates_incorporation_is_no_signal() -> None:
+    """ "Founded 2015, incorporated 2019" is an ordinary true statement: a company
+    routinely operates before it incorporates, so a founding year that differs
+    from the incorporation year is declined rather than flagged. The founding
+    sense is read from the value's wording ("Founded") even under an
+    "Incorporated" label, and from a founding label directly."""
+    src = IsedCorporationsSource(fetch=_fetch(ised_detail=_ised_record(incorporated="2019-05-14")))
+    assert await src.check(_FakeSession(_entity()), _claim(raw="Founded 2015")) is None
+    founding = _claim(attribute="Year founded", raw="2015")
+    assert await src.check(_FakeSession(_entity()), founding) is None
 
 
 async def test_a_year_range_in_the_claim_is_no_signal() -> None:
@@ -418,9 +433,20 @@ async def test_a_claim_naming_two_places_is_no_signal() -> None:
     assert await src.check(_FakeSession(_entity()), claim) is None
 
 
-async def test_an_hq_province_mismatch_disagrees() -> None:
+async def test_an_operating_hq_province_mismatch_is_no_signal() -> None:
+    """An operating head office in a different province from the registered
+    office is ordinary -- the registered office is often a law firm's -- so the
+    difference is declined rather than flagged as a conflict."""
     src = IsedCorporationsSource(fetch=_fetch(ised_detail=_ised_record(province="BC")))
     claim = _claim(attribute="Head office", raw="Toronto, Ontario")
+    assert await src.check(_FakeSession(_entity()), claim) is None
+
+
+async def test_a_registered_office_province_mismatch_disagrees() -> None:
+    """The one HQ label that hard-compares: a deck stating the legal REGISTERED
+    office is in a province the register contradicts is a genuine conflict."""
+    src = IsedCorporationsSource(fetch=_fetch(ised_detail=_ised_record(province="BC")))
+    claim = _claim(attribute="Registered office", raw="Toronto, Ontario")
 
     verdict = await src.check(_FakeSession(_entity()), claim)
 
@@ -447,11 +473,31 @@ async def test_a_us_headquarters_is_no_signal_not_a_conflict() -> None:
 
 
 async def test_a_province_name_inside_a_city_name_is_not_a_province() -> None:
-    """Token matching, not substring: "on" is Ontario standing alone and
-    nothing at all inside "Toronto"."""
+    """Token matching, not substring: "on" is nothing at all inside "Toronto"."""
     src = IsedCorporationsSource(fetch=_fetch(ised_detail=_ised_record(province="ON")))
     claim = _claim(attribute="Head office", raw="Toronto")
     assert await src.check(_FakeSession(_entity()), claim) is None
+
+
+async def test_a_two_letter_code_as_a_preposition_is_not_a_province() -> None:
+    """ "on" standing in prose is the English preposition, not Ontario -- an
+    ordinary Vancouver address must not read as an Ontario-vs-BC conflict. Even
+    under the registered-office label, which does hard-compare, no province is
+    found in "on"."""
+    src = IsedCorporationsSource(fetch=_fetch(ised_detail=_ised_record(province="BC")))
+    claim = _claim(attribute="Registered office", raw="Located on Granville Street")
+    assert await src.check(_FakeSession(_entity()), claim) is None
+
+
+async def test_a_comma_form_two_letter_province_code_is_recognized() -> None:
+    """A two-letter code IS a province in the register's "City, BC" comma form,
+    so real registered-office data still corroborates."""
+    src = IsedCorporationsSource(fetch=_fetch(ised_detail=_ised_record(province="BC")))
+    claim = _claim(attribute="Registered office", raw="Vancouver, BC")
+
+    verdict = await src.check(_FakeSession(_entity()), claim)
+
+    assert verdict is not None and verdict.agrees is True
 
 
 async def test_good_standing_is_reported_but_never_drives_the_verdict() -> None:
