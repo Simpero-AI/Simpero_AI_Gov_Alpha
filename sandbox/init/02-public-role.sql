@@ -1,0 +1,31 @@
+-- Local sandbox: create the public (external, unauthenticated) role,
+-- mirroring the DigitalOcean cluster.
+--
+-- dd_public is the third Postgres login role (alongside doadmin and dd_app):
+-- the RLS-restricted role the External Deal Intake Link feature's
+-- unauthenticated routes connect as. Unlike dd_app (scoped to one org via
+-- `app.org_id`), dd_public is scoped by a "keyhole" -- a link token/session
+-- JWT rather than a Clerk org claim -- since an external request carries no
+-- Clerk JWT at all. See docs/plans/external-deal-intake-link-implementation-brief.md
+-- section 4 for the full design.
+--
+-- This mirrors 01-app-role.sql's split exactly: this script only creates the
+-- role and grants it CONNECT. Everything else dd_public needs -- schema
+-- USAGE and the exact, narrow per-table/per-column grant matrix -- is
+-- granted by an Alembic migration (bootstrap_dd_app_privliges.py's
+-- equivalent for dd_public), not here, so the grant matrix is versioned and
+-- reversible alongside the schema changes it depends on. Role creation with
+-- a real password stays a plain init script -- same reasoning as dd_app: a
+-- one-time, out-of-band, secret-managed operation in production, not
+-- something Alembic should run against the live cluster.
+--
+-- Picked up automatically: docker-compose.dev.yml mounts the whole
+-- sandbox/init directory as /docker-entrypoint-initdb.d, so this file runs
+-- alongside 01-app-role.sql with no compose changes needed.
+--
+-- The password here is a well-known local-only secret; it never leaves the
+-- sandbox and matches the equivalent public-role DSN used by tests (see
+-- tests/test_dd_public_grant_matrix.py) and, later, PublicAsyncSessionLocal.
+
+CREATE ROLE dd_public WITH LOGIN PASSWORD 'sandbox_dd_public';
+GRANT CONNECT ON DATABASE simpero TO dd_public;

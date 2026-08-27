@@ -15,14 +15,16 @@ comment on this PR): a link's questions_snapshot freezes input_type at
 generation time, so an invalid value here doesn't just fail on read -- it
 gets baked into every link issued while the row is active.
 
-Rebased onto 9e0d7c1a4b52 (Path B: qualitative_findings on deals, #111) --
-both migrations originally branched off 1a2b3c4d5e6f independently and
-landed as two heads with no merge revision; re-pointing this one after
-the one that merged into staging first, rather than adding a separate
-merge-heads migration, since neither touches the other's tables.
+Re-pointed onto d1f3b6e28a94, staging's head as of 2026-08-27 (the P1
+intake migrations #125-134 plus the inspector dashboard's #135 all landed
+after this branch was last synced). This table is independent of every one
+of them, so it stays a plain linear child of whatever staging's head is
+rather than a merge revision -- same move as the earlier re-point off
+1a2b3c4d5e6f, which two migrations had branched from independently and
+left as two heads with nothing joining them.
 
 Revision ID: 67e5302afcfe
-Revises: 9e0d7c1a4b52
+Revises: d1f3b6e28a94
 Create Date: 2026-08-25 00:00:00.000000
 
 """
@@ -34,7 +36,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "67e5302afcfe"
-down_revision: str | Sequence[str] | None = "9e0d7c1a4b52"
+down_revision: str | Sequence[str] | None = "d1f3b6e28a94"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
