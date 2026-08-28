@@ -1,12 +1,14 @@
+import logging
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import AuthenticationError
 from app.core.intake_security import IntakeSessionClaims, decode_intake_session_jwt
 from app.core.public_dependencies import get_public_session_db
+from app.core.rate_limit_middleware import client_ip
 from app.jobs.queue import get_queue
 from app.models.deal_intake_link import DealIntakeLink
 from app.models.organisation import Organisation
@@ -15,6 +17,8 @@ from app.repo.HumanAuditRepo import HumanAuditRepo
 from app.schemas.public_uploads import PublicCompleteRequest, PublicPresignRequest
 from app.schemas.uploads import CompleteResponse, PresignResponse
 from app.services.uploads.spaces import build_object_key, head_object, presign_put
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/public/intake/uploads", tags=["public-uploads"])
 
@@ -54,7 +58,13 @@ async def _org_name_for_link(db: AsyncSession, link: DealIntakeLink) -> str:
     name = await db.scalar(
         select(Organisation.name).where(Organisation.clerk_org_id == link.clerk_org_id)
     )
-    assert name is not None  # get_public_session_db already vouched for this clerk_org_id
+    if name is None:
+        # Should never happen -- get_public_session_db already vouched for
+        # this clerk_org_id -- but a broken FK/data issue here shouldn't
+        # crash with a raw 500; fail the same 404-only contract every other
+        # public route failure does, and log loudly so it's actually noticed.
+        logger.error("intake link %s has no matching organisation row", link.id)
+        raise HTTPException(status_code=404, detail="Not found")
     return name
 
 
@@ -120,11 +130,16 @@ async def create_presigned_url(
 async def complete_upload(
     upload_id: UUID,
     body: PublicCompleteRequest,
+    request: Request,
     session_and_link: tuple[AsyncSession, DealIntakeLink] = Depends(get_public_session_db),
     claims: IntakeSessionClaims = Depends(_decode_claims),
 ) -> CompleteResponse:
     db, link = session_and_link
     org_name = await _org_name_for_link(db, link)
+
+    ip = client_ip(request)
+    ip_address = None if ip == "unknown" else ip
+    user_agent = request.headers.get("user-agent")
 
     storage_key = build_object_key(
         org_name, link.clerk_org_id, link.deal_id, upload_id, body.filename
@@ -183,6 +198,8 @@ async def complete_upload(
                 "filename": body.filename,
                 "storage_key": storage_key,
             },
+            "ip_address": ip_address,
+            "user_agent": user_agent,
         }
     )
 
