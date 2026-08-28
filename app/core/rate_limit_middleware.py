@@ -26,7 +26,7 @@ async def check_rate_limit(redis_client: Redis, key: str, limit: int, window_sec
     return count <= limit
 
 
-def _client_ip(request: Request) -> str:
+def client_ip(request: Request) -> str:
     forwarded_for = request.headers.get("x-forwarded-for")
     if forwarded_for:
         last = forwarded_for.split(",")[-1].strip()
@@ -53,7 +53,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         if not (path == "/api/public" or path.startswith("/api/public/")):
             return await call_next(request)
 
-        ip = _client_ip(request)
+        ip = client_ip(request)
         key = f"ratelimit:ip:{ip}"
         try:
             # get_queue() is statically typed as the abstract saq.Queue (it
