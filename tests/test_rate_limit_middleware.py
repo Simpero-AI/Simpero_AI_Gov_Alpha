@@ -1,5 +1,6 @@
 import httpx
 import pytest
+import redis.exceptions
 
 import app.core.rate_limit_middleware as rate_limit_middleware
 from app.main import app
@@ -51,6 +52,19 @@ async def test_different_ips_tracked_independently(monkeypatch):
     assert resp_a2.status_code == 429
     resp_b2 = await _get("2.2.2.2")
     assert resp_b2.status_code == 429
+
+
+async def test_valkey_error_fails_open_not_429_not_500(monkeypatch):
+    async def _raise(*args, **kwargs):
+        raise redis.exceptions.RedisError("simulated Valkey outage")
+
+    monkeypatch.setattr(rate_limit_middleware, "check_rate_limit", _raise)
+
+    resp = await _get("9.9.9.2")
+    # Deliberate fail-open (see RateLimitMiddleware docstring): a Valkey
+    # error must pass the request through to the route, never 429 and
+    # never a bare 500 from an unhandled exception.
+    assert resp.status_code == 404
 
 
 async def test_last_xff_entry_is_trusted_not_first(monkeypatch):
