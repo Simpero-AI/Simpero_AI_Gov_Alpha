@@ -165,9 +165,35 @@ left out, per the brief's own note in section 0.2 — not a P3 dependency.
     autouse `_clear_rate_limit_keys_around_every_test`, `tests/test_rate_limit_middleware.py`)
     are the first in this repo to need Valkey reachable during `uv run pytest` in CI. Confirmed
     via the failing run: `redis.exceptions.ConnectionError` on `localhost:6379`, `--maxfail=1`
-    stopping the job after 524/~780 passed. **Not fixed** — needs a `valkey` service block
-    added to the `test` job, mirroring the existing `postgres` block (image `valkey/valkey:8`,
-    `6379:6379`, health-cmd `valkey-cli ping`). Currently blocking PR #137 from going green.
+    stopping the job after 524/~780 passed. **Fixed (2026-08-28, commit `dd971c8` on
+    `p3-07-intake-session-endpoint`)**: added a `valkey` service block to the `test` job,
+    mirroring the `postgres` block (image `valkey/valkey:8`, `6379:6379`, health-cmd
+    `valkey-cli ping`). Verified: PR #137's CI is fully green (`gh pr checks 137`), including
+    `Test (pytest)`.
+  - **PR #137 merge conflict with `staging`, found immediately after the CI fix (2026-08-28)**:
+    pushing the CI fix alone left the PR non-mergeable — `staging` had moved 5 commits ahead
+    (PR #136/P3-01 itself merged, plus SIM-262 entity verification, SIM-420/421 corroboration
+    adapters, PR #140's deploy wiring) since P3-07 branched. Two real conflicts on merge:
+    `app/repo/IntakeLinkRepo.py` (both sides purely additive — P3-07's `bump_failed_attempt` vs.
+    staging's `get_pending_for_deal`/`get_pending_for_deal_unlocked`/`mark_expired` from P3-14 —
+    resolved by keeping all four methods and the union of imports) and
+    `docs/plans/external-deal-intake-link-p3-status.md` itself (add/add — P3-07's branch carried
+    a stale, pre-P3-01 snapshot of this file; resolved by taking this repo's current copy
+    wholesale rather than reconciling two outdated forks). Merge commit `7dbad8f`. Re-verified
+    after merge: `alembic heads` single (`76a165315331`), pyright 0 errors, full suite 964/964
+    passed (excluding two confirmed-pre-existing, confirmed-unrelated local artifacts — see next
+    two bullets) on a fresh dev Postgres volume. Pushed; PR #137 mergeable, CI green again on the
+    merge commit (run `33134168781`).
+  - **Two known-environment test failures hit again while re-verifying #137 post-merge, both
+    already documented above, confirmed not regressions**: (1)
+    `tests/test_public_intake_pool.py::test_missing_public_database_url_raises_validation_error`
+    fails locally only because the checked-in `.env` has `PUBLIC_DATABASE_URL` set and
+    `Settings()` reads it directly, bypassing the test's `monkeypatch.delenv` — pre-existing
+    since P1-07 (`git blame` confirms), passes in CI (no `.env` file there). (2) the
+    `DROP TABLE chunks CASCADE`-without-recreate bug in `test_memory_scope_rls.py`/
+    `test_retrieval_rls.py` again polluted `test_chunks_rls.py`/`test_e2e_pipeline.py`/
+    `test_l2_retrieval_eval.py` when run in the same session — confirmed non-regression by
+    running the affected files in isolation on a fresh volume (15/15 passed).
   - **PgBouncer prod config drift from the `docker/pgbouncer.ini` reference file, found while
     checking "is there another DO-connection-limit-shaped issue" (2026-08-28)**:
     `docker/pgbouncer.ini` (P1-07's design) gives `dd_public` its own **named** `[databases]`
@@ -184,30 +210,90 @@ left out, per the brief's own note in section 0.2 — not a P3 dependency.
     `dd_app` — but did **not** give it the dedicated named entry/smaller pool, and left
     `max_client_conn` at `22`. So in production today, `dd_public` connections fall through
     to the wildcard `*` entry and share `dd_app`'s pool budget, the exact starvation risk
-    P1-07's design was meant to prevent. **Not fixed** — unclear whether this was a deliberate
-    "ship the crash-fix first, adopt the full pool design later" call by Kuntal or an
-    oversight; confirm intent with him/Vansh before changing `docker-compose.prod.yml`.
-  - **Original DO `max_connections` confirmation (P1-07) — still open, more load-bearing
-    now**: flagged since P1 (`docs/plans/external-deal-intake-link-status.md`: "P1-07's
-    DigitalOcean `max_connections` confirmation is still open -- this needs Vansh to check the
-    actual DO cluster capacity in the console") and never closed out. More load-bearing now
-    that the pool-split design above still isn't fully deployed — worth checking the DO
-    console capacity and deciding on the `docker-compose.prod.yml` fix together, not
-    separately.
+    P1-07's design was meant to prevent. **Fixed (2026-08-28, explicitly approved by Vansh) —
+    [PR #149](https://github.com/Simpero-AI/Simpero_AI_Gov_Alpha/pull/149)**, branched off
+    `staging` (not bundled into `p3-base`/P3 work, since this is an independent infra fix):
+    added the `simpero_public` named entry (`pool_size=5`) and raised `max_client_conn` 22 → 40
+    in `docker-compose.prod.yml`'s inline heredoc, matching `docker/pgbouncer.ini` exactly.
+    YAML validated (`python3 -c "import yaml; ..."`), not deployed/tested against the live
+    droplet by this session — PR left open for review, not merged. **Depends on a fact this
+    session cannot verify**: the `PUBLIC_DATABASE_URL` GitHub Actions secret (written to the
+    droplet `.env` by `deploy.yml`) must use `dbname=simpero_public` (matching `.env.example`'s
+    documented shape), not `simpero` — otherwise `dd_public` traffic keeps hitting the wildcard
+    entry regardless of this config change, silently. Worth Vansh double-checking that secret's
+    value before/after the next deploy.
+  - **Original DO `max_connections` confirmation (P1-07) — resolved (2026-08-28, via `doctl`,
+    which was already authenticated in this environment)**: `SHOW max_connections` on the live
+    cluster (`db-pgsql-tor1-13122`, plan `db-s-1vcpu-1gb`) returns **30**. Breakdown of what
+    draws from that budget: (1) Postgres's own internal auxiliary processes (autovacuum
+    launcher, checkpointer, walwriter, walsender, background writer, logical-replication
+    launcher, `pg_cron`/TimescaleDB/failover-slots workers) — confirmed via
+    `backend_type` in `pg_stat_activity`, these do **not** count as `client backend` connections
+    and are not the constraint. (2) Real client-backend connections, which **are** the
+    constraint: at check time, 3 — one `dd_app`, one `doadmin`, one DO-internal
+    (`management-agent`/`pghoard` backup tooling). (3) The pool-split design above's
+    **theoretical ceiling**: `default_pool_size=20` (dd_app, shared by `app` + `worker`, since
+    both route through the same PgBouncer instance/pool) + `pool_size=5` (dd_public) = **25**
+    backend connections PgBouncer could open simultaneously under full saturation. Against a
+    30-connection cap, that leaves only **~5** of real slack for `doadmin`'s direct (PgBouncer-
+    bypassing) Alembic migration connections, DO's own client-backend tooling, and any other
+    role on this cluster (a `kp_db` user exists in the cluster's user list — **not referenced
+    anywhere in this repo**, purpose unknown to this session, flagging rather than assuming
+    it's inert). **Verdict: 30 technically fits the design's ceiling today, but the margin is
+    thin, not comfortable** — current real load (3 client-backend connections) is nowhere near
+    it, so there's no live problem, but this doesn't have much room to grow before a coinciding
+    migration + backup + traffic spike could exhaust it. Worth deciding with Vansh: bump the DO
+    plan size for real headroom, or trim `default_pool_size` down from 20 if the app's actual
+    concurrent DB usage doesn't need it. Both this and the `docker-compose.prod.yml` fix above
+    were decided together, per this section's own earlier note.
+  - **P3-10 data-model gap, resolved via architect decision (2026-08-28)**: `data_source` had
+    no column tying a row to a specific `deal_intake_link` — only `deal_id`/`org_id`. The
+    ticket's "20-file-per-link ceiling" could have been approximated by counting `data_source`
+    rows scoped to `deal_id` (no schema change), but that would let org-side uploads through
+    the normal authenticated `/api/uploads/*` path — which P3-14 does **not** block while a
+    link is pending, only `start_analysis` — eat into the external recipient's own upload
+    budget, producing confusing 409s for a legitimate applicant. Added a real
+    `intake_link_id` column instead (migration `9a48cce5ecac`) — see the P3-10 row below and
+    its implementation doc for the full detail, including the advisory-lock concurrency
+    approach for the presign/complete TOCTOU race.
+  - **P3-10 branch rebuilt off `origin/staging` directly, not `p3-base`, before opening its
+    PR (2026-08-28)** — same reasoning as PR #149: the `.claude/worktrees/p3-10` branch was
+    created off `p3-base`, which carries 19 local-only commits (Suraj's unmerged P2-01/P2-03
+    work plus doc-tracking commits) that would otherwise show up in the PR diff. Cherry-picked
+    the single P3-10 commit onto a fresh branch off `origin/staging` (which had also picked up
+    PR #147/SIM-422 in the meantime), re-verified clean there (single Alembic head, pyright 0
+    errors, full suite 1020/1020), and force-pushed over the already-pushed
+    `p3-10-public-uploads` remote branch before opening PR #150. If you're the one opening a
+    PR for a ticket branch built off `p3-base`, check whether `p3-base` has drifted from
+    `origin/staging` first — it will, since it accumulates status-doc commits continuously.
+  - **Session-collision incident during P3-10 (2026-08-28, caught and contained, no damage)**:
+    this session initially fire-and-forget spawned a single `orchestrator` subagent (named
+    `p3-10-orchestrator`) to build the whole ticket, then — per Vansh's explicit instruction
+    ("you be the orchestrator") — stopped it (`TaskStop`, confirmed successful) and drove the
+    architect → implementer pipeline directly instead. Partway through the implementer's run,
+    `ListAgents` showed a **second** `p3-10-orchestrator` entry in state `running`, started
+    well after the stop — same task id (`ae13a7c86a7c950ea`) as the one already stopped, which
+    per this tool's own semantics means something sent it a new message and resumed it (this
+    session did not). Stopped it again immediately (before it could write anything — confirmed
+    via `git status` showing no new/changed files beyond what the implementer had already
+    produced) and did not investigate further mid-task. **Not fully explained** — worth
+    Vansh checking whether this was an accidental resume (e.g. a stray message from another
+    tool/session) before relying on background-orchestrator fire-and-forget delegation again
+    without watching for this.
 
 ## Tickets
 
 | Ticket | Owner | Status | Branch | Based on | Pushed? | Tested against | Notes |
 |---|---|---|---|---|---|---|---|
-| P3-01 | Vansh | Done | `p3-01-intake-link-generate` | staging | **Yes — [PR #136](https://github.com/Simpero-AI/Simpero_AI_Gov_Alpha/pull/136)** | Real Postgres (dev, port 5434) | Shared effective-status helper: `app/services/intake_links.py::compute_intake_link_effective_status(link) -> str` — P3-02/06/14 import this. 20/20 new tests + full suite (789/789) + pyright 0 errors. |
+| P3-01 | Vansh | **Merged to staging** | `p3-01-intake-link-generate` | staging | **Yes — [PR #136](https://github.com/Simpero-AI/Simpero_AI_Gov_Alpha/pull/136)**, merged 2026-08-28 (`829af53`) | Real Postgres (dev, port 5434) | Shared effective-status helper: `app/services/intake_links.py::compute_intake_link_effective_status(link) -> str` — P3-02/06/14 import this. 20/20 new tests + full suite (789/789) + pyright 0 errors. CI green throughout. |
 | P3-05 | Suraj | | | p3-base | | | |
-| P3-07 | Vansh | Done | `p3-07-intake-session-endpoint` (worktree `.claude/worktrees/p3-07`) | staging | **Yes — [PR #137](https://github.com/Simpero-AI/Simpero_AI_Gov_Alpha/pull/137)** | Real Postgres (dev, port 5434), fresh volume | Commits `c3af65b` (impl) + `ace8c6f` (test fix). `human_audit_log` insert from a `dd_public` session needed `implicit_returning=False` + a client-side `default=uuid.uuid4` on `HumanAuditLog.id` (see Flagged). Full suite 773/774 (1 pre-existing unrelated failure), pyright 0 errors. **Self-review fix (2026-08-28, commit `b12e908`)**: email comparison switched to `hmac.compare_digest` (constant-time) — see Flagged. |
-| P3-10 | Suraj | | | p3-base | | | |
+| P3-07 | Vansh | **Merged to staging** | `p3-07-intake-session-endpoint` (worktree `.claude/worktrees/p3-07`) | staging | **Yes — [PR #137](https://github.com/Simpero-AI/Simpero_AI_Gov_Alpha/pull/137)**, merged 2026-08-28 (`bf0f6f4`) | Real Postgres (dev, port 5434), fresh volume | Commits `c3af65b` (impl) + `ace8c6f` (test fix). `human_audit_log` insert from a `dd_public` session needed `implicit_returning=False` + a client-side `default=uuid.uuid4` on `HumanAuditLog.id` (see Flagged). Full suite 773/774 (1 pre-existing unrelated failure), pyright 0 errors. **Self-review fix (2026-08-28, commit `b12e908`)**: email comparison switched to `hmac.compare_digest` (constant-time) — see Flagged. **CI fix (2026-08-28, commit `dd971c8`)**: added missing `valkey` service to CI's `test` job — see Flagged. **Merged `staging` in (2026-08-28, commit `7dbad8f`)** to pick up #136 + entity-verification work + PR #140's deploy wiring and resolve the resulting merge conflict — see Flagged. CI fully green post-merge (run `33134168781`), full suite 964/964 (excluding two confirmed-pre-existing local-only artifacts). Merged to `staging` by Vansh shortly after CI went green — merge itself happened out-of-band, not by this session. |
+| P3-10 | Vansh (picked up from Suraj — unblocks P3-15/11/13, Suraj hadn't started wave-0 yet) | Done | `p3-10-public-uploads` (worktree `.claude/worktrees/p3-10`) | staging (rebuilt clean off `origin/staging` directly, not `p3-base` — see Flagged, avoids dragging in `p3-base`'s unrelated local-only commits) | **Yes — [PR #150](https://github.com/Simpero-AI/Simpero_AI_Gov_Alpha/pull/150)** | Real Postgres (dev, port 5434), fresh volume | New `data_source.intake_link_id` column (migration `9a48cce5ecac`, down_revision `76a165315331`) — architect decision, see Flagged: `DataSource` had no per-link column, only `deal_id`/`org_id`, and a deal-scoped count would let org-side authenticated uploads eat into the external recipient's 20-file ceiling. Tightened `intake_deal_documents_insert`'s `WITH CHECK` to require the inserted row's `intake_link_id` match `app.intake_link_id`. `DataSourceRepo.try_create_for_intake_link` uses `pg_advisory_xact_lock` keyed on link id to close the presign-then-complete TOCTOU race (presign's own check is a UX courtesy only). New `app/api/public_uploads.py`, first real usage of `get_public_session_db` in this codebase. 9/9 new tests + full suite 1020/1020 (rebuilt onto `origin/staging` after SIM-422 merged; excluding known pre-existing environment artifacts) + pyright 0 errors. Implementation doc: `docs/implementations/2026-08-28-p3-10-public-uploads.md`. **Flagged for product confirmation**: SAQ `ingest_data_source` enqueue on `/complete` wasn't explicit in the ticket text, added because "byte-for-byte identical `data_source` row" implies the same downstream processing — double-check this is actually wanted. |
 | P3-02 | Suraj | | | P3-01 branch | | | |
 | P3-03 | Suraj | | | P3-01 branch | | | |
 | P3-06 | Suraj | | | P3-01 branch | | | |
 | P3-14 | Vansh | Done | `p3-14-analysis-gate` (worktree `.claude/worktrees/p3-14`) | P3-01's PR branch | **Yes — [PR #138](https://github.com/Simpero-AI/Simpero_AI_Gov_Alpha/pull/138)**, stacked on #136 | Real Postgres (dev, port 5434) | New `IntakeLinkRepo.get_pending_for_deal_unlocked` (deliberately unlocked — reusing the locked `get_pending_for_deal` would serialize `start_analysis` against concurrent link generate/submit). Guard clause in `start_analysis` right after the existing `active_for_deal` 409. 46/46 tests (5 new + regression) + full suite 794/794 + pyright 0 errors. **CI never triggers on this PR** — base is `p3-01-intake-link-generate`, not `main`/`staging` (see Flagged); empty retrigger commit `35d546f` confirmed zero workflow runs. |
-| P3-08 | Suraj | | | P3-07 branch | | | |
+| P3-08 | Vansh (picked up from Suraj) | Done | `p3-08-public-questions` (worktree `.claude/worktrees/p3-08`) | P3-07 (merged to staging) | Pending (PR not yet opened) | Real Postgres (dev, port 5434), fresh volume | `GET /api/public/intake/questions`, session-authenticated via `get_public_session_db`. Returns the link's frozen `questions_snapshot["questions"]` (sorted defensively by `display_order`) plus `org_name` — nothing else, per the ticket's literal "no field beyond what's explicitly allowed" criterion. Null `questions_snapshot` (type allows it, real data never produces it) returns `questions: []`, not a 500. Reused `_org_name_for_link`'s column-scoped-select pattern (duplicated from P3-10's `public_uploads.py`, not imported — that module isn't merged onto this branch). 6/6 new tests + full suite 1017/1017 (fresh volume) + pyright 0 errors. No architectural decision needed — fully spec-pinned. |
 | P3-12 | Vansh | Done | `p3-12-rate-limiting` (worktree `.claude/worktrees/p3-12`) | P3-07's PR branch | **Yes — [PR #139](https://github.com/Simpero-AI/Simpero_AI_Gov_Alpha/pull/139)**, stacked on #137 | Real Postgres + Valkey (dev, port 5434/6381), fresh volume | Commit `565d737`. Part A: `failed_attempts >= 5` lockout in `public_intake.py`, same 404 body. Part B: new `app/core/rate_limit_middleware.py`, Valkey-backed IP throttle (5 req/10s, `SET NX EX` + `INCR`, keyed `ratelimit:ip:{ip}`, reuses `get_queue().redis` — no new dependency), registered before `CORSMiddleware` (traced Starlette's middleware stack build to confirm ordering keeps CORS outermost). Trusts the last `X-Forwarded-For` entry (Caddy appends, doesn't trust client-supplied header; app container has no published ports per `docker-compose.prod.yml`). Fails open on Valkey errors. 429 (not 404) for throttling — distinct signal from the 404-only contract. Per-link_id throttling deferred (see Flagged — no session-authenticated route exists yet). 9/9 new tests + full suite 778/778 + pyright 0 errors. Implementation doc: `docs/implementations/2026-08-27-p3-12-rate-limiting.md`. **Self-review fixes (2026-08-28)**: merged forward Fix 1 from #137 (`73ce4a0`, not rebased — PR already open); added fail-open regression test `test_valkey_error_fails_open_not_429_not_500` (commit `edb37d0`). Full suite re-verified on a fresh DB volume: 780/780, pyright 0 errors. **CI never triggers on this PR** — base is `p3-07-intake-session-endpoint`, not `main`/`staging` (see Flagged); confirmed after pushing `edb37d0`, zero workflow runs. |
 | P3-15 | Suraj | | | P3-10 branch | | | |
 | P3-09 | Suraj | | | P3-08 branch | | | |
