@@ -198,6 +198,39 @@ def test_lookup_prefers_10k_and_latest_filed_on_restatement():
     assert _lookup_annual_fact(facts, ("Assets",), 2023) == ("Assets", 10.0)
 
 
+def test_lookup_prefers_a_later_10ka_amendment_over_the_original_10k():
+    """A 10-K/A is how a company restates a wrong annual figure; filed after the
+    original 10-K, it must supersede it -- not be ignored for failing an exact
+    "10-K" match, which would silently keep the stale, un-restated number."""
+    facts = {
+        "facts": {
+            "us-gaap": {
+                "Assets": {
+                    "units": {
+                        "USD": [
+                            {
+                                "fy": 2023,
+                                "form": "10-K",
+                                "filed": "2024-02-01",
+                                "end": "2023-12-31",
+                                "val": 9.0,
+                            },
+                            {
+                                "fy": 2023,
+                                "form": "10-K/A",
+                                "filed": "2024-06-01",
+                                "end": "2023-12-31",
+                                "val": 12.0,
+                            },
+                        ]
+                    }
+                }
+            }
+        }
+    }
+    assert _lookup_annual_fact(facts, ("Assets",), 2023) == ("Assets", 12.0)
+
+
 def test_lookup_selects_the_claimed_period_not_a_prior_year_comparative():
     """The critical case: one 10-K (fy=2023) carries the 2023 primary AND the
     2022/2021 comparatives, ALL tagged fy:2023, fp:"FY", same filed date. Keying

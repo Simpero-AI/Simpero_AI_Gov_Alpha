@@ -145,7 +145,13 @@ def _lookup_annual_fact(
     for concept in concepts:
         units = ((usgaap.get(concept) or {}).get("units") or {}).get("USD") or []
         annual = [u for u in units if isinstance(u, dict) and _covers_annual_period(u, year)]
-        tens = [u for u in annual if u.get("form") == "10-K"]
+        # The 10-K family, matched by prefix, not the exact string. A 10-K/A is
+        # an AMENDED annual report -- the very filing a company uses to restate a
+        # wrong number -- and 10-K405 / 10-KSB are older variants; excluding them
+        # would let a stale original 10-K win over the amendment that corrects it,
+        # undercutting "the latest-filed value supersedes". The latest-filed
+        # tiebreak below then lets the 10-K/A supersede the original it amends.
+        tens = [u for u in annual if str(u.get("form") or "").startswith("10-K")]
         candidates = tens or annual
         if not candidates:
             continue
