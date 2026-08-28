@@ -91,6 +91,22 @@ class DataSourceRepo(BaseRepo[DataSource, dict]):
         self.session.add(data_source)
         return data_source
 
+    async def count_for_intake_link_by_status(
+        self, intake_link_id: uuid.UUID, statuses: tuple[str, ...] = ("pending", "verified")
+    ) -> int:
+        """The real 'has this recipient uploaded anything' gate for P3-11 submit
+        -- deliberately intake_link_id-scoped, not deal_id-scoped, same
+        reasoning as count_for_intake_link (P3-10): a deal-scoped count would
+        let an org-side authenticated upload satisfy an external recipient's
+        own upload requirement with zero uploads of their own."""
+        result = await self.session.execute(
+            select(func.count())
+            .select_from(DataSource)
+            .where(DataSource.intake_link_id == intake_link_id)
+            .where(DataSource.status.in_(statuses))
+        )
+        return result.scalar_one()
+
     async def update_status(
         self, id: uuid.UUID, status: str, fingerprint: str | None
     ) -> DataSource | None:

@@ -1,14 +1,22 @@
 import hmac
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.intake_security import encode_intake_session_jwt
+from app.core.exceptions import AuthenticationError
+from app.core.intake_security import (
+    IntakeSessionClaims,
+    decode_intake_session_jwt,
+    encode_intake_session_jwt,
+)
 from app.core.public_dependencies import get_public_link_db, get_public_session_db
+from app.core.rate_limit_middleware import _client_ip
 from app.models.deal_intake_link import DealIntakeLink
+from app.models.deal_intake_response import DealIntakeResponse
 from app.models.organisation import Organisation
+from app.repo.DataSourceRepo import DataSourceRepo
 from app.repo.HumanAuditRepo import HumanAuditRepo
 from app.repo.IntakeLinkRepo import IntakeLinkRepo
 from app.schemas.public_intake import (
@@ -18,6 +26,7 @@ from app.schemas.public_intake import (
     IntakeQuestionResponse,
     IntakeQuestionsResponse,
     IntakeSessionResponse,
+    IntakeSubmitResponse,
     SubmitAnswersRequest,
     SubmitAnswersResponse,
 )
@@ -152,6 +161,17 @@ def _seed_draft(snapshot_questions: list[dict]) -> dict[str, dict]:
     }
 
 
+async def _decode_claims(session_token: str) -> IntakeSessionClaims:
+    """Duplicated from app/api/public_uploads.py -- see that file's own
+    docstring for why this is copied rather than imported across router
+    files (this codebase's existing precedent for small router-local
+    helpers, e.g. _org_name_for_link above)."""
+    try:
+        return decode_intake_session_jwt(session_token)
+    except AuthenticationError as exc:
+        raise HTTPException(status_code=404, detail="Not found") from exc
+
+
 @router.post("/answers", response_model=SubmitAnswersResponse)
 async def submit_intake_answers(
     body: SubmitAnswersRequest,
@@ -186,3 +206,100 @@ async def submit_intake_answers(
         raise HTTPException(status_code=404, detail="Not found")
 
     return SubmitAnswersResponse(answers=[DraftAnswerResponse(**a) for a in merged["answers"]])
+
+
+@router.post("/submit", response_model=IntakeSubmitResponse)
+async def submit_intake(
+    request: Request,
+    session_and_link: tuple[AsyncSession, DealIntakeLink] = Depends(get_public_session_db),
+    claims: IntakeSessionClaims = Depends(_decode_claims),
+) -> IntakeSubmitResponse:
+    db, _ = session_and_link
+
+    # Row-locked reload keyed on the verified session claim, not the
+    # dependency's own (unlocked) `link` -- closes the concurrent-double-
+    # submit race, see IntakeLinkRepo.get_pending_by_id_for_update's docstring.
+    link = await IntakeLinkRepo(db).get_pending_by_id_for_update(claims.link_id)
+    if link is None:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    # Completeness gate: every required question must be answered in the
+    # draft. draft_answers is None if the recipient never called /answers.
+    required_keys = {
+        q["question_key"]
+        for q in (link.questions_snapshot or {}).get("questions", [])
+        if q["required"]
+    }
+    answered_keys = {
+        a["question_key"] for a in (link.draft_answers or {}).get("answers", []) if a["answered"]
+    }
+    missing = required_keys - answered_keys
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"Required questions not answered: {sorted(missing)}",
+        )
+
+    # Document gate: at least one pending/verified upload tied to this link.
+    doc_count = await DataSourceRepo(db).count_for_intake_link_by_status(link.id)
+    if doc_count == 0:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="At least one document must be uploaded before submitting",
+        )
+
+    ip = _client_ip(request)
+    ip_address = None if ip == "unknown" else ip
+    user_agent = request.headers.get("user-agent")
+
+    # Insert while link.status is still 'pending' in the DB -- required by
+    # intake_response_insert's WITH CHECK (see
+    # b4f8e1c3a962_intake_keyhole_policies.py). The explicit flush here is
+    # load-bearing, not just an optimization: SQLAlchemy's unit-of-work does
+    # NOT guarantee this INSERT is emitted before the status UPDATE below
+    # just because db.add() was called first in code -- without forcing it,
+    # the UPDATE can be flushed first, flipping status to 'submitted' before
+    # the INSERT runs, which the WITH CHECK then rejects.
+    db.add(
+        DealIntakeResponse(
+            org_id=link.org_id,
+            deal_id=link.deal_id,
+            link_id=link.id,
+            respondent_email=claims.email,
+            answers=link.draft_answers,
+            submitted_at=func.now(),
+            ip_address=ip_address,
+            user_agent=user_agent,
+        )
+    )
+    await db.flush()
+
+    # Flip status in place on the already-locked ORM object -- SQLAlchemy
+    # emits the UPDATE on flush, no separate UPDATE statement.
+    link.status = "submitted"
+    link.submitted_at = func.now()
+
+    await HumanAuditRepo(db).append(
+        {
+            "org_id": link.org_id,
+            "actor_id": None,
+            "actor_email": claims.email,
+            "event_type": "intake_submitted",
+            "deal_id": link.deal_id,
+            "payload": {"link_id": str(link.id), "document_count": doc_count},
+            "ip_address": ip_address,
+            "user_agent": user_agent,
+        }
+    )
+
+    await db.flush()
+    # The UPDATE above has no RETURNING (AsyncSession doesn't auto-backfill
+    # func.now() on UPDATE the way it does on INSERT), so link.submitted_at
+    # is still unpopulated in memory -- an explicit refresh is required here;
+    # accessing the attribute directly would trigger an implicit lazy-load
+    # outside the async greenlet and raise MissingGreenlet.
+    await db.refresh(link, attribute_names=["submitted_at"])
+    submitted_at = link.submitted_at
+    assert submitted_at is not None  # just set via func.now() above
+
+    return IntakeSubmitResponse(submitted=True, submitted_at=submitted_at)

@@ -295,6 +295,59 @@ left out, per the brief's own note in section 0.2 — not a P3 dependency.
     questions must be answered before submit succeeds** — P3-11's implementation must add this
     gate explicitly; it is not covered by anything P3-09 already enforces (P3-09 only validates
     the keys present in a given call, never the whole required set).
+  - **P3-11 document-gate scope, approved by Vansh (2026-08-28)**: same spec-gap family as
+    P3-10's — ticket text says "≥1 ... `data_source` for the deal," literally `deal_id`-scoped,
+    but built `intake_link_id`-scoped instead (new `DataSourceRepo.count_for_intake_link_by_status`).
+    A `deal_id`-scoped count would let an org-side authenticated upload
+    (never blocked while a link is pending) satisfy an external recipient's own upload
+    requirement with zero uploads of their own — defeats the AC's actual intent. Tested
+    explicitly (`test_submit_document_gate_ignores_other_links_and_authenticated_uploads`), not
+    just trusted.
+  - **P3-11 submit-sequencing/locking, approved by Vansh (2026-08-28) — a genuine concurrency
+    design decision, not spec-pinned**: traced `intake_response_insert`'s `WITH CHECK`
+    (`b4f8e1c3a962`) directly rather than assuming P3-09's 404-pattern would transfer unchanged
+    — it requires the link still `status = 'pending'` **at the moment the response row is
+    inserted**, so the response must be written *before* the status flip to `submitted`. That
+    ordering alone reopens the exact race the AC warns about ("fails closed... rather than
+    duplicating the response row"): two concurrent `/submit` calls could both read `pending`
+    before either writes, both pass validation, both insert a response row. Fixed with a
+    `SELECT ... FOR UPDATE` row lock on the link as the very first step (new
+    `IntakeLinkRepo.get_pending_by_id_for_update`, same idiom as `get_pending_for_deal`'s
+    reissue-race lock) — a second concurrent call blocks until the first commits, then sees
+    `submitted` and 404s cleanly. Test coverage proves "only one response row after two
+    sequential calls," not true concurrent-connection coverage (same tradeoff already made for
+    P3-10's advisory lock — this test suite has no infrastructure for genuinely concurrent DB
+    connections).
+  - **`deal_intake_response` needed the `implicit_returning=False` fix too, found during P3-11
+    (2026-08-28)**: same gap as `HumanAuditLog` (P3-07's Flagged entry above) — `dd_public` is
+    INSERT-only, no SELECT, on `deal_intake_response` (deliberate, per that table's own
+    migration docstring), and Postgres requires SELECT to satisfy SQLAlchemy's default
+    RETURNING clause. This table had never actually been written to by any ticket before P3-11,
+    so the gap was latent until now. Fixed the same way: `implicit_returning: False` in
+    `__table_args__` + client-side `default=uuid.uuid4` on `id`, alongside the existing
+    `server_default=func.gen_random_uuid()`.
+  - **Two SQLAlchemy/`AsyncSession` subtleties found empirically during P3-11, both load-
+    bearing, not style choices**: (1) `db.add(response)` written before `link.status = ...` in
+    Python code does **not** guarantee the INSERT is emitted before the status UPDATE at the SQL
+    level — SQLAlchemy's unit-of-work doesn't preserve call order across unrelated ORM objects,
+    so an explicit `await db.flush()` right after `db.add(response)` is required to force the
+    ordering `intake_response_insert`'s `WITH CHECK` needs (see the locking decision above).
+    (2) `func.now()` assigned to an ORM attribute for an **UPDATE** doesn't auto-populate the
+    Python-side value the way it does for an INSERT (no RETURNING is emitted) — reading
+    `link.submitted_at` right after flush raises `MissingGreenlet` (an implicit lazy-load
+    outside the async greenlet). Fixed with an explicit `await db.refresh(link,
+    attribute_names=["submitted_at"])` before building the response.
+  - **P3-11's PR has no clean single base — a genuine diamond dependency**: the branch merges
+    `p3-09-public-answers` (based on P3-08's own commit) and `p3-10-public-uploads` (based on
+    `origin/staging` directly) — neither branch is an ancestor of the other, both only share
+    `origin/staging` as a common ancestor. GitHub PRs support one base branch; whichever is
+    picked, the diff includes the *other* branch's commits too (already under separate review
+    in PRs #151/#150/#153). Opened against `p3-10-public-uploads` as base, with the PR
+    description calling out exactly which commits are net-new to this PR (the Alembic merge
+    migration + P3-11's own implementation commit) so a reviewer isn't confused into
+    re-reviewing already-covered work. **P3-13, the next ticket, will hit the same problem at
+    larger scale** — its own ticket text already anticipates this ("Branch off a merge of all
+    five... expect this branch to need the most merge attention of anything in P3").
 
 ## Tickets
 
@@ -312,7 +365,7 @@ left out, per the brief's own note in section 0.2 — not a P3 dependency.
 | P3-12 | Vansh | Done | `p3-12-rate-limiting` (worktree `.claude/worktrees/p3-12`) | P3-07's PR branch | **Yes — [PR #139](https://github.com/Simpero-AI/Simpero_AI_Gov_Alpha/pull/139)**, stacked on #137 | Real Postgres + Valkey (dev, port 5434/6381), fresh volume | Commit `565d737`. Part A: `failed_attempts >= 5` lockout in `public_intake.py`, same 404 body. Part B: new `app/core/rate_limit_middleware.py`, Valkey-backed IP throttle (5 req/10s, `SET NX EX` + `INCR`, keyed `ratelimit:ip:{ip}`, reuses `get_queue().redis` — no new dependency), registered before `CORSMiddleware` (traced Starlette's middleware stack build to confirm ordering keeps CORS outermost). Trusts the last `X-Forwarded-For` entry (Caddy appends, doesn't trust client-supplied header; app container has no published ports per `docker-compose.prod.yml`). Fails open on Valkey errors. 429 (not 404) for throttling — distinct signal from the 404-only contract. Per-link_id throttling deferred (see Flagged — no session-authenticated route exists yet). 9/9 new tests + full suite 778/778 + pyright 0 errors. Implementation doc: `docs/implementations/2026-08-27-p3-12-rate-limiting.md`. **Self-review fixes (2026-08-28)**: merged forward Fix 1 from #137 (`73ce4a0`, not rebased — PR already open); added fail-open regression test `test_valkey_error_fails_open_not_429_not_500` (commit `edb37d0`). Full suite re-verified on a fresh DB volume: 780/780, pyright 0 errors. **CI never triggers on this PR** — base is `p3-07-intake-session-endpoint`, not `main`/`staging` (see Flagged); confirmed after pushing `edb37d0`, zero workflow runs. |
 | P3-15 | Suraj | | | P3-10 branch | | | |
 | P3-09 | Vansh (picked up from Suraj — was building toward unblocking P3-11) | Done | `p3-09-public-answers` (worktree `.claude/worktrees/p3-09`) | `p3-08-public-questions` (P3-08's own commit — P3-09 genuinely needs P3-08's code, not just `origin/staging`) | **Yes — [PR #153](https://github.com/Simpero-AI/Simpero_AI_Gov_Alpha/pull/153)**, stacked on #151 | Real Postgres (dev, port 5434), fresh volume | New `deal_intake_link.draft_answers` column (migration `2f7e83611f52`, down_revision `76a165315331`) — architect decision, approved by Vansh before build, see Flagged: `deal_intake_response` is INSERT-only for `dd_public`, no place to hold in-progress drafts, so a new narrow-grant column was added rather than Valkey (breaks the "provable at DB/RLS level" invariant) or a stateless P3-11-carries-the-body redesign (relocates persistence to the client, worse for a resumed session). `IntakeLinkRepo.update_draft_answers` verified (not assumed) that a stale call against a non-pending link 404s via `dd_public`'s `intake_link_status_update` RLS policy matching zero rows — not the one-way-status trigger, which never fires for an update the RLS policy already blocked. `POST /answers` does a read-merge-write, validating only the keys present in each call (partial/progressive saves — "editable by repeated calls" would otherwise fail every call but the last). 10/10 new tests + full suite 1027/1027 (fresh volume) + pyright 0 errors (fixed 2 real `reportOptionalSubscript` errors in the implementer's test file during review — not just a stale-diagnostic false alarm this time). Implementation doc: `docs/implementations/2026-08-28-p3-09-public-answers.md`. |
-| P3-11 | Vansh | | | P3-09 + P3-10 branches | | | |
+| P3-11 | Vansh | Done | `p3-11-submit` (worktree `.claude/worktrees/p3-11`) | merge of `p3-09-public-answers` + `p3-10-public-uploads` + new Alembic merge migration `1dcfa5bd613d` | **Yes — PR pending open (diamond-dependency base, see Flagged)** | Real Postgres (dev, port 5434), fresh volume | `POST /api/public/intake/submit` — writes `deal_intake_response` from `link.draft_answers`, requires ≥1 uploaded document, flips link to `submitted`, audit row. Two architect decisions, both approved by Vansh before build (see Flagged): (1) document-count gate scoped by `intake_link_id`, not `deal_id` as the ticket text literally says — same spec-gap family as P3-10's own deviation. (2) `SELECT ... FOR UPDATE` row lock on the link as the first step, closing a real concurrent-double-submit race the naive approach would reopen (`deal_intake_response`'s `WITH CHECK` requires the link still `pending` at INSERT time, so the response must be written *before* the status flip — which alone isn't race-safe without the lock). Also fixed a real bug found during implementation: `deal_intake_response` needed the same `implicit_returning=False` + client-side `uuid.uuid4` default already applied to `HumanAuditLog` (P3-07) — `dd_public` is INSERT-only there too, and this was the first ticket to ever write to that table. 8/8 new tests + full suite 1044/1044 (fresh volume, independently re-verified by this session, not just the implementer's report) + pyright 0 errors. Implementation doc: `docs/implementations/2026-08-28-p3-11-submit.md`. |
 | P3-13 | Vansh | | | P3-07/08/09/10/11/15 (all) | | | |
 
 ## Cross-owner handoff log (who pulled what, when)

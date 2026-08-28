@@ -61,6 +61,21 @@ class IntakeLinkRepo(BaseRepo[DealIntakeLink, dict]):
         )
         return result.scalars().first()
 
+    async def get_pending_by_id_for_update(self, link_id: uuid.UUID) -> DealIntakeLink | None:
+        """Row-locks the link for the whole submit transaction -- closes the
+        race where two concurrent /submit calls both see status='pending'
+        before either writes, both pass validation, and both insert a
+        deal_intake_response row. A second call blocks on this lock until the
+        first commits, then sees status='submitted' and gets None here (clean
+        404), same idiom as get_pending_for_deal's reissue-race lock."""
+        result = await self.session.execute(
+            select(DealIntakeLink)
+            .where(DealIntakeLink.id == link_id)
+            .where(DealIntakeLink.status == "pending")
+            .with_for_update()
+        )
+        return result.scalars().first()
+
     async def mark_expired(self, link: DealIntakeLink) -> DealIntakeLink:
         """Sets status on the passed, already-tracked ORM instance. Does not
         flush -- the caller flushes explicitly so the UPDATE commits within
