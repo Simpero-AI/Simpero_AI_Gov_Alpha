@@ -136,6 +136,33 @@ async def test_wrong_email_404s_bumps_failed_attempt_and_audits(
     assert rows[0][0] == wrong_email
 
 
+async def test_mismatch_still_404s_and_bumps_attempt_with_constant_time_compare(
+    pending_link_with_token, owner_conn
+):
+    """Regression for the hmac.compare_digest swap -- the mismatch path's
+    observable behavior (404, failed_attempts bump, audit row) must be
+    unchanged by switching from != to a constant-time comparison."""
+    link = pending_link_with_token
+    wrong_email = "someone-else@org-a.example"
+
+    resp = await _post_session(link["raw_token"], wrong_email)
+
+    assert resp.status_code == 404
+    assert resp.json() == _NOT_FOUND_BODY
+
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "SELECT failed_attempts FROM deal_intake_link WHERE id = %s",
+            (link["id"],),
+        )
+        (failed_attempts,) = cur.fetchone()
+    assert failed_attempts == 1
+
+    rows = _audit_rows(owner_conn, link["id"], "intake_email_attempt_failed")
+    assert len(rows) == 1
+    assert rows[0][0] == wrong_email
+
+
 async def test_repeat_mismatches_increment_with_no_lockout(pending_link_with_token, owner_conn):
     link = pending_link_with_token
 

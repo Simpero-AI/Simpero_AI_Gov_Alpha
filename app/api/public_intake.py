@@ -1,3 +1,5 @@
+import hmac
+
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,7 +22,7 @@ async def create_intake_session(
     session, link = session_and_link
     tried_email = body.email
 
-    if tried_email.lower() != link.recipient_email.lower():
+    if not hmac.compare_digest(tried_email.lower(), link.recipient_email.lower()):
         await IntakeLinkRepo(session).bump_failed_attempt(link.id)
         await HumanAuditRepo(session).append(
             {
