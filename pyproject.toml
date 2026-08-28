@@ -29,6 +29,7 @@ dependencies = [
     # track_b.yaml at evaluator call time, not just in tests -- same
     # dependencies-not-dev-group reasoning as jsonschema above.
     "pyyaml>=6.0",
+    "anthropic>=1.2.0",
 ]
 # Docling/pypdf/openpyxl (the parse-service-only deps) left with
 # services/parser + tests/parser in the Simpero_Gov_AI_Services split
