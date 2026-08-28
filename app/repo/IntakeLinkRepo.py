@@ -67,3 +67,21 @@ class IntakeLinkRepo(BaseRepo[DealIntakeLink, dict]):
         the transaction before the reissue's INSERT is attempted."""
         link.status = "expired"
         return link
+
+    async def update_draft_answers(self, link_id: uuid.UUID, draft_answers: dict) -> bool:
+        """Returns False (no rows matched) when the link's own row is no
+        longer visible to dd_public's intake_link_status_update policy --
+        i.e. status has already left 'pending' -- rather than raising. The
+        policy's USING clause requires status = 'pending' to match at all,
+        so a stale call against an already-submitted/revoked/expired link
+        affects zero rows here; it never reaches
+        trg_deal_intake_link_one_way_status. Caller translates False to the
+        same 404 every other public-route failure returns."""
+        result = await self.session.execute(
+            update(DealIntakeLink)
+            .where(DealIntakeLink.id == link_id)
+            .values(draft_answers=draft_answers)
+            .returning(DealIntakeLink.id)
+            .execution_options(synchronize_session=False)
+        )
+        return result.first() is not None

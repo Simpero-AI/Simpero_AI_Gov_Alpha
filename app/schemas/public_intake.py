@@ -27,3 +27,30 @@ class IntakeQuestionResponse(CamelModel):
 class IntakeQuestionsResponse(CamelModel):
     org_name: str
     questions: list[IntakeQuestionResponse]
+
+
+class AnswerInput(CamelModel):
+    """Client-supplied half of one answer -- `prompt`/`answered` are never
+    accepted from the client, only derived server-side from the link's
+    questions_snapshot (see POST /public/intake/answers)."""
+
+    question_key: str
+    answer: str
+
+
+class SubmitAnswersRequest(CamelModel):
+    answers: list[AnswerInput]
+
+
+class DraftAnswerResponse(CamelModel):
+    question_key: str
+    prompt: str
+    answer: str
+    answered: bool
+
+
+class SubmitAnswersResponse(CamelModel):
+    """Echoes the current merged draft state after this call's overlay --
+    minimal, matches this codebase's CamelModel wire convention."""
+
+    answers: list[DraftAnswerResponse]
