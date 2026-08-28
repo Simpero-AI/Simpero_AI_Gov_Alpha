@@ -278,6 +278,47 @@ def build_screening_materials(
     return ScreeningMaterials(extracted_fields=extracted_fields, highlights=[], risk_flags=[])
 
 
+def render_claim_facts(
+    claims: Sequence[Claim],
+    *,
+    dashboard_structure: dict[str, Any] | None,
+    limit: int = 100,
+) -> list[str]:
+    """Human-readable fact lines for the deal's trusted canonical claims -- the
+    grounding handed to the LLM insights pass (app/services/screening_insights.py).
+
+    Lead business subject only, every canonical metric's figures ACROSS its
+    periods (so the model can see trends, not just the latest point), ranked by
+    the deal's own metric order then latest-year-first, capped at `limit`. Same
+    trust filter and value formatting as the extracted panel, so the model reads
+    exactly the figures the user sees -- and no fact that is not one of them.
+    """
+    entity_subject, subject_order = _subject_map(dashboard_structure, claims)
+    lead_subject = subject_order[0] if subject_order else "Other"
+    rank = _metric_rank(dashboard_structure)
+
+    rows = [
+        claim
+        for claim in claims
+        if _is_canonical(claim.attribute)
+        and claim.status in _TRUSTED
+        and claim.period_year is not None
+        and entity_subject.get(claim.entity or "", "Other") == lead_subject
+        and _fmt_value(claim.value) != "—"
+    ]
+    rows.sort(key=lambda c: (rank.get(c.attribute or "", 99), -(c.period_year or 0)))
+
+    lines: list[str] = []
+    seen: set[str] = set()
+    for claim in rows[:limit]:
+        period = _fmt_period(claim.period_year, claim.period_kind)
+        line = f"{_human_attr(claim.attribute)} ({period}): {_fmt_value(claim.value)}"
+        if line not in seen:
+            seen.add(line)
+            lines.append(line)
+    return lines
+
+
 def _prefer(candidate: Claim, current: Claim) -> bool:
     """True when `candidate` is the better figure to show for its metric: a
     historical period beats a forecast, then a later year, then a more

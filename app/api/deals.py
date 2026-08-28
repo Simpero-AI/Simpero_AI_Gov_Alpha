@@ -59,6 +59,7 @@ from app.services.memo_summary import derive_pipeline_metrics
 from app.services.pipeline_steps import no_job_steps
 from app.services.screening.rule_view import enrich_rule_results
 from app.services.screening.rulebook import load_rulebook
+from app.services.screening_insights import derive_screening_insights
 from app.services.screening_materials import build_screening_materials
 
 _INTAKE_LINK_TTL_DAYS = 7
@@ -387,13 +388,19 @@ async def get_deal_screening_materials(
     materials = build_screening_materials(
         claims, dashboard_structure=deal.dashboard_structure, filenames=filenames
     )
+    # Extracted facts are deterministic; highlights/risk-flags are the LLM pass
+    # over the same claims. It fails soft (no key / error -> empty lists), so the
+    # extracted panel is never held back by it beyond one model round-trip.
+    highlights, risk_flags = await derive_screening_insights(
+        claims, company=deal.name, dashboard_structure=deal.dashboard_structure
+    )
     return ScreeningMaterialsResponse(
         extracted_fields=[
             ScreeningCitedFieldResponse(label=f.label, value=f.value, citation=f.citation)
             for f in materials.extracted_fields
         ],
-        highlights=materials.highlights,
-        risk_flags=materials.risk_flags,
+        highlights=highlights,
+        risk_flags=risk_flags,
     )
 
 
