@@ -271,19 +271,33 @@ def _tokens(text: str) -> tuple[str, ...]:
     return tuple(normalize_name(text).split())
 
 
-def _places_named_in(text: str, aliases: Mapping[str, _Place]) -> set[_Place]:
-    """Every place `aliases` recognises in `text`, matched on whole tokens.
+# A two-letter province code is recognised only in the register's "City, ON"
+# comma form, never as a loose token -- see _places_named_in.
+_TRAILING_PROVINCE_CODE = re.compile(r",\s*([A-Za-z]{2})\b")
 
-    Token-sequence matching, not substring: "on" is Ontario as a standalone
-    token and nothing at all inside "toronto". A substring test would find a
-    province in half the addresses in the country.
+
+def _places_named_in(text: str, aliases: Mapping[str, _Place]) -> set[_Place]:
+    """Every place `aliases` recognises in `text`.
+
+    Full names match on whole token sequences ("british columbia"), never
+    substrings -- a province is nothing inside "toronto". Bare two-letter codes
+    are matched ONLY in the register's "City, ON" comma form, never as a loose
+    token: "on" standing in prose is the English preposition far more often than
+    it is Ontario, and reading it as a province manufactures a location conflict
+    out of an ordinary address ("located on Granville Street").
     """
     tokens = _tokens(text)
     found: set[_Place] = set()
     for alias, place in aliases.items():
+        if len(alias) == 2 and alias.isalpha():
+            continue  # two-letter code: comma form only, handled below
         needle = tuple(alias.split())
         span = len(needle)
         if span and any(tokens[i : i + span] == needle for i in range(len(tokens) - span + 1)):
+            found.add(place)
+    for match in _TRAILING_PROVINCE_CODE.finditer(text):
+        place = aliases.get(match.group(1).casefold())
+        if place is not None:
             found.add(place)
     return found
 
@@ -728,6 +742,59 @@ class IsedCorporationsSource:
         return _verdict(fact, claim, record, entity)
 
 
+# Within incorporation-year and HQ-province, only a subset of labels licenses a
+# CONFLICT on mismatch. The rest confirm on a match but decline on a difference,
+# because the difference is ordinarily true rather than contradictory -- and
+# `conflicted` is sticky, so manufacturing one from an ordinary fact is the exact
+# failure this adapter exists to avoid.
+#
+# Founding is not incorporation: a company commonly operates a year or two before
+# it incorporates, so "founded 2015, incorporated 2019" is a true statement. A
+# year claim is a hard incorporation assertion only when neither its label nor
+# its wording invokes founding.
+_FOUNDING_LABELS: frozenset[str] = frozenset(
+    {
+        "founded",
+        "founded in",
+        "year founded",
+        "founding year",
+        "date founded",
+        "established",
+        "inception",
+        "inception date",
+    }
+)
+_FOUNDING_WORDS: frozenset[str] = frozenset(
+    {"founded", "founding", "establish", "established", "inception", "since"}
+)
+
+# A registered office is a legal filing address (often a law firm's); an operating
+# headquarters is where the company actually is. They legitimately sit in
+# different provinces, so only the registered-office labels hard-compare against
+# the register's registered office -- an operating-HQ label confirms on a match
+# but declines on a mismatch rather than asserting a location conflict.
+_REGISTERED_OFFICE_LABELS: frozenset[str] = frozenset({"registered office", "registered address"})
+
+
+def _is_founding_year_claim(claim: Claim) -> bool:
+    """Whether this year claim is about FOUNDING rather than incorporation -- by
+    its label or by the wording of its value. A founding year that predates
+    incorporation is ordinary, so its mismatch is no-signal, never a conflict."""
+    labels = {normalize_name(v) for v in (claim.attribute, claim.attribute_raw) if v}
+    if labels & _FOUNDING_LABELS:
+        return True
+    text = _claim_text(claim)
+    return bool(text and set(normalize_name(text).split()) & _FOUNDING_WORDS)
+
+
+def _is_registered_office_claim(claim: Claim) -> bool:
+    """Whether this HQ claim is about the legal REGISTERED OFFICE -- which can
+    hard-compare against the register -- rather than an operating headquarters,
+    which cannot: a Canadian company with an out-of-province office is ordinary."""
+    labels = {normalize_name(v) for v in (claim.attribute, claim.attribute_raw) if v}
+    return bool(labels & _REGISTERED_OFFICE_LABELS)
+
+
 def _verdict(
     fact: str, claim: Claim, record: _RegistryRecord, entity: DealEntity
 ) -> CorroborationVerdict | None:
@@ -748,14 +815,24 @@ def _verdict(
     if fact == FACT_INCORPORATION_YEAR:
         claimed = _year_in(text)
         registered = record.incorporation_year
+        if claimed is None or registered is None:
+            return None
         agrees = claimed == registered
+        # A founding year that differs from the incorporation year is ordinary,
+        # not a contradiction -- decline rather than manufacture a conflict.
+        if not agrees and _is_founding_year_claim(claim):
+            return None
     elif fact == FACT_JURISDICTION:
         claimed = _sole_place(text, _PLACE_ALIASES)
         registered = record.jurisdiction
-        agrees = bool(claimed and registered and _places_agree(claimed, registered))
+        if claimed is None or registered is None:
+            return None
+        agrees = _places_agree(claimed, registered)
     elif fact == FACT_STATUS:
         claimed = _status_claimed_in(text)
         registered = record.status
+        if claimed is None or registered is None:
+            return None
         agrees = claimed == registered
     elif fact == FACT_HQ_PROVINCE:
         # Canadian provinces only. A registered office is not necessarily the
@@ -764,11 +841,16 @@ def _verdict(
         # rather than a location conflict.
         claimed = _sole_place(text, {a: p for a, p in _PLACE_ALIASES.items() if p.country == "CA"})
         registered = record.office
-        agrees = bool(claimed and registered and _places_agree(claimed, registered))
+        if claimed is None or registered is None:
+            return None
+        agrees = _places_agree(claimed, registered)
+        # Only the legal registered office hard-compares. An operating-HQ label
+        # in a different province from the registered office is ordinary (the
+        # registered office is often a law firm's), so decline rather than
+        # conflict when the label is not a registered-office label.
+        if not agrees and not _is_registered_office_claim(claim):
+            return None
     else:  # pragma: no cover - _fact_for cannot produce anything else
-        return None
-
-    if claimed is None or registered is None:
         return None
 
     return CorroborationVerdict(

@@ -99,6 +99,17 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
+      # Backs VALKEY_URL below — rate-limit/lockout tests (P3-12) need a real
+      # Valkey reachable during `uv run pytest`, same as the postgres service.
+      valkey:
+        image: valkey/valkey:8
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     # ALEMBIC_DATABASE_URL runs migrations as doadmin (DDL). DATABASE_URL is
     # dd_app (DML only, RLS-restricted) — created by the "Create dd_app role"
     # step below, since GitHub's service containers start before checkout and
