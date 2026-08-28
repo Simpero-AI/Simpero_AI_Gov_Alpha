@@ -1,12 +1,14 @@
 import hmac
+import logging
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.intake_security import encode_intake_session_jwt
 from app.core.public_dependencies import get_public_link_db, get_public_session_db
+from app.core.rate_limit_middleware import client_ip
 from app.models.deal_intake_link import DealIntakeLink
 from app.models.organisation import Organisation
 from app.repo.HumanAuditRepo import HumanAuditRepo
@@ -20,6 +22,8 @@ from app.schemas.public_intake import (
 
 router = APIRouter(prefix="/public/intake", tags=["public-intake"])
 
+logger = logging.getLogger(__name__)
+
 _LOCKOUT_THRESHOLD = 5
 
 
@@ -31,16 +35,27 @@ async def _org_name_for_link(db: AsyncSession, link: DealIntakeLink) -> str:
     name = await db.scalar(
         select(Organisation.name).where(Organisation.clerk_org_id == link.clerk_org_id)
     )
-    assert name is not None  # get_public_session_db already vouched for this clerk_org_id
+    if name is None:
+        # Should never happen -- get_public_session_db already vouched for
+        # this clerk_org_id -- but a broken FK/data issue here shouldn't
+        # crash with a raw 500; fail the same 404-only contract every other
+        # public route failure does, and log loudly so it's actually noticed.
+        logger.error("intake link %s has no matching organisation row", link.id)
+        raise HTTPException(status_code=404, detail="Not found")
     return name
 
 
 @router.post("/{token}/session", response_model=IntakeSessionResponse)
 async def create_intake_session(
+    request: Request,
     body: IntakeEmailVerifyRequest,
     session_and_link: tuple[AsyncSession, DealIntakeLink] = Depends(get_public_link_db),
 ) -> IntakeSessionResponse | JSONResponse:
     session, link = session_and_link
+
+    ip = client_ip(request)
+    ip_address = None if ip == "unknown" else ip
+    user_agent = request.headers.get("user-agent")
 
     # Unconditional lockout: once failed_attempts hits the threshold, every
     # further attempt 404s -- even one with the correct email -- and does so
@@ -62,6 +77,8 @@ async def create_intake_session(
                 "event_type": "intake_email_attempt_failed",
                 "deal_id": link.deal_id,
                 "payload": {"link_id": str(link.id)},
+                "ip_address": ip_address,
+                "user_agent": user_agent,
             }
         )
         # Return the Response directly (never raise) -- see this file's
@@ -80,6 +97,8 @@ async def create_intake_session(
             "event_type": "intake_email_attempt_succeeded",
             "deal_id": link.deal_id,
             "payload": {"link_id": str(link.id)},
+            "ip_address": ip_address,
+            "user_agent": user_agent,
         }
     )
     return IntakeSessionResponse(session_token=token)
