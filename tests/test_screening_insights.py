@@ -123,7 +123,7 @@ async def test_calls_model_and_cleans_output(monkeypatch):
         ],
         "risk_flags": ["Revenue fell sharply in FY2023."],
     }
-    monkeypatch.setattr(anthropic, "Anthropic", lambda api_key: _FakeClient(payload))
+    monkeypatch.setattr(anthropic, "Anthropic", lambda **_kwargs: _FakeClient(payload))
 
     highlights, risks = await derive_screening_insights(
         [_claim(attribute="revenue", normalized=168_000_000)],
@@ -137,7 +137,7 @@ async def test_calls_model_and_cleans_output(monkeypatch):
 async def test_model_error_returns_empty(monkeypatch):
     monkeypatch.setattr(screening_insights, "get_settings", lambda: _FakeSettings(api_key="k"))
 
-    def _boom(api_key: str) -> _FakeClient:
+    def _boom(**_kwargs: object) -> _FakeClient:
         raise RuntimeError("anthropic down")
 
     monkeypatch.setattr(anthropic, "Anthropic", _boom)
@@ -152,7 +152,7 @@ async def test_model_error_returns_empty(monkeypatch):
 async def test_no_facts_skips_the_model(monkeypatch):
     monkeypatch.setattr(screening_insights, "get_settings", lambda: _FakeSettings(api_key="k"))
 
-    def _must_not_run(api_key: str) -> _FakeClient:
+    def _must_not_run(**_kwargs: object) -> _FakeClient:
         raise AssertionError("model must not be called when there are no facts")
 
     monkeypatch.setattr(anthropic, "Anthropic", _must_not_run)

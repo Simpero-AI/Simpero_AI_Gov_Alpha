@@ -29,6 +29,10 @@ logger = logging.getLogger(__name__)
 
 _MAX_ITEMS = 5
 _MAX_ITEM_CHARS = 200
+# Hard ceiling on the Anthropic call so a slow/hung request fails fast (caught,
+# -> empty) instead of stalling the insights endpoint. The endpoint is decoupled
+# from the extracted-facts one, so this only ever bounds the two LLM panels.
+_LLM_TIMEOUT_S = 25.0
 
 _SYSTEM = (
     "You are a private-equity diligence analyst preparing an initial screening. "
@@ -97,7 +101,7 @@ def _call_model(*, api_key: str, model: str, company: str, facts: list[str]) -> 
     asyncio.to_thread so it never blocks the event loop."""
     import anthropic
 
-    client = anthropic.Anthropic(api_key=api_key)
+    client = anthropic.Anthropic(api_key=api_key, timeout=_LLM_TIMEOUT_S)
     user = f"COMPANY: {company}\n\nEXTRACTED FACTS (the only facts you may use):\n" + "\n".join(
         f"- {f}" for f in facts
     )
