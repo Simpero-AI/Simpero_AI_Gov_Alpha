@@ -225,6 +225,8 @@ jobs:
             cat > /opt/simpero/.env <<'SIMPERO_ENV_EOF'
             DATABASE_URL=${{ secrets.DATABASE_URL }}
             ALEMBIC_DATABASE_URL=${{ secrets.ALEMBIC_DATABASE_URL }}
+            PUBLIC_DATABASE_URL=${{ secrets.PUBLIC_DATABASE_URL }}
+            INTAKE_SESSION_JWT_SECRET=${{ secrets.INTAKE_SESSION_JWT_SECRET }}
             CLERK_SECRET_KEY=${{ secrets.CLERK_SECRET_KEY }}
             CLERK_JWKS_URL=${{ secrets.CLERK_JWKS_URL }}
             VALKEY_URL=${{ secrets.VALKEY_URL }}
@@ -238,6 +240,7 @@ jobs:
             PARSER_SPACES_ACCESS_KEY_ID=${{ secrets.PARSER_SPACES_ACCESS_KEY_ID }}
             PARSER_SPACES_SECRET_ACCESS_KEY=${{ secrets.PARSER_SPACES_SECRET_ACCESS_KEY }}
             DD_APP_PASSWORD=${{ secrets.DD_APP_PASSWORD }}
+            DD_PUBLIC_PASSWORD=${{ secrets.DD_PUBLIC_PASSWORD }}
             BACKEND_HOSTNAME=${{ secrets.BACKEND_HOSTNAME }}
             PGBOUNCER_DB_HOST=${{ secrets.PGBOUNCER_DB_HOST }}
             PGBOUNCER_DB_PORT=${{ secrets.PGBOUNCER_DB_PORT }}
