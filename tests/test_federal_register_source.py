@@ -257,7 +257,7 @@ async def test_a_document_naming_the_company_but_from_another_agency_is_no_signa
 
 
 async def test_a_one_word_company_name_is_too_common_to_search_by() -> None:
-    """"Block" appears in thousands of agency notices that have nothing to do
+    """ "Block" appears in thousands of agency notices that have nothing to do
     with the company, and this source has no resolved entity to disambiguate
     against yet."""
     seen: list[str] = []
