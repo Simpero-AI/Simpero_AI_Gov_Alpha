@@ -431,9 +431,13 @@ async def _compute_deal_status(db: AsyncSession, deal_id: uuid.UUID) -> DealStat
     points straight at `"verification"` rather than `"classify"` — pass1's
     work already happened inside it). `job_name == "verification"` is the
     separate, deal-level 3a/3b pass (`start_deal_verification`), which only
-    ever runs after a `parsing` row succeeds. `job_name == "screening"`
+    ever runs after a `parsing` row succeeds. `job_name == "corroboration"`
+    (SIM-416) is the external-corroboration enrichment pass chained between
+    verification and screening; like screening it is a post-verification,
+    non-tracked stage, but a `successful` corroboration row is NOT terminal --
+    screening still follows it. `job_name == "screening"`
     (SIM-401/402/403/404) is the real last stage in the chain, and its
-    `successful` row supersedes `verification`'s as the latest one once it
+    `successful` row supersedes both as the latest one once it
     exists. There is still no dedicated "complete" job or pipeline stage
     beyond that — the memo tail (governance/OFAC/drafting/scoring) has no
     job behind it yet — so a successful `screening` run is this app's
@@ -553,6 +557,45 @@ async def _compute_deal_status(db: AsyncSession, deal_id: uuid.UUID) -> DealStat
             )
         return DealStatusResponse(
             job_status="complete" if run.status == "successful" else "processing",
+            current_phase="governance",
+            steps=_steps_for_status("governance"),
+            started_at=chain_started_at,
+            ended_at=ended_at,
+            step_durations=step_durations,
+            job_comments=verification_comments,
+        )
+
+    if run.job_name == "corroboration":
+        # SIM-416. External corroboration is a post-verification enrichment stage
+        # chained BEFORE screening, and (like screening) is not a tracked
+        # PIPELINE_STEP -- parsing and verification are already done by the time a
+        # corroboration row exists, so every listed step is "done" and
+        # current_phase sits past the end, the same "governance" shape screening
+        # returns. Its own job_comments are never surfaced (a corroboration run
+        # writes none, and JobCommentResponse is a per-document shape it has no
+        # value for); the verification run's comments carry through, same as the
+        # screening branch.
+        #
+        # Unlike screening, a `successful` corroboration run is NOT "complete":
+        # screening still follows in the chain (its queued row is committed in the
+        # same transaction that marks this one successful, so screening is already
+        # the latest run by the time that commit lands -- this successful case is
+        # only defensive). Only a successful screening run means a finished deal,
+        # so queued/in_progress/successful all map to "processing".
+        verification_comments = verification_run.job_comments if verification_run else None
+        if run.status == "failed":
+            return DealStatusResponse(
+                job_status="error",
+                current_phase="governance",
+                steps=_steps_for_status("governance"),
+                started_at=chain_started_at,
+                ended_at=ended_at,
+                step_durations=step_durations,
+                error_message=run.error_message,
+                job_comments=verification_comments,
+            )
+        return DealStatusResponse(
+            job_status="processing",
             current_phase="governance",
             steps=_steps_for_status("governance"),
             started_at=chain_started_at,

@@ -215,25 +215,26 @@ async def test_ingests_claims_and_reconciles_same_page_fact(
     assert "1 same_fact" in run["job_comments"][0]["comment"]
     assert "2 cited via exact_span" in run["job_comments"][0]["comment"]
 
-    # SIM-404: chains into a job_name="screening" row + enqueue. The row is
-    # created inside the job's transaction (uq_analysis_run_active is per
-    # DEAL, not per job_name, so it can only exist once this run is
-    # terminal), while the enqueue happens after the commit -- so by the time
-    # the enqueue is recorded the row must already be readable.
+    # SIM-416: verification now chains into a job_name="corroboration" row +
+    # enqueue (corroboration itself chains into screening). The row is created
+    # inside the job's transaction (uq_analysis_run_active is per DEAL, not per
+    # job_name, so it can only exist once this run is terminal), while the
+    # enqueue happens after the commit -- so by the time the enqueue is recorded
+    # the row must already be readable.
     with owner_conn.cursor() as cur:
         cur.execute(
-            "SELECT id, status FROM analysis_run WHERE deal_id = %s AND job_name = 'screening'",
+            "SELECT id, status FROM analysis_run WHERE deal_id = %s AND job_name = 'corroboration'",
             (seeded_deal,),
         )
-        screening_rows = cur.fetchall()
-    assert len(screening_rows) == 1
-    screening_run_id, screening_status = screening_rows[0]
-    assert screening_status == "queued"
+        corroboration_rows = cur.fetchall()
+    assert len(corroboration_rows) == 1
+    corroboration_run_id, corroboration_status = corroboration_rows[0]
+    assert corroboration_status == "queued"
 
     assert len(mocked_screening_enqueue) == 1
     job_name, kwargs = mocked_screening_enqueue[0]
-    assert job_name == "start_deal_screening"
-    assert kwargs["analysis_run_id"] == str(screening_run_id)
+    assert job_name == "start_deal_corroboration"
+    assert kwargs["analysis_run_id"] == str(corroboration_run_id)
     assert kwargs["clerk_org_id"] == seeded_org["clerk_org_id"]
 
 
@@ -383,7 +384,7 @@ async def test_midjob_failure_durably_marks_run_failed(
     # Work transaction rolled back -> no claims committed; the failed status
     # came from a SEPARATE transaction. That split is the whole fix.
     assert _count_claims(owner_conn, seeded_org["org_pk"]) == 0
-    # A crashed run must not chain into screening.
+    # A crashed run must not chain onward (into corroboration or anything else).
     assert len(mocked_screening_enqueue) == 0
 
 

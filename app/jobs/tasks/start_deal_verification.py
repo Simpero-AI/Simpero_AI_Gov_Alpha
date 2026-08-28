@@ -52,11 +52,7 @@ from app.repo.AnalysisRunRepo import AnalysisRunRepo
 from app.repo.DealRepo import DealRepo
 from app.repo.HumanAuditRepo import HumanAuditRepo
 from app.services.consistency import reconcile_consistency
-from app.services.corroboration import (
-    CORROBORATABLE_STATUSES,
-    CORROBORATION_SOURCES,
-    run_corroboration,
-)
+from app.services.corroboration import CORROBORATABLE_STATUSES
 from app.services.dashboard_structure import merge_dashboard_structures
 from app.services.deal_profile import deal_profile_updates
 from app.services.qualitative_findings import merge_qualitative_findings
@@ -389,14 +385,15 @@ async def _run_verification(
             .where(Claim.status.in_(sorted(CORROBORATABLE_STATUSES)))
         )
         rollup_claims = list((await session.scalars(rollup_stmt)).all())
-        # SIM-415: the external corroboration pass runs HERE -- after the claims
-        # are cited/reconciled, before the roll-up -- so the roll-up reads the
-        # events it writes (agree -> has_agreement, disagree -> conflicted).
-        # CORROBORATION_SOURCES is empty until the per-source adapters (SIM-416+)
-        # register, so this is a no-op today; the flush below makes any events it
-        # does write visible to roll_up_deal's own SELECT (autoflush=False).
-        await run_corroboration(session, rollup_claims, CORROBORATION_SOURCES)
-        await session.flush()
+        # This roll-up grades claims on INTERNAL verification signals only --
+        # citation plus the same-fact/contradicts reconciliation edges written
+        # above. External corroboration (SEC EDGAR, ISED, USPTO, Federal
+        # Register, ...) reaches out over the network, and holding this
+        # transaction open across a multi-second HTTP round-trip is how you
+        # exhaust the pool and trip idle-in-transaction timeouts (SIM-416). So it
+        # runs in its own chained job, start_deal_corroboration, which records
+        # its events and then re-runs this same deal roll-up -- before screening
+        # reads the corroboration-adjusted statuses.
         # Batched, not one roll_up_status call per claim: on a large deal that
         # was ~2 sequential round-trips per cited claim (the corroboration-event
         # lookup + the contradicts-edge lookup), the round-trip-per-item pattern
@@ -427,21 +424,21 @@ async def _run_verification(
             }
         )
 
-        # Chain into screening (SIM-404). The row is created HERE, inside the
-        # transaction that just marked this run terminal, for two reasons:
-        # uq_analysis_run_active is a partial unique index on deal_id ALONE
-        # (not deal_id+job_name), so a screening row can only exist once this
-        # run is no longer queued/in_progress -- doing both in one
-        # transaction is what makes that legal. And it keeps the chain atomic
-        # with the verification result, same pattern as start_deal_analysis's
-        # hand-off into this job.
-        screening_run_id = uuid4()
+        # Chain into corroboration (SIM-416), which itself chains into screening.
+        # The row is created HERE, inside the transaction that just marked this
+        # run terminal, for two reasons: uq_analysis_run_active is a partial
+        # unique index on deal_id ALONE (not deal_id+job_name), so the next run
+        # can only exist once this run is no longer queued/in_progress -- doing
+        # both in one transaction is what makes that legal. And it keeps the
+        # chain atomic with the verification result, same pattern as
+        # start_deal_analysis's hand-off into this job.
+        corroboration_run_id = uuid4()
         await run_repo.create(
             {
-                "id": screening_run_id,
+                "id": corroboration_run_id,
                 "org_id": org_id,
                 "deal_id": deal_uuid,
-                "job_name": "screening",
+                "job_name": "corroboration",
                 "status": "queued",
             }
         )
@@ -452,18 +449,21 @@ async def _run_verification(
                 "actor_email": "Internal System",
                 "event_type": "analysis_requested",
                 "deal_id": deal_uuid,
-                "payload": {"analysis_run_id": str(screening_run_id), "job_name": "screening"},
+                "payload": {
+                    "analysis_run_id": str(corroboration_run_id),
+                    "job_name": "corroboration",
+                },
             }
         )
 
-    # Outside the transaction -- screening_run_id's row is now durably
+    # Outside the transaction -- corroboration_run_id's row is now durably
     # committed, so a worker that dequeues this immediately is guaranteed to
     # find it. Enqueuing inside the `async with` above let a worker outrace
     # the commit and fail with "analysis_run ... not found" (a real bug hit
     # in local testing on the parsing -> verification hand-off).
     await get_queue().enqueue(
-        "start_deal_screening",
-        analysis_run_id=str(screening_run_id),
+        "start_deal_corroboration",
+        analysis_run_id=str(corroboration_run_id),
         clerk_org_id=clerk_org_id,
         timeout=3600,
         retries=1,

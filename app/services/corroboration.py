@@ -9,6 +9,7 @@ also not this module.
 """
 
 import logging
+import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
@@ -126,29 +127,45 @@ class CorroborationSource(Protocol):
 CORROBORATION_SOURCES: list[CorroborationSource] = []
 
 
-async def run_corroboration(
+@dataclass(frozen=True)
+class GatheredVerdict:
+    """One source's verdict on one claim, tagged with the claim id so the write
+    phase can re-attach it to a claim re-loaded in a different transaction. The
+    gather phase (network I/O, no DB transaction open) collects these; the write
+    phase (short transaction) records them. See the two-phase note on
+    gather_corroboration."""
+
+    claim_id: uuid.UUID
+    outside_source: str
+    verdict: CorroborationVerdict
+
+
+async def gather_corroboration(
     db: AsyncSession,
     claims: Sequence[Claim],
     sources: Sequence[CorroborationSource],
-) -> None:
-    """Run every source over every corroboratable claim, recording each
-    agree/disagree via record_corroboration_result. Meant to run AFTER internal
-    verification (claims at `cited`+) and BEFORE the deal-level status roll-up,
-    so the roll-up reads the events this writes.
+) -> list[GatheredVerdict]:
+    """Phase 1 of the corroboration pass: run every source over every
+    corroboratable claim and COLLECT the verdicts, writing nothing.
 
-    Contracts:
-    - No-signal (source returns None) records nothing -- absence is never a
+    This is where the network I/O lives, so its caller (the dedicated
+    corroboration job, SIM-416) runs it with NO write transaction open: a source
+    that holds a socket open for seconds must never hold a Postgres transaction
+    open with it. `db` is used read-only here -- sources touch it only to load
+    their per-deal context (e.g. the resolved entity), which the caller primes
+    before this phase so no query fires mid-gather. `expire_on_commit=False` (see
+    app/core/database.py) lets the passed-in `claims` keep their loaded column
+    values after the priming transaction has committed, so the sources can read
+    claim.value/.entity here without a lazy refresh hitting the closed txn.
+
+    Contracts (unchanged from the single-phase pass):
+    - No-signal (source returns None) collects nothing -- absence is never a
       conflict.
     - A source that RAISES is treated as no-signal for that claim, logged, and
       never allowed to fail the pass: one flaky source must not sink a deal's
-      verification (same durability posture as the verify/screening jobs).
-    - Claims outside CORROBORATABLE_STATUSES are skipped rather than handed to
-      record_corroboration_result (which would raise) -- defence in depth behind
-      the caller's own status filter.
-
-    `db` must already be RLS-scoped by the caller, same contract as the rest of
-    app/services/. Does not flush or commit; the caller flushes before the
-    roll-up so the events are visible to its SELECT."""
+      corroboration (same durability posture as the verify/screening jobs).
+    - Claims outside CORROBORATABLE_STATUSES are skipped."""
+    gathered: list[GatheredVerdict] = []
     for claim in claims:
         if claim.status not in CORROBORATABLE_STATUSES:
             continue
@@ -164,10 +181,63 @@ async def run_corroboration(
                 continue
             if verdict is None:
                 continue
-            await record_corroboration_result(
-                db,
-                claim=claim,
-                outside_source=source.name,
-                result=verdict.result,
-                agrees=verdict.agrees,
+            gathered.append(
+                GatheredVerdict(
+                    claim_id=claim.id,
+                    outside_source=source.name,
+                    verdict=verdict,
+                )
             )
+    return gathered
+
+
+async def apply_corroboration(
+    db: AsyncSession,
+    claims: Sequence[Claim],
+    gathered: Sequence[GatheredVerdict],
+) -> None:
+    """Phase 2 of the corroboration pass: record the gathered verdicts as
+    corroboration events (marking a claim `conflicted` on disagreement), inside
+    the caller's write transaction.
+
+    `claims` is the write transaction's OWN re-SELECT of the deal's claims -- the
+    gather phase's ORM objects belong to an earlier, now-closed transaction, so
+    the mutation record_corroboration_result performs (claim.status) must land on
+    a claim attached to this session. A verdict whose claim is no longer present
+    (deleted between phases) is skipped. A claim that has since left
+    CORROBORATABLE_STATUSES is skipped rather than handed to
+    record_corroboration_result (which would raise).
+
+    `db` must already be RLS-scoped by the caller. Does not flush or commit; the
+    caller flushes before the roll-up so the events are visible to its SELECT."""
+    by_id = {claim.id: claim for claim in claims}
+    for item in gathered:
+        claim = by_id.get(item.claim_id)
+        if claim is None or claim.status not in CORROBORATABLE_STATUSES:
+            continue
+        await record_corroboration_result(
+            db,
+            claim=claim,
+            outside_source=item.outside_source,
+            result=item.verdict.result,
+            agrees=item.verdict.agrees,
+        )
+
+
+async def run_corroboration(
+    db: AsyncSession,
+    claims: Sequence[Claim],
+    sources: Sequence[CorroborationSource],
+) -> None:
+    """Single-transaction corroboration pass: gather then apply against the same
+    session. Kept for callers that don't need the network I/O held out of the
+    write transaction (and for the existing tests). The dedicated corroboration
+    job (SIM-416) instead calls gather_corroboration and apply_corroboration in
+    separate transactions, so the source network I/O never sits inside a Postgres
+    transaction.
+
+    Meant to run AFTER internal verification (claims at `cited`+) and BEFORE the
+    deal-level status roll-up, so the roll-up reads the events this writes. `db`
+    must already be RLS-scoped by the caller. Does not flush or commit."""
+    gathered = await gather_corroboration(db, claims, sources)
+    await apply_corroboration(db, claims, gathered)
