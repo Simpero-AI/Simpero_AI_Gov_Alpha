@@ -115,6 +115,12 @@ _OWNER_LABELS = frozenset(
         "trademark status",
     }
 )
+# Only labels that denote the register's LEGAL first-use-in-commerce date. The
+# marketing phrasings a deck uses for general market presence ("in use since",
+# "in market since") are deliberately excluded: a class-specific first-use-in-
+# commerce declaration legitimately differs from when a company began selling, so
+# comparing "in market since 2015" against a declared first use of 2016 would
+# manufacture a sticky conflict out of two different, both-true facts.
 _FIRST_USE_LABELS = frozenset(
     {
         "first use",
@@ -122,8 +128,6 @@ _FIRST_USE_LABELS = frozenset(
         "first use in commerce",
         "brand first use",
         "trademark first use",
-        "in use since",
-        "brand in market since",
     }
 )
 
@@ -356,6 +360,81 @@ class TrademarkSource:
         return _verdict(fact, text, mark, entity)
 
 
+# Trailing legal-form tokens, stripped for the OWNER comparison only. The
+# trademark register's owner line is an independent source that never fed the
+# resolved entity (it is folded only from ISED/OrgBook/SEC), so its spelling of
+# the legal form ("Limited" vs "Ltd", "Corporation" vs "Corp") routinely differs
+# from the deck's -- and normalize_name deliberately does not fold suffixes. Left
+# uncorrected, a company's OWN mark reads as owned by someone else: the single
+# most damaging thing this source could say. Folding the trailing form here makes
+# a mere suffix/spelling difference agree instead of conflict, while a genuinely
+# different name still differs.
+_LEGAL_SUFFIXES = frozenset(
+    {
+        "inc",
+        "incorporated",
+        "corp",
+        "corporation",
+        "co",
+        "company",
+        "ltd",
+        "limited",
+        "ulc",
+        "llc",
+        "llp",
+        "lp",
+        "plc",
+        "gmbh",
+        "ag",
+        "sa",
+        "nv",
+        "bv",
+        "pty",
+        "srl",
+        "ab",
+        "oy",
+        "as",
+    }
+)
+
+
+def _strip_legal_suffix(name: str) -> str:
+    """`name` normalized with any trailing legal-form tokens removed, for
+    comparison only. Only TRAILING tokens are dropped, so "Acme Holdings Ltd"
+    ("acme holdings") stays distinct from "Acme Ltd" ("acme")."""
+    tokens = normalize_name(name).split()
+    while tokens and tokens[-1] in _LEGAL_SUFFIXES:
+        tokens.pop()
+    return " ".join(tokens)
+
+
+def _owner_matches(entity: DealEntity, owner: str) -> bool:
+    """Whether the register's owner line is the deal's own entity. An exact match
+    on any known name (canonical or former) confirms; a suffix-insensitive match
+    also confirms, so "Ltd" vs "Limited" is not read as a different owner. Only
+    when even the suffix-folded forms differ is the owner a genuinely different
+    company."""
+    if entity.matches(owner) is not None:
+        return True
+    folded = _strip_legal_suffix(owner)
+    return bool(folded) and any(_strip_legal_suffix(name) == folded for name in entity.names)
+
+
+def _mark_relates_to_entity(mark_text: str, entity: DealEntity) -> bool:
+    """Whether the mark is plausibly the company's OWN brand -- every token of it
+    appears within a known company name -- rather than a third party's mark the
+    deck merely mentioned. "ACME" relates to "Acme Technologies Ltd"; a
+    competitor's "ZEPHYR" does not. This is the guard that decides whether an
+    owner mismatch may be a CONFLICT: a mark that is a distinct word we cannot tie
+    to the deal is treated as no-signal, because it could belong to a competitor
+    or partner the deck named in passing, and asserting the deal doesn't own it
+    would be a conflict about the wrong company."""
+    mark_tokens = set(normalize_name(mark_text).split())
+    if not mark_tokens:
+        return False
+    return any(mark_tokens <= set(normalize_name(name).split()) for name in entity.names)
+
+
 def _verdict(fact: str, text: str, mark: _Mark, entity: DealEntity) -> CorroborationVerdict | None:
     if fact == FACT_TRADEMARK_FIRST_USE:
         claimed_year = _year(text)
@@ -367,11 +446,27 @@ def _verdict(fact: str, text: str, mark: _Mark, entity: DealEntity) -> Corrobora
     else:
         if mark.owner is None:
             return None
-        # The register's owner line is a legal name, which is exactly what the
-        # resolved entity carries -- canonical plus every former name, so a
-        # mark still registered under the pre-rename name still reads as
-        # theirs.
-        agrees = entity.matches(mark.owner) is not None
+        # The register's owner line is a legal name, which is what the resolved
+        # entity carries -- canonical plus every former name, so a mark still
+        # registered under the pre-rename name still reads as theirs. The match
+        # is suffix-insensitive (see _owner_matches) so a "Ltd"/"Limited" spelling
+        # gap is not a false ownership conflict.
+        if _owner_matches(entity, mark.owner):
+            agrees = True
+        elif _mark_relates_to_entity(mark.mark_text, entity):
+            # Conflict only when the mark is plausibly the company's OWN brand
+            # (a token of a known name) and it is registered to a genuinely
+            # different owner -- an ownership claim about the deal's own brand
+            # that the register contradicts.
+            agrees = False
+        else:
+            # The mark is a distinct brand word (from a quoted/(R)/(TM) token in
+            # the deck), not the company's name, and its owner is not this
+            # company. It could just as easily be a competitor's or partner's
+            # mark the deck merely mentioned. Declining is the only safe call --
+            # a false "your brand belongs to someone else" is the most damaging
+            # thing this source could emit.
+            return None
         claimed = entity.canonical_name
         registered = mark.owner
 

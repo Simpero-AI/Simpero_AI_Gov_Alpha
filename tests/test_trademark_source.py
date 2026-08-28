@@ -283,6 +283,28 @@ async def test_a_record_with_no_owner_line_is_no_signal() -> None:
     assert await src.check(_FakeSession(_entity()), _claim(raw="Our ACME® mark")) is None
 
 
+async def test_an_owner_line_differing_only_in_legal_suffix_is_still_theirs() -> None:
+    """The register spells the legal form differently ("LIMITED" vs the deck's
+    "Ltd.") and never fed the resolved entity, so a bare suffix/spelling gap must
+    not read as a different owner -- that is the most damaging false conflict
+    this source could emit."""
+    src = TrademarkSource(fetch=_fetch(cipo=[_cipo(owner="ACME TECHNOLOGIES LIMITED")]))
+    verdict = await src.check(_FakeSession(_entity()), _claim(raw="Our ACME® mark"))
+    assert verdict is not None and verdict.agrees is True
+
+
+async def test_a_competitors_mark_named_in_the_claim_is_no_signal_not_a_conflict() -> None:
+    """A claim about the deal company that names a competitor's (R) mark. The mark
+    does not relate to the deal's name, so an owner mismatch would be a
+    brand-ownership finding about the wrong company -- decline rather than assert
+    the deal doesn't own a mark it never claimed."""
+    src = TrademarkSource(
+        fetch=_fetch(cipo=[_cipo(mark_text="ZEPHYR", owner="Northwind Brands Inc.")])
+    )
+    claim = _claim(raw="We compete with ZEPHYR®")
+    assert await src.check(_FakeSession(_entity()), claim) is None
+
+
 # --------------------------------------------------------------------------
 # First-use comparison.
 # --------------------------------------------------------------------------
@@ -337,6 +359,16 @@ async def test_a_first_use_label_wins_over_the_owner_label() -> None:
     verdict = await src.check(_FakeSession(_entity()), claim)
 
     assert verdict is not None and verdict.result["fact"] == FACT_TRADEMARK_FIRST_USE
+
+
+async def test_a_marketing_in_market_since_label_is_no_signal() -> None:
+    """ "in market since" / "brand in market since" is general market presence,
+    NOT the register's legal first-use-in-commerce date. It is no longer a
+    first-use label, so a deck's "in market since 2015" against a declared first
+    use of 2016 -- both legitimately true -- is not compared into a conflict."""
+    src = TrademarkSource(fetch=_fetch(cipo=[_cipo(first_use="2016-01-01")]))
+    claim = _claim(attribute="Brand in market since", raw="ACME® 2015")
+    assert await src.check(_FakeSession(_entity()), claim) is None
 
 
 # --------------------------------------------------------------------------
