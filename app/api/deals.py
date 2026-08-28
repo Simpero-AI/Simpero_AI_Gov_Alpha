@@ -21,6 +21,7 @@ from app.repo.DealRepo import DealRepo
 from app.repo.EntityResolutionRepo import EntityResolutionRepo
 from app.repo.HumanAuditRepo import HumanAuditRepo
 from app.repo.IntakeLinkRepo import IntakeLinkRepo
+from app.repo.IntakeResponseRepo import IntakeResponseRepo
 from app.repo.ScreeningResultRepo import ScreeningResultRepo
 from app.repo.SessionRepo import SessionRepo
 from app.repo.UserRepo import UserRepo
@@ -47,6 +48,10 @@ from app.schemas.deals import (
     ValueDelta,
 )
 from app.schemas.intake_link import CreateIntakeLinkRequest, CreateIntakeLinkResponse
+from app.schemas.intake_response import (
+    IntakeResponseAnswerResponse,
+    IntakeResponseResponse,
+)
 from app.services.dashboard_stats import compute_month_bounds, compute_pipeline_value_delta
 from app.services.entity_resolution import get_resolver
 from app.services.entity_resolution.types import EntityResolutionError
@@ -895,4 +900,44 @@ async def create_intake_link(
         token=raw_token,
         status=compute_intake_link_effective_status(link),
         expires_at=link.expires_at,
+    )
+
+
+@router.get("/{deal_id}/intake-response", response_model=IntakeResponseResponse)
+async def get_intake_response(
+    deal_id: uuid.UUID, db: AsyncSession = Depends(get_db)
+) -> IntakeResponseResponse:
+    """P3-05. The org-side read of what the external party submitted, for
+    Step 3's answers panel (P5-05) and the deal detail page (Q12). 404 until
+    a submit has actually happened -- an intake link merely being pending is
+    not a response.
+
+    The `answers` entries are validated straight out of the stored JSONB by
+    field name: the blob is snake_case (the codebase's convention for stored
+    JSON, see the brief's "Stored shapes"), and CamelModel's
+    populate_by_name=True accepts that while still emitting camelCase on the
+    wire. Anything the blob carries beyond the four documented keys is
+    dropped here rather than passed through, so the wire shape stays exactly
+    what the frontend contract says it is."""
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    response = await IntakeResponseRepo(db).latest_for_deal(deal_id)
+    if response is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No intake response has been submitted for this deal",
+        )
+
+    stored = response.answers or {}
+    return IntakeResponseResponse(
+        id=str(response.id),
+        deal_id=str(response.deal_id),
+        respondent_email=response.respondent_email,
+        submitted_at=response.submitted_at,
+        answers=[
+            IntakeResponseAnswerResponse.model_validate(entry)
+            for entry in stored.get("answers", [])
+        ],
     )
