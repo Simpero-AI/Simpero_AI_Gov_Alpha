@@ -9,9 +9,11 @@ contract and DB state, not the worker task (see test_start_deal_analysis_job.py
 for that).
 """
 
+import hashlib
 import json
 import uuid
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -71,7 +73,14 @@ def seeded_org(owner_conn) -> Iterator[dict[str, Any]]:
     yield {"clerk_org_id": clerk_org_id, "org_pk": org_pk}
 
     with owner_conn.cursor() as cur:
-        for table in ("human_audit_log", "analysis_run", "data_source", "deals", "users"):
+        for table in (
+            "human_audit_log",
+            "analysis_run",
+            "data_source",
+            "deal_intake_link",
+            "deals",
+            "users",
+        ):
             cur.execute(f"DELETE FROM {table} WHERE org_id = %s", (org_pk,))
         cur.execute("DELETE FROM organisation WHERE id = %s", (org_pk,))
 
@@ -127,6 +136,59 @@ def _seed_analysis_run(
             (org_pk, deal_id, job_name, status, error_message, json.dumps(job_comments)),
         )
         return str(cur.fetchone()[0])
+
+
+def _token_hash(seed: str) -> str:
+    return hashlib.sha256(seed.encode()).hexdigest()
+
+
+def _seed_intake_link(
+    owner_conn,
+    org_pk: int,
+    clerk_org_id: str,
+    deal_id: str,
+    status: str,
+    expires_at: datetime,
+) -> str:
+    """Mirrors tests/test_intake_link_generate.py::_seed_pending_link
+    (duplicated here per that module's own stated precedent for cross-file
+    duplication, not shared), but parameterized by status. Always inserts as
+    'pending' first (the column's server_default) and, when the target status
+    isn't 'pending', UPDATEs to it afterward -- the same two-step pattern
+    this file's own _seed_data_source helper uses for its status transitions;
+    a single-step INSERT ... status=<terminal> would still work today, but
+    the one-way-status trigger only fires on UPDATE, and mirroring the
+    generate-then-transition path here keeps this helper consistent with how
+    every non-pending row is actually produced in production. created_by_user_id
+    points at a throwaway user row since the column is NOT NULL."""
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO users (org_id, role, login_method, clerk_user_id, clerk_org_id, status) "
+            "VALUES (%s, 'admin', 'email', %s, %s, 'active') RETURNING id",
+            (org_pk, f"seed-user-{uuid.uuid4().hex[:8]}", clerk_org_id),
+        )
+        user_pk = cur.fetchone()[0]
+        cur.execute(
+            "INSERT INTO deal_intake_link "
+            "(org_id, clerk_org_id, deal_id, token_hash, recipient_email, expires_at, "
+            "created_by_user_id) VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
+            (
+                org_pk,
+                clerk_org_id,
+                deal_id,
+                _token_hash(f"seed-{uuid.uuid4().hex}"),
+                "recipient@example.com",
+                expires_at,
+                user_pk,
+            ),
+        )
+        link_id = cur.fetchone()[0]
+        if status != "pending":
+            cur.execute(
+                "UPDATE deal_intake_link SET status = %s WHERE id = %s",
+                (status, link_id),
+            )
+        return str(link_id)
 
 
 # --- POST /deals/{deal_id}/analysis ----------------------------------------
@@ -220,6 +282,82 @@ def test_start_analysis_allowed_once_prior_run_is_terminal(
 ):
     _seed_data_source(owner_conn, seeded_org["org_pk"], seeded_deal, "verified")
     _seed_analysis_run(owner_conn, seeded_org["org_pk"], seeded_deal, "failed", "boom")
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    resp = client.post(f"/deals/{seeded_deal}/analysis", json={})
+    assert resp.status_code == 202
+    assert len(mocked_queue) == 1
+
+
+# --- P3-14: pending intake link blocks start-analysis -----------------------
+
+
+def test_start_analysis_409_when_intake_link_is_pending(
+    client, owner_conn, seeded_org, seeded_deal, mocked_queue
+):
+    _seed_data_source(owner_conn, seeded_org["org_pk"], seeded_deal, "verified")
+    _seed_intake_link(
+        owner_conn,
+        seeded_org["org_pk"],
+        seeded_org["clerk_org_id"],
+        seeded_deal,
+        "pending",
+        datetime.now(UTC) + timedelta(days=7),
+    )
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    resp = client.post(f"/deals/{seeded_deal}/analysis", json={})
+    assert resp.status_code == 409
+    assert (
+        resp.json()["detail"]
+        == "Cannot start analysis while an intake link is still pending for this deal"
+    )
+
+    with owner_conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM analysis_run WHERE deal_id = %s", (seeded_deal,))
+        assert cur.fetchone()[0] == 0
+    assert not mocked_queue
+
+
+def test_start_analysis_proceeds_when_pending_link_is_past_expiry(
+    client, owner_conn, seeded_org, seeded_deal, mocked_queue
+):
+    link_id = _seed_intake_link(
+        owner_conn,
+        seeded_org["org_pk"],
+        seeded_org["clerk_org_id"],
+        seeded_deal,
+        "pending",
+        datetime.now(UTC) - timedelta(hours=1),
+    )
+    _seed_data_source(owner_conn, seeded_org["org_pk"], seeded_deal, "verified")
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    resp = client.post(f"/deals/{seeded_deal}/analysis", json={})
+    assert resp.status_code == 202
+    assert len(mocked_queue) == 1
+
+    # The guard read the row as effectively-expired via
+    # compute_intake_link_effective_status without writing to it -- lazy
+    # expiry, not a flip to 'expired' in storage.
+    with owner_conn.cursor() as cur:
+        cur.execute("SELECT status FROM deal_intake_link WHERE id = %s", (link_id,))
+        assert cur.fetchone()[0] == "pending"
+
+
+@pytest.mark.parametrize("link_status", ["submitted", "revoked", "expired"])
+def test_start_analysis_proceeds_when_intake_link_is_terminal(
+    client, owner_conn, seeded_org, seeded_deal, mocked_queue, link_status
+):
+    _seed_data_source(owner_conn, seeded_org["org_pk"], seeded_deal, "verified")
+    _seed_intake_link(
+        owner_conn,
+        seeded_org["org_pk"],
+        seeded_org["clerk_org_id"],
+        seeded_deal,
+        link_status,
+        datetime.now(UTC) + timedelta(days=7),
+    )
     _authed(seeded_org["clerk_org_id"], "user-1")
 
     resp = client.post(f"/deals/{seeded_deal}/analysis", json={})
