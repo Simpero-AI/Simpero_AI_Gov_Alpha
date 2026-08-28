@@ -67,3 +67,27 @@ class IntakeLinkRepo(BaseRepo[DealIntakeLink, dict]):
         the transaction before the reissue's INSERT is attempted."""
         link.status = "expired"
         return link
+
+    async def latest_for_deal(self, deal_id: uuid.UUID) -> DealIntakeLink | None:
+        """The deal's most recent link row, whatever its status -- the row the
+        org-side status read (P3-02) and the pipeline grid (P3-06) describe.
+        Deliberately unfiltered by status: a reissue leaves the older
+        `expired`/`revoked` rows behind, and both callers need the newest of
+        them, not the newest *pending* one (there may be none).
+
+        Ordered by `id` as well as `created_at` because `created_at`'s
+        server_default is `now()` -- transaction time, not statement time --
+        so two rows inserted in one transaction share a timestamp exactly and
+        the ordering would otherwise be arbitrary between them.
+
+        Read-only: never writes `status = 'expired'`, even for a row whose
+        `expires_at` has passed. Callers pass the row through
+        compute_intake_link_effective_status; only P3-01 persists that.
+        """
+        result = await self.session.execute(
+            select(DealIntakeLink)
+            .where(DealIntakeLink.deal_id == deal_id)
+            .order_by(DealIntakeLink.created_at.desc(), DealIntakeLink.id.desc())
+            .limit(1)
+        )
+        return result.scalars().first()
