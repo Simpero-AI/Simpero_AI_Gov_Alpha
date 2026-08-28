@@ -67,3 +67,14 @@ class IntakeLinkRepo(BaseRepo[DealIntakeLink, dict]):
         the transaction before the reissue's INSERT is attempted."""
         link.status = "expired"
         return link
+
+    async def mark_revoked(self, link: DealIntakeLink) -> DealIntakeLink:
+        """P3-03's half of the one legitimate UPDATE path (mark_expired is
+        P3-01's). Same shape deliberately: sets status on an already-tracked
+        instance and does not flush, so the caller decides when the UPDATE
+        lands relative to its audit write. `pending -> revoked` is the only
+        transition this can produce -- the caller has already established the
+        row is pending, and trg_deal_intake_link_one_way_status rejects any
+        move off a terminal status regardless."""
+        link.status = "revoked"
+        return link

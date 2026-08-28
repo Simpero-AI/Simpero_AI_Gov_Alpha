@@ -24,6 +24,7 @@ from app.repo.IntakeLinkRepo import IntakeLinkRepo
 from app.repo.ScreeningResultRepo import ScreeningResultRepo
 from app.repo.SessionRepo import SessionRepo
 from app.repo.UserRepo import UserRepo
+from app.schemas.common import SuccessResponse
 from app.schemas.deals import (
     AvgAiScoreStat,
     CreateDealRequest,
@@ -896,3 +897,65 @@ async def create_intake_link(
         status=compute_intake_link_effective_status(link),
         expires_at=link.expires_at,
     )
+
+
+@router.delete("/{deal_id}/intake-link", response_model=SuccessResponse)
+async def revoke_intake_link(
+    deal_id: uuid.UUID,
+    claims: dict[str, Any] = Depends(get_claims),
+    db: AsyncSession = Depends(get_db),
+) -> SuccessResponse:
+    """P3-03. Revokes the deal's live intake link -- `pending` -> `revoked`,
+    the other half of the one legitimate UPDATE path (P3-01's lazy-expire is
+    the first). A revoked row stops satisfying intake_token_lookup's
+    `status = 'pending'` clause, so the recipient's token goes dead at the
+    policy layer on the next request, not merely at this application's.
+
+    Reads through get_pending_for_deal, which locks the row: without the
+    lock, a revoke racing P3-01's lazy-expire (or a second revoke) could
+    both read the same pending row and the loser's UPDATE would hit
+    trg_deal_intake_link_one_way_status's RAISE EXCEPTION as an unhandled
+    500 rather than this handler's clean 409.
+
+    A pending row already past its `expires_at` is deliberately NOT revoked:
+    it is functionally dead already, and flipping it to `revoked` would both
+    write a misleading audit row and take the lazy-expire path away from
+    P3-01, which the plan pins as the only place `status = 'expired'` is ever
+    written."""
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    intake_link_repo = IntakeLinkRepo(db)
+    link = await intake_link_repo.get_pending_for_deal(deal_id)
+    if link is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No pending intake link exists for this deal",
+        )
+
+    if compute_intake_link_effective_status(link) != "pending":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This intake link has already expired and cannot be revoked",
+        )
+
+    await intake_link_repo.mark_revoked(link)
+    await db.flush()
+
+    org_id, actor_id, _actor_email, _user_id = await _actor(db, claims)
+    await HumanAuditRepo(db).append(
+        {
+            "org_id": org_id,
+            "actor_id": actor_id,
+            # Deliberately NULL, same call as P3-01's: created_by_user_id on
+            # the link row already identifies the org user (Q4/PO review's
+            # exact event list pins actor_email NULL for this event type).
+            "actor_email": None,
+            "event_type": "intake_link_revoked",
+            "deal_id": deal_id,
+            "payload": {"intake_link_id": str(link.id)},
+        }
+    )
+
+    return SuccessResponse(success=True)
