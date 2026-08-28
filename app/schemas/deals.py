@@ -92,6 +92,14 @@ class DashboardStatsResponse(CamelModel):
     dd_completion_pct: DdCompletionStat
 
 
+# The three states the Live Pipeline grid routes on (P3-06, F4/D3), NOT the
+# four deal_intake_link statuses. Anything that is not live-and-waiting or
+# actually-submitted -- no link, revoked, expired, or still stored `pending`
+# past its expires_at -- collapses to "none" and routes exactly like a deal
+# that never had a link. See compute_pipeline_intake_status.
+IntakePipelineStatus = Literal["none", "pending", "submitted"]
+
+
 class LivePipelineRowResponse(CamelModel):
     deal_id: str
     name: str
@@ -109,6 +117,7 @@ class LivePipelineRowResponse(CamelModel):
     metric_discrepancy_fields: list[str] | None
 
     agent_status: DealStatusResponse
+    intake_status: IntakePipelineStatus
 
 
 class DealRowResponse(CamelModel):

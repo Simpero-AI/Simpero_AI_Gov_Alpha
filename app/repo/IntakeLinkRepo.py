@@ -1,4 +1,5 @@
 import uuid
+from collections.abc import Sequence
 
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -67,3 +68,39 @@ class IntakeLinkRepo(BaseRepo[DealIntakeLink, dict]):
         the transaction before the reissue's INSERT is attempted."""
         link.status = "expired"
         return link
+
+    async def latest_for_deals(
+        self, deal_ids: Sequence[uuid.UUID]
+    ) -> dict[uuid.UUID, DealIntakeLink]:
+        """Every listed deal's most recent link row, in ONE query, keyed by
+        deal_id -- deals with no link at all are simply absent from the dict.
+
+        Batched deliberately rather than looped: the Live Pipeline grid
+        (P3-06) is the dashboard's main table and already runs two queries
+        per row (see list_pipeline's own note). Adding a third per row, for
+        a feature most deals will never use, is a real regression on the
+        common path; DISTINCT ON keeps it at one query for the whole grid.
+
+        Unfiltered by status, same reasoning as latest_for_deal: a reissue
+        leaves older terminal rows behind and the caller needs the newest row
+        whatever state it is in. Ordered by `id` as well as `created_at`
+        because `created_at`'s now() default is transaction time, so rows
+        written in one transaction share a timestamp exactly.
+
+        Read-only -- never writes `status = 'expired'` for a row past its
+        expires_at. The caller passes each row through
+        compute_pipeline_intake_status; only P3-01 persists that.
+        """
+        if not deal_ids:
+            return {}
+        result = await self.session.execute(
+            select(DealIntakeLink)
+            .where(DealIntakeLink.deal_id.in_(deal_ids))
+            .distinct(DealIntakeLink.deal_id)
+            .order_by(
+                DealIntakeLink.deal_id,
+                DealIntakeLink.created_at.desc(),
+                DealIntakeLink.id.desc(),
+            )
+        )
+        return {link.deal_id: link for link in result.scalars().all()}
