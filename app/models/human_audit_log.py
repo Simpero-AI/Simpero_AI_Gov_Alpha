@@ -23,9 +23,27 @@ class HumanAuditLog(Base):
     """
 
     __tablename__ = "human_audit_log"
+    __table_args__ = {
+        "implicit_returning": False,  # dd_public has INSERT only, no SELECT, on this
+        # table (deliberate — see 8f2a4c6e9b31's docstring). Postgres requires SELECT
+        # on any column named in RETURNING, so a dd_public-scoped INSERT (P3-07) fails
+        # unless the ORM is told not to ask for it. No existing HumanAuditRepo.append()
+        # caller reads the returned object's attributes, so this has no effect on
+        # dd_app callers beyond removing an unused optimization.
+    }
 
+    # default= (client-side) alongside server_default: with implicit_returning
+    # disabled above, the ORM has no RETURNING to learn a server-generated PK
+    # back from -- without a client-side value it can't register the flushed
+    # object as persistent (FlushError: NULL identity key). default=uuid.uuid4
+    # computes the id in Python before the INSERT is even sent, so the session
+    # already knows the PK; server_default stays as the DB-level fallback for
+    # any insert that bypasses the ORM.
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        server_default=func.gen_random_uuid(),
     )
 
     # Tenant. Integer FK because organisation.id is a serial Integer — RLS joins

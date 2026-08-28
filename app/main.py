@@ -2,13 +2,27 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api import admin, auth, deals, health, history, investment_profile, logs, mandates, uploads
+from app.api import (
+    admin,
+    auth,
+    deals,
+    health,
+    history,
+    inspector,
+    intake_questions,
+    investment_profile,
+    logs,
+    mandates,
+    public_intake,
+    uploads,
+)
 from app.core.config import get_settings
 from app.core.exceptions import (
     AuthenticationError,
     AuthorizationError,
     TenantContextError,
 )
+from app.core.rate_limit_middleware import RateLimitMiddleware
 
 settings = get_settings()
 
@@ -17,6 +31,18 @@ app = FastAPI(
     version="0.1.0",
     description="AI-powered due diligence platform — backend API",
 )
+
+# Starlette's add_middleware inserts each new middleware at position 0 of its
+# internal list, and the stack is built by wrapping in reversed() order -- so
+# the LAST-registered middleware ends up OUTERMOST (sees the request first,
+# the response last). RateLimitMiddleware must be registered BEFORE
+# CORSMiddleware so CORS stays outermost: a 429 short-circuit from the
+# limiter still passes through CORSMiddleware on the way out (so the browser
+# sees a readable 429, not an opaque CORS failure), and CORS preflight
+# OPTIONS requests are fully handled by CORSMiddleware before ever reaching
+# the limiter (so they're never wastefully counted against the rate limit).
+# Do not reorder these two calls.
+app.add_middleware(RateLimitMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
@@ -55,8 +81,11 @@ app.include_router(history.router, prefix=API_PREFIX)
 app.include_router(investment_profile.router, prefix=API_PREFIX)
 app.include_router(logs.router, prefix=API_PREFIX)
 app.include_router(mandates.router, prefix=API_PREFIX)
+app.include_router(intake_questions.router, prefix=API_PREFIX)
+app.include_router(public_intake.router, prefix=API_PREFIX)
 app.include_router(admin.router, prefix=API_PREFIX)
 app.include_router(uploads.router, prefix=API_PREFIX)
+app.include_router(inspector.router, prefix=API_PREFIX)
 
 # Do not open DB connections at startup. PgBouncer transaction pooling requires sessions to be
 # opened per-transaction, not per-application-lifecycle. A startup DB connection would hold a

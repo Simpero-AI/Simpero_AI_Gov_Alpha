@@ -16,6 +16,7 @@ services:
     image: edoburu/pgbouncer:latest
     environment:
       DD_APP_PASSWORD: "${DD_APP_PASSWORD}"
+      DD_PUBLIC_PASSWORD: "${DD_PUBLIC_PASSWORD}"
     # Only docker-compose.prod.yml, Caddyfile, and .env live on the droplet
     # (no repo checkout — see docs/plans/do-droplet-deployment.md §1), so
     # pgbouncer.ini can't be a mounted file here the way the root dev compose
@@ -30,6 +31,13 @@ services:
         cat > /etc/pgbouncer/pgbouncer.ini <<EOF
         [databases]
         * = host=$$PGBOUNCER_DB_HOST port=$$PGBOUNCER_DB_PORT dbname=$$PGBOUNCER_DB_NAME
+        ; dd_public's own named virtual database with a dedicated, smaller
+        ; pool (pool_size=5) so the public intake surface can't starve
+        ; dd_app's pool -- matches docker/pgbouncer.ini's P1-07 design.
+        ; Requires PUBLIC_DATABASE_URL's dbname to be simpero_public, not
+        ; the wildcard's simpero, or dd_public traffic silently falls back
+        ; onto the wildcard entry and this split has no effect.
+        simpero_public = host=$$PGBOUNCER_DB_HOST port=$$PGBOUNCER_DB_PORT dbname=$$PGBOUNCER_DB_NAME pool_size=5
 
         [pgbouncer]
         listen_port = 5432
@@ -37,7 +45,10 @@ services:
         auth_type = md5
         auth_file = /etc/pgbouncer/userlist.txt
         pool_mode = transaction
-        max_client_conn = 22
+        ; Raised from 22 to give dd_public's named entry real headroom
+        ; alongside the wildcard/dd_app path (20), rather than making it
+        ; compete for the same tight budget.
+        max_client_conn = 40
         default_pool_size = 20
         server_reset_query =
         server_tls_sslmode = require
@@ -45,6 +56,7 @@ services:
         log_disconnections = 1
         EOF
         printf '"dd_app" "%s"\n' "$$DD_APP_PASSWORD" > /etc/pgbouncer/userlist.txt
+        printf '"dd_public" "%s"\n' "$$DD_PUBLIC_PASSWORD" >> /etc/pgbouncer/userlist.txt
         exec /usr/bin/pgbouncer /etc/pgbouncer/pgbouncer.ini
     env_file:
       - .env

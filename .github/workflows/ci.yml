@@ -99,6 +99,17 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
+      # Backs VALKEY_URL below — rate-limit/lockout tests (P3-12) need a real
+      # Valkey reachable during `uv run pytest`, same as the postgres service.
+      valkey:
+        image: valkey/valkey:8
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     # ALEMBIC_DATABASE_URL runs migrations as doadmin (DDL). DATABASE_URL is
     # dd_app (DML only, RLS-restricted) — created by the "Create dd_app role"
     # step below, since GitHub's service containers start before checkout and
@@ -106,6 +117,14 @@ jobs:
     env:
       DATABASE_URL: "postgresql+asyncpg://dd_app:ci_dd_app_pw@localhost:5432/simpero"
       ALEMBIC_DATABASE_URL: "postgresql+psycopg2://doadmin:ci_doadmin_pw@localhost:5432/simpero"
+      # dd_public's own connection string -- this job's "Create dd_public role"
+      # step below sets this exact password. Tests that connect directly as
+      # dd_public (tests/test_dd_public_grant_matrix.py and friends) read this
+      # via os.environ, same as owner_conn reads ALEMBIC_DATABASE_URL -- not a
+      # hardcoded localhost DSN, which only matches docker-compose.dev.yml's
+      # port, not this job's Postgres service (port 5432).
+      PUBLIC_DATABASE_URL: "postgresql+asyncpg://dd_public:ci_dd_public_pw@localhost:5432/simpero"
+      INTAKE_SESSION_JWT_SECRET: "ci-intake-secret"
       CLERK_SECRET_KEY: "ci-dummy"
       CLERK_JWKS_URL: "https://example.test/.well-known/jwks.json"
       VALKEY_URL: "redis://localhost:6379/0"
@@ -132,6 +151,15 @@ jobs:
           psql -h localhost -U doadmin -d simpero -c "CREATE ROLE dd_app WITH LOGIN PASSWORD 'ci_dd_app_pw'"
           psql -h localhost -U doadmin -d simpero -c "GRANT CONNECT ON DATABASE simpero TO dd_app"
 
+      # dd_public is the External Deal Intake Link feature's RLS-restricted
+      # external-facing role — mirrors sandbox/init/02-public-role.sql.
+      - name: Create dd_public role
+        env:
+          PGPASSWORD: ci_doadmin_pw
+        run: |
+          psql -h localhost -U doadmin -d simpero -c "CREATE ROLE dd_public WITH LOGIN PASSWORD 'ci_dd_public_pw'"
+          psql -h localhost -U doadmin -d simpero -c "GRANT CONNECT ON DATABASE simpero TO dd_public"
+
       - name: Apply migrations
         run: uv run alembic upgrade head
 
@@ -149,6 +177,8 @@ jobs:
     env:
       DATABASE_URL: "postgresql+asyncpg://ci:ci@localhost:5432/ci"
       ALEMBIC_DATABASE_URL: "postgresql+psycopg2://ci:ci@localhost:5432/ci"
+      PUBLIC_DATABASE_URL: "postgresql+asyncpg://dd_public:ci_dd_public_pw@localhost:5432/simpero"
+      INTAKE_SESSION_JWT_SECRET: "ci-intake-secret"
       CLERK_SECRET_KEY: "ci-dummy"
       CLERK_JWKS_URL: "https://example.test/.well-known/jwks.json"
       VALKEY_URL: "redis://localhost:6379/0"

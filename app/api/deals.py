@@ -1,19 +1,26 @@
 import json
+import secrets
 import uuid
-from typing import Any
+from datetime import UTC, datetime, timedelta
+from typing import Any, cast
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dependencies import get_claims, get_db
+from app.core.intake_security import sha256_hex
 from app.jobs.queue import get_queue
 from app.models.analysis_run import AnalysisRun
 from app.models.deal import Deal
+from app.models.entity_resolution import EntityResolution
 from app.repo.AnalysisRunRepo import AnalysisRunRepo
 from app.repo.DataSourceRepo import DataSourceRepo
+from app.repo.DealIntakeQuestionRepo import DealIntakeQuestionRepo
 from app.repo.DealRepo import DealRepo
+from app.repo.EntityResolutionRepo import EntityResolutionRepo
 from app.repo.HumanAuditRepo import HumanAuditRepo
+from app.repo.IntakeLinkRepo import IntakeLinkRepo
 from app.repo.ScreeningResultRepo import ScreeningResultRepo
 from app.repo.SessionRepo import SessionRepo
 from app.repo.UserRepo import UserRepo
@@ -23,9 +30,13 @@ from app.schemas.deals import (
     CreateDealResponse,
     DashboardStatsResponse,
     DdCompletionStat,
+    DealDocumentResponse,
+    DealDocumentStatus,
     DealRowResponse,
     DealStatusResponse,
     DealWithLatestMemoResponse,
+    EntityResolutionResponse,
+    FormerNameResponse,
     LatestMemoSessionResponse,
     LivePipelineRowResponse,
     PipelineStepResponse,
@@ -35,11 +46,17 @@ from app.schemas.deals import (
     UpdateDealRequest,
     ValueDelta,
 )
+from app.schemas.intake_link import CreateIntakeLinkRequest, CreateIntakeLinkResponse
 from app.services.dashboard_stats import compute_month_bounds, compute_pipeline_value_delta
+from app.services.entity_resolution import get_resolver
+from app.services.entity_resolution.types import EntityResolutionError
+from app.services.intake_links import compute_intake_link_effective_status
 from app.services.memo_summary import derive_pipeline_metrics
 from app.services.pipeline_steps import no_job_steps
 from app.services.screening.rule_view import enrich_rule_results
 from app.services.screening.rulebook import load_rulebook
+
+_INTAKE_LINK_TTL_DAYS = 7
 
 router = APIRouter(prefix="/deals", tags=["deals"])
 
@@ -510,6 +527,148 @@ async def _compute_deal_status(db: AsyncSession, deal_id: uuid.UUID) -> DealStat
     )
 
 
+def _entity_resolution_response(row: EntityResolution) -> EntityResolutionResponse:
+    return EntityResolutionResponse(
+        id=str(row.id),
+        deal_id=str(row.deal_id),
+        source=row.source,
+        # Validated against the Literal, so a status the DB CHECK allows but
+        # this schema does not fails loudly here rather than reaching a client.
+        status=row.status,  # pyright: ignore[reportArgumentType]
+        query_name=row.query_name,
+        registry_id=row.registry_id,
+        legal_name=row.legal_name,
+        # Stored shape == wire shape, so the persisted rows are validated
+        # rather than rebuilt field by field -- same call as rule_results.
+        former_names=[FormerNameResponse.model_validate(f) for f in (row.former_names or [])],
+        matched_on=row.matched_on,  # pyright: ignore[reportArgumentType]
+        reason=row.reason,
+        evidence=row.evidence,
+        created_at=row.created_at,
+    )
+
+
+@router.post(
+    "/{deal_id}/entity-resolution",
+    response_model=EntityResolutionResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def resolve_deal_entity(
+    deal_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    claims: dict[str, Any] = Depends(get_claims),
+) -> EntityResolutionResponse:
+    """SIM-262: resolve this deal's company to a registry anchor (SEC EDGAR
+    CIK) and record the attempt.
+
+    The front gate of corroboration -- SIM-408's harvest, SIM-253's reconcile
+    and SIM-254's roll-up all inherit this answer, so the resolver is
+    deliberately conservative: an ambiguous name resolves to `unresolved` and
+    checks nothing rather than guessing, because a wrong anchor poisons every
+    downstream check.
+
+    `not_found` is a 201 like any other outcome, not a 404. It is a real,
+    expected answer -- most private targets have no SEC filer -- and the row
+    recording that we looked is exactly as valuable as one recording a hit.
+    Absence is not contradiction.
+
+    Append-only: re-resolving a renamed or newly-filed company INSERTs a new
+    row, and the older rows stay as the record of how the answer changed.
+
+    Known tradeoff: the registry call happens inside this request's open
+    transaction, so a slow SEC pins a PgBouncer slot for its duration. Capped
+    by the resolver's 10s timeout (the 2026-08-16 spike ran ~2s) and fine at
+    Alpha volume. If it stops being fine, this moves to a job stage -- which
+    is SIM-253's call about pipeline placement anyway, not a decision to
+    pre-empt here.
+    """
+    org_id, actor_id, actor_email, _ = await _actor(db, claims)
+
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    try:
+        resolution = await get_resolver().resolve(deal.name)
+    except EntityResolutionError as exc:
+        # 502, not 500: the failure is upstream at SEC, and it is explicitly
+        # NOT a resolution outcome -- nothing is persisted, so a retry after
+        # the registry recovers is clean rather than appending an "error" row
+        # that later reads like a finding about the company.
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+    row = await EntityResolutionRepo(db).record(resolution, org_id=org_id, deal_id=deal_id)
+    await db.flush()
+
+    await HumanAuditRepo(db).append(
+        {
+            "org_id": org_id,
+            "actor_id": actor_id,
+            "actor_email": actor_email,
+            "event_type": "deal_entity_resolved",
+            "deal_id": deal_id,
+            # The full resolution, so the append-only trail carries the
+            # evidence independently of the entity_resolution table.
+            "payload": resolution.to_json(),
+        }
+    )
+
+    return _entity_resolution_response(row)
+
+
+@router.get("/{deal_id}/entity-resolution", response_model=EntityResolutionResponse)
+async def get_deal_entity_resolution(
+    deal_id: uuid.UUID, db: AsyncSession = Depends(get_db)
+) -> EntityResolutionResponse:
+    """SIM-262: the deal's most recent entity-resolution attempt.
+
+    404 distinguishes the two real cases in its detail: no such deal, versus a
+    deal nobody has tried to resolve yet. A deal that WAS resolved and came
+    back `not_found` is a 200 carrying that status -- "we looked and found
+    nothing" is an answer, and collapsing it into a 404 would make it
+    indistinguishable from "we never looked".
+    """
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    row = await EntityResolutionRepo(db).latest_for_deal(deal_id)
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="This deal's entity has not been resolved yet",
+        )
+
+    return _entity_resolution_response(row)
+
+
+@router.get("/{deal_id}/documents", response_model=list[DealDocumentResponse])
+async def list_deal_documents(
+    deal_id: uuid.UUID, db: AsyncSession = Depends(get_db)
+) -> list[DealDocumentResponse]:
+    """deals.documents -> DealDocumentResponse[]. The TODO in
+    useUploadDocument.ts and the "no listing endpoint exists yet" callouts
+    in MaterialsCard/DataRoomPane/OverviewPane (Simpero_AI_Gov_Web) are what
+    this closes. Org-side and external-intake uploads (P3-10) both land in
+    data_source through the same DataSourceRepo, so this list is identical
+    regardless of which path a document came in through -- nothing here
+    filters or tags by origin."""
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    documents = await DataSourceRepo(db).list_for_deal(deal_id)
+    return [
+        DealDocumentResponse(
+            id=str(document.id),
+            filename=document.filename,
+            status=cast(DealDocumentStatus, document.status),
+            created_at=document.created_at,
+        )
+        for document in documents
+    ]
+
+
 @router.get("/{deal_id}/status", response_model=DealStatusResponse)
 async def get_deal_status(
     deal_id: uuid.UUID, db: AsyncSession = Depends(get_db)
@@ -547,6 +706,13 @@ async def start_analysis(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Analysis is already running for this deal",
+        )
+
+    pending_link = await IntakeLinkRepo(db).get_pending_for_deal_unlocked(deal_id)
+    if pending_link is not None and compute_intake_link_effective_status(pending_link) == "pending":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Cannot start analysis while an intake link is still pending for this deal",
         )
 
     data_sources = await DataSourceRepo(db).list_for_deal(deal_id)
@@ -617,4 +783,116 @@ async def start_analysis(
         current_phase=None,
         steps=_steps_for_status(None),
         started_at=run.started_at,
+    )
+
+
+@router.post(
+    "/{deal_id}/intake-link",
+    response_model=CreateIntakeLinkResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_intake_link(
+    deal_id: uuid.UUID,
+    body: CreateIntakeLinkRequest,
+    claims: dict[str, Any] = Depends(get_claims),
+    db: AsyncSession = Depends(get_db),
+) -> CreateIntakeLinkResponse:
+    """P3-01. Generates the external deal-intake link -- one live (`pending`)
+    link per deal, enforced by ux_deal_intake_link_pending_deal (partial
+    unique index) at insert time, not a fast-path check here for the still-
+    live case (let the constraint reject it, same idiom as start_analysis's
+    uq_analysis_run_active)."""
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    # Deliberately latest_for_deal, not active_for_deal -- ANY analysis_run
+    # row (any status) blocks link generation, not just a currently-running
+    # one. Flagged separately as a product question needing later
+    # confirmation; implemented as specified here.
+    if await AnalysisRunRepo(db).latest_for_deal(deal_id) is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Cannot generate an intake link once analysis has started for this deal",
+        )
+
+    intake_link_repo = IntakeLinkRepo(db)
+    existing = await intake_link_repo.get_pending_for_deal(deal_id)
+    reissued = False
+    if existing is not None and existing.expires_at <= datetime.now(UTC):
+        # Lazy-expire: flip the stale row to a terminal status and flush now,
+        # so its UPDATE commits within this transaction before the new
+        # link's INSERT is attempted -- otherwise both rows would be
+        # `pending` at once and the partial unique index would reject the
+        # insert. A still-live pending link is left alone here; the insert
+        # below is what rejects that case (via the same index).
+        await intake_link_repo.mark_expired(existing)
+        await db.flush()
+        reissued = True
+
+    org_id, actor_id, actor_email, user_id = await _actor(db, claims)
+
+    questions = await DealIntakeQuestionRepo(db).list_active()
+    questions_snapshot = {
+        "snapshot_version": 1,
+        "captured_at": datetime.now(UTC).isoformat(),
+        "questions": [
+            {
+                "question_key": q.question_key,
+                "prompt": q.prompt,
+                "help_text": q.help_text,
+                "input_type": q.input_type,
+                "required": q.required,
+                "display_order": q.display_order,
+            }
+            for q in questions
+        ],
+    }
+
+    raw_token = secrets.token_urlsafe(32)
+    expires_at = datetime.now(UTC) + timedelta(days=_INTAKE_LINK_TTL_DAYS)
+
+    try:
+        link = await intake_link_repo.create(
+            {
+                "id": uuid.uuid4(),
+                "org_id": org_id,
+                "clerk_org_id": claims["tenant_id"],
+                "deal_id": deal_id,
+                "token_hash": sha256_hex(raw_token),
+                "recipient_email": body.recipient_email,
+                "questions_snapshot": questions_snapshot,
+                "expires_at": expires_at,
+                "created_by_user_id": user_id,
+            }
+        )
+        # Forces ux_deal_intake_link_pending_deal's constraint check now,
+        # inside this try block, rather than at the transaction's final
+        # commit outside any handler of ours -- same idiom as
+        # start_analysis's uq_analysis_run_active flush.
+        await db.flush()
+    except IntegrityError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="An active intake link already exists for this deal",
+        ) from exc
+
+    await HumanAuditRepo(db).append(
+        {
+            "org_id": org_id,
+            "actor_id": actor_id,
+            # Deliberate override: created_by_user_id on the link row already
+            # captures the actor; this audit row's actor_email stays unset.
+            "actor_email": None,
+            "event_type": "intake_link_reissued" if reissued else "intake_link_generated",
+            "deal_id": deal_id,
+            "payload": {"intake_link_id": str(link.id), "recipient_email": body.recipient_email},
+        }
+    )
+
+    return CreateIntakeLinkResponse(
+        id=str(link.id),
+        token=raw_token,
+        status=compute_intake_link_effective_status(link),
+        expires_at=link.expires_at,
     )

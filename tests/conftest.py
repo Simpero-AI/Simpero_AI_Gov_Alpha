@@ -1,15 +1,23 @@
 import os
+import secrets
 from collections.abc import AsyncGenerator, Iterator
+from datetime import UTC, datetime, timedelta
+from typing import cast
 
 import psycopg2
 import pytest
+from saq.queue.redis import RedisQueue
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import AsyncSessionLocal
+from app.core.intake_security import sha256_hex
+from app.core.public_database import PublicAsyncSessionLocal
+from app.jobs.queue import get_queue
 
 TEST_org_id = "test-tenant-00000000"
 TEST_user_id = "test-user-00000000"
+_INTAKE_LINK_EXPIRES_AT = datetime.now(UTC) + timedelta(days=7)
 
 
 @pytest.fixture(scope="session")
@@ -66,6 +74,61 @@ def user_a_id(owner_conn, org_a_id, test_org_id) -> int:
         return cur.fetchone()[0]
 
 
+def _insert_deal(cur, org_pk: int, name: str = "Test Deal") -> str:
+    cur.execute("INSERT INTO deals (org_id, name) VALUES (%s, %s) RETURNING id", (org_pk, name))
+    return str(cur.fetchone()[0])
+
+
+@pytest.fixture
+def org_a_deal_id(owner_conn, org_a_id) -> str:
+    """Moved here from tests/test_public_dependencies.py (its original home,
+    same reasoning as org_a_id above) since tests/test_public_intake_session.py
+    now needs it too. No teardown, deliberately -- same reasoning as
+    test_intake_link_rls.py's org_a_deal_id."""
+    with owner_conn.cursor() as cur:
+        return _insert_deal(cur, org_a_id, "Org A's deal")
+
+
+@pytest.fixture
+def pending_link_with_token(
+    owner_conn, org_a_id, org_a_deal_id, user_a_id, test_org_id
+) -> Iterator[dict]:
+    """Moved here from tests/test_public_dependencies.py -- same reasoning as
+    org_a_deal_id above. A pending, unexpired deal_intake_link row seeded via
+    owner_conn (bypasses RLS) -- we control the raw token here (never
+    stored), and seed only its SHA-256 into token_hash, mirroring how the
+    real create-link route (P3) would produce it."""
+    raw_token = secrets.token_urlsafe(32)
+    token_hash = sha256_hex(raw_token)
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO deal_intake_link "
+            "(org_id, clerk_org_id, deal_id, token_hash, recipient_email, expires_at, "
+            "created_by_user_id, status) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending') RETURNING id",
+            (
+                org_a_id,
+                test_org_id,
+                org_a_deal_id,
+                token_hash,
+                "recipient@org-a.example",
+                _INTAKE_LINK_EXPIRES_AT,
+                user_a_id,
+            ),
+        )
+        link_id = str(cur.fetchone()[0])
+
+    yield {
+        "id": link_id,
+        "raw_token": raw_token,
+        "clerk_org_id": test_org_id,
+        "deal_id": org_a_deal_id,
+    }
+
+    with owner_conn.cursor() as cur:
+        cur.execute("DELETE FROM deal_intake_link WHERE id = %s", (link_id,))
+
+
 @pytest.fixture
 async def db_session(test_org_id: str) -> AsyncGenerator[AsyncSession, None]:
     """
@@ -93,3 +156,45 @@ async def db_session(test_org_id: str) -> AsyncGenerator[AsyncSession, None]:
         )
         yield session
         await session.rollback()
+
+
+@pytest.fixture
+async def public_db_session() -> AsyncGenerator[AsyncSession, None]:
+    """Raw dd_public session, NO GUC set by default -- callers set whichever
+    GUC(s) (app.intake_token_hash / app.intake_link_id / app.org_id /
+    app.intake_deal_id) their own test needs, inline, via set_config. Used by
+    P1-03/04/06/08/09/05's test suites."""
+    async with PublicAsyncSessionLocal() as session, session.begin():
+        yield session
+        await session.rollback()
+
+
+@pytest.fixture
+async def clear_rate_limit_keys() -> AsyncGenerator[None, None]:
+    """Deletes every `ratelimit:*` key in Valkey, both before and after the
+    test. Non-autouse (explicit opt-in) -- only test modules that actually
+    exercise app.core.rate_limit_middleware need Valkey reachable; everything
+    else is unaffected. Without the before-clear, keys left behind by a
+    previous (possibly failed) run could pre-trip a fresh run's limit; without
+    the after-clear, this test's own requests would count against whatever
+    runs next.
+    """
+    # get_queue() is statically typed as the abstract saq.Queue; VALKEY_URL
+    # is always redis://, so it's always a RedisQueue with a `.redis` client.
+    redis = cast(RedisQueue, get_queue()).redis
+
+    async def _clear() -> None:
+        async for key in redis.scan_iter("ratelimit:*"):
+            await redis.delete(key)
+
+    await _clear()
+    yield
+    await _clear()
+    # get_queue() is a process-wide (lru_cache) singleton, but pytest-asyncio
+    # (asyncio_mode=auto) gives each test function its own event loop by
+    # default. redis-asyncio's connections are bound to the loop that opened
+    # them, so leaving this one open would crash the NEXT test that reuses
+    # get_queue().redis with "Future attached to a different loop". Closing
+    # here is safe -- redis-py reconnects lazily on the next command, in
+    # whatever loop is running then.
+    await redis.aclose()
