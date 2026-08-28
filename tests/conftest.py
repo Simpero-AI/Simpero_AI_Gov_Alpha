@@ -2,15 +2,18 @@ import os
 import secrets
 from collections.abc import AsyncGenerator, Iterator
 from datetime import UTC, datetime, timedelta
+from typing import cast
 
 import psycopg2
 import pytest
+from saq.queue.redis import RedisQueue
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import AsyncSessionLocal
 from app.core.intake_security import sha256_hex
 from app.core.public_database import PublicAsyncSessionLocal
+from app.jobs.queue import get_queue
 
 TEST_org_id = "test-tenant-00000000"
 TEST_user_id = "test-user-00000000"
@@ -164,3 +167,34 @@ async def public_db_session() -> AsyncGenerator[AsyncSession, None]:
     async with PublicAsyncSessionLocal() as session, session.begin():
         yield session
         await session.rollback()
+
+
+@pytest.fixture
+async def clear_rate_limit_keys() -> AsyncGenerator[None, None]:
+    """Deletes every `ratelimit:*` key in Valkey, both before and after the
+    test. Non-autouse (explicit opt-in) -- only test modules that actually
+    exercise app.core.rate_limit_middleware need Valkey reachable; everything
+    else is unaffected. Without the before-clear, keys left behind by a
+    previous (possibly failed) run could pre-trip a fresh run's limit; without
+    the after-clear, this test's own requests would count against whatever
+    runs next.
+    """
+    # get_queue() is statically typed as the abstract saq.Queue; VALKEY_URL
+    # is always redis://, so it's always a RedisQueue with a `.redis` client.
+    redis = cast(RedisQueue, get_queue()).redis
+
+    async def _clear() -> None:
+        async for key in redis.scan_iter("ratelimit:*"):
+            await redis.delete(key)
+
+    await _clear()
+    yield
+    await _clear()
+    # get_queue() is a process-wide (lru_cache) singleton, but pytest-asyncio
+    # (asyncio_mode=auto) gives each test function its own event loop by
+    # default. redis-asyncio's connections are bound to the loop that opened
+    # them, so leaving this one open would crash the NEXT test that reuses
+    # get_queue().redis with "Future attached to a different loop". Closing
+    # here is safe -- redis-py reconnects lazily on the next command, in
+    # whatever loop is running then.
+    await redis.aclose()

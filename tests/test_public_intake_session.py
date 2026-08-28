@@ -1,21 +1,35 @@
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import cast
 
 import httpx
 import pytest
 from jose import jwt
 from pydantic import EmailStr, TypeAdapter
+from saq.queue.redis import RedisQueue
 
 from app.core.intake_security import (
     _INTAKE_JWT_ALGORITHM,
     decode_intake_session_jwt,
     sha256_hex,
 )
+from app.jobs.queue import get_queue
 from app.main import app
 
 _NOT_FOUND_BODY = {"detail": "Not found"}
 _EMAIL_ADAPTER = TypeAdapter(EmailStr)
+
+
+@pytest.fixture(autouse=True)
+async def _clear_rate_limit_keys_around_every_test(clear_rate_limit_keys):
+    """httpx.ASGITransport (used by _post_session below) defaults every test
+    to the same synthetic client address, so without clearing rate-limit keys
+    between tests, cumulative request counts across this file's tests would
+    spuriously trip the P3-12 429 within a single run. Local + autouse
+    (unlike conftest.py's own clear_rate_limit_keys) so only this module pays
+    the cost."""
+    yield
 
 
 async def _post_session(token: str, email: str) -> httpx.Response:
@@ -176,6 +190,39 @@ async def test_repeat_mismatches_increment_with_no_lockout(pending_link_with_tok
         cur.execute("SELECT failed_attempts FROM deal_intake_link WHERE id = %s", (link["id"],))
         (failed_attempts,) = cur.fetchone()
     assert failed_attempts == 3
+
+
+async def test_lockout_after_threshold_404s_even_correct_email(pending_link_with_token, owner_conn):
+    link = pending_link_with_token
+
+    for _ in range(5):
+        resp = await _post_session(link["raw_token"], "still-wrong@org-a.example")
+        assert resp.status_code == 404
+
+    with owner_conn.cursor() as cur:
+        cur.execute("SELECT failed_attempts FROM deal_intake_link WHERE id = %s", (link["id"],))
+        (failed_attempts,) = cur.fetchone()
+    assert failed_attempts == 5
+
+    # This test's own 6-request sequence (5 above + 1 below) would otherwise
+    # trip the unrelated P3-12 IP throttle (5 req/10s) against ASGITransport's
+    # single synthetic client address -- clear it so this test exercises only
+    # the DB-level lockout under test, not IP throttling.
+    redis = cast(RedisQueue, get_queue()).redis
+    async for key in redis.scan_iter("ratelimit:*"):
+        await redis.delete(key)
+
+    # 6th attempt, this time with the CORRECT email -- lockout is
+    # unconditional and must still 404, byte-identical to the 404-only
+    # contract, and must NOT bump failed_attempts further.
+    locked_out_resp = await _post_session(link["raw_token"], "recipient@org-a.example")
+    assert locked_out_resp.status_code == 404
+    assert locked_out_resp.content == b'{"detail":"Not found"}'
+
+    with owner_conn.cursor() as cur:
+        cur.execute("SELECT failed_attempts FROM deal_intake_link WHERE id = %s", (link["id"],))
+        (failed_attempts_after,) = cur.fetchone()
+    assert failed_attempts_after == 5
 
 
 async def test_byte_identical_404_across_every_failure_mode(link_factory, pending_link_with_token):

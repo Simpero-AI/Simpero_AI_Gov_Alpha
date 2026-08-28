@@ -13,6 +13,8 @@ from app.schemas.public_intake import IntakeEmailVerifyRequest, IntakeSessionRes
 
 router = APIRouter(prefix="/public/intake", tags=["public-intake"])
 
+_LOCKOUT_THRESHOLD = 5
+
 
 @router.post("/{token}/session", response_model=IntakeSessionResponse)
 async def create_intake_session(
@@ -20,6 +22,15 @@ async def create_intake_session(
     session_and_link: tuple[AsyncSession, DealIntakeLink] = Depends(get_public_link_db),
 ) -> IntakeSessionResponse | JSONResponse:
     session, link = session_and_link
+
+    # Unconditional lockout: once failed_attempts hits the threshold, every
+    # further attempt 404s -- even one with the correct email -- and does so
+    # WITHOUT bumping failed_attempts or writing an audit row. The 5th real
+    # mismatch already produced the audit trail; writing on every subsequent
+    # hammering attempt would flood the audit log P3-13 later reviews.
+    if link.failed_attempts >= _LOCKOUT_THRESHOLD:
+        return JSONResponse(status_code=404, content={"detail": "Not found"})
+
     tried_email = body.email
 
     if not hmac.compare_digest(tried_email.lower(), link.recipient_email.lower()):

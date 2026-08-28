@@ -22,6 +22,7 @@ from app.core.exceptions import (
     AuthorizationError,
     TenantContextError,
 )
+from app.core.rate_limit_middleware import RateLimitMiddleware
 
 settings = get_settings()
 
@@ -30,6 +31,18 @@ app = FastAPI(
     version="0.1.0",
     description="AI-powered due diligence platform — backend API",
 )
+
+# Starlette's add_middleware inserts each new middleware at position 0 of its
+# internal list, and the stack is built by wrapping in reversed() order -- so
+# the LAST-registered middleware ends up OUTERMOST (sees the request first,
+# the response last). RateLimitMiddleware must be registered BEFORE
+# CORSMiddleware so CORS stays outermost: a 429 short-circuit from the
+# limiter still passes through CORSMiddleware on the way out (so the browser
+# sees a readable 429, not an opaque CORS failure), and CORS preflight
+# OPTIONS requests are fully handled by CORSMiddleware before ever reaching
+# the limiter (so they're never wastefully counted against the rate limit).
+# Do not reorder these two calls.
+app.add_middleware(RateLimitMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
