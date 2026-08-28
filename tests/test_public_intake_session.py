@@ -225,6 +225,38 @@ async def test_lockout_after_threshold_404s_even_correct_email(pending_link_with
     assert failed_attempts_after == 5
 
 
+def _audit_ip_ua_rows(owner_conn, link_id: str, event_type: str) -> list[tuple]:
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "SELECT ip_address, user_agent FROM human_audit_log "
+            "WHERE event_type = %s AND payload ->> 'link_id' = %s",
+            (event_type, link_id),
+        )
+        return cur.fetchall()
+
+
+async def test_ip_and_user_agent_persisted_on_success_and_failure(
+    pending_link_with_token, owner_conn
+):
+    link = pending_link_with_token
+
+    ok_resp = await _post_session(link["raw_token"], "recipient@org-a.example")
+    assert ok_resp.status_code == 200
+    succeeded = _audit_ip_ua_rows(owner_conn, link["id"], "intake_email_attempt_succeeded")
+    assert len(succeeded) == 1
+    ip_address, user_agent = succeeded[0]
+    assert ip_address is not None
+    assert user_agent is not None
+
+    bad_resp = await _post_session(link["raw_token"], "wrong@org-a.example")
+    assert bad_resp.status_code == 404
+    failed = _audit_ip_ua_rows(owner_conn, link["id"], "intake_email_attempt_failed")
+    assert len(failed) == 1
+    ip_address2, user_agent2 = failed[0]
+    assert ip_address2 is not None
+    assert user_agent2 is not None
+
+
 async def test_byte_identical_404_across_every_failure_mode(link_factory, pending_link_with_token):
     responses: list[bytes] = []
 

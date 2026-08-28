@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.deal_intake_link import DealIntakeLink
@@ -100,3 +100,26 @@ class IntakeLinkRepo(BaseRepo[DealIntakeLink, dict]):
             .execution_options(synchronize_session=False)
         )
         return result.first() is not None
+
+    async def lock_link(self, link_id: uuid.UUID) -> None:
+        """Advisory lock serializing concurrent read-merge-write cycles
+        against the same link's draft_answers -- two /answers calls for the
+        SAME link (two tabs, or an auto-save racing a manual save) can each
+        read the same base draft, merge in different answers, and have the
+        second UPDATE silently overwrite the first's with no error to
+        either caller. Mirrors DataSourceRepo.try_create_for_intake_link's
+        advisory-lock pattern (P3-10) -- same idiom, deliberately a
+        DIFFERENT salt (1, not 0) so this lock namespace is independent of
+        that one; no reason a draft-answers save and a document-count check
+        on the same link should ever contend with each other. Callers must
+        re-read whatever they're about to merge AFTER this returns, not
+        rely on a value fetched before the lock was acquired -- READ
+        COMMITTED + holding the lock until commit means a second caller's
+        read only happens after the first caller's write is visible.
+        Transaction-scoped (xact, not session) -- auto-releases at
+        COMMIT/ROLLBACK, safe under PgBouncer transaction pooling.
+        """
+        await self.session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:link_id, 1))"),
+            {"link_id": str(link_id)},
+        )
