@@ -43,7 +43,7 @@ EXPECTED_TABLE_PRIVILEGES: set[tuple[str, str]] = {
 
 EXPECTED_COLUMN_PRIVILEGES: set[tuple[str, str, str]] = {
     # data_source: whole-table `GRANT SELECT, INSERT ON data_source TO
-    # dd_public` (P1-00) expands to all 10 of its columns.
+    # dd_public` (P1-00) expands to all 11 of its columns.
     ("data_source", "created_at", "INSERT"),
     ("data_source", "created_at", "SELECT"),
     ("data_source", "deal_id", "INSERT"),
@@ -56,6 +56,11 @@ EXPECTED_COLUMN_PRIVILEGES: set[tuple[str, str, str]] = {
     ("data_source", "fingerprint", "SELECT"),
     ("data_source", "id", "INSERT"),
     ("data_source", "id", "SELECT"),
+    # intake_link_id (P3-10): a new column on an existing whole-table-granted
+    # table inherits the same SELECT/INSERT automatically -- no new GRANT
+    # statement needed or added.
+    ("data_source", "intake_link_id", "INSERT"),
+    ("data_source", "intake_link_id", "SELECT"),
     ("data_source", "org_id", "INSERT"),
     ("data_source", "org_id", "SELECT"),
     ("data_source", "status", "INSERT"),

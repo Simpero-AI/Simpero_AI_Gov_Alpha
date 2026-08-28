@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.data_source import DataSource
@@ -55,6 +55,41 @@ class DataSourceRepo(BaseRepo[DataSource, dict]):
             .where(DataSource.status != "mismatch")
         )
         return result.scalars().first()
+
+    async def count_for_intake_link(self, intake_link_id: uuid.UUID) -> int:
+        """Plain unlocked count -- used by both the presign-time courtesy
+        check and internally by try_create_for_intake_link, after that
+        method's own advisory lock is held."""
+        result = await self.session.execute(
+            select(func.count())
+            .select_from(DataSource)
+            .where(DataSource.intake_link_id == intake_link_id)
+        )
+        return result.scalar_one()
+
+    async def try_create_for_intake_link(
+        self, intake_link_id: uuid.UUID, data: dict, ceiling: int
+    ) -> DataSource | None:
+        """The real 20-file-per-link boundary (presign's own check is UX-only).
+        pg_advisory_xact_lock keyed on intake_link_id serializes concurrent
+        /complete calls for the SAME link so two racing requests can't both
+        observe count=19 and both insert, landing at 21 -- mirrors why
+        IntakeLinkRepo.get_pending_for_deal takes FOR UPDATE for the reissue
+        race, just via advisory lock instead of a row lock since there's no
+        existing row to lock against at insert time. Transaction-scoped (xact,
+        not session) -- lock auto-releases at COMMIT/ROLLBACK, safe under
+        PgBouncer transaction pooling, same discipline as SET LOCAL.
+        """
+        await self.session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:link_id, 0))"),
+            {"link_id": str(intake_link_id)},
+        )
+        count = await self.count_for_intake_link(intake_link_id)
+        if count >= ceiling:
+            return None
+        data_source = DataSource(**data, intake_link_id=intake_link_id)
+        self.session.add(data_source)
+        return data_source
 
     async def update_status(
         self, id: uuid.UUID, status: str, fingerprint: str | None
