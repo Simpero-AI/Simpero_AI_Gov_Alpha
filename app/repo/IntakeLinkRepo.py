@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.deal_intake_link import DealIntakeLink
@@ -24,6 +24,14 @@ class IntakeLinkRepo(BaseRepo[DealIntakeLink, dict]):
             select(DealIntakeLink).where(DealIntakeLink.token_hash == token_hash)
         )
         return result.scalars().first()
+
+    async def bump_failed_attempt(self, link_id: uuid.UUID) -> None:
+        await self.session.execute(
+            update(DealIntakeLink)
+            .where(DealIntakeLink.id == link_id)
+            .values(failed_attempts=DealIntakeLink.failed_attempts + 1, last_attempt_at=func.now())
+            .execution_options(synchronize_session=False)
+        )
 
     async def get_pending_for_deal(self, deal_id: uuid.UUID) -> DealIntakeLink | None:
         """Locked read -- load-bearing. Without FOR UPDATE, two concurrent
