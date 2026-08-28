@@ -248,6 +248,33 @@ async def test_complete_writes_exactly_one_audit_row_with_session_email(
     assert rows[0][1] is None
 
 
+async def test_complete_persists_ip_and_user_agent_on_audit_row(
+    pending_link_with_token, owner_conn, mocked_spaces, _cleanup_seeded_documents
+):
+    link = pending_link_with_token
+    upload_id = str(uuid.uuid4())
+
+    resp = await _post(
+        f"/{upload_id}/complete",
+        _session_token(link, email="recipient@org-a.example"),
+        {"filename": _ALLOWED_FILENAME, "declaredSha256": _DECLARED_HASH},
+    )
+    assert resp.status_code == 200
+
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "SELECT ip_address, user_agent FROM human_audit_log "
+            "WHERE event_type = 'intake_document_uploaded' "
+            "AND payload ->> 'data_source_id' = %s",
+            (upload_id,),
+        )
+        rows = cur.fetchall()
+    assert len(rows) == 1
+    ip_address, user_agent = rows[0]
+    assert ip_address is not None
+    assert user_agent is not None
+
+
 async def test_complete_without_prior_put_returns_4xx_no_row_no_audit(
     pending_link_with_token, owner_conn, mocked_spaces
 ):
