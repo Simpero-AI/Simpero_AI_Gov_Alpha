@@ -54,6 +54,10 @@ class DealIntakeLink(Base):
     token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
     recipient_email: Mapped[str] = mapped_column(String(255), nullable=False)
     questions_snapshot: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # P3-09: the read-merge-write target for POST /public/intake/answers.
+    # dd_public UPDATE-only on this column (2f7e83611f52); dd_app never
+    # writes it -- see that migration's docstring.
+    draft_answers: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     status: Mapped[str] = mapped_column(
         String(16), nullable=False, server_default="pending", index=True
