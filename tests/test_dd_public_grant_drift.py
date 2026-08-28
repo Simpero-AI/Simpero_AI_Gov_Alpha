@@ -70,13 +70,16 @@ EXPECTED_COLUMN_PRIVILEGES: set[tuple[str, str, str]] = {
     ("data_source", "storage_key", "INSERT"),
     ("data_source", "storage_key", "SELECT"),
     # deal_intake_link: whole-table `GRANT SELECT ...` (P1-01) expands to
-    # all 14 of its columns, PLUS the genuinely column-restricted
+    # all 15 of its columns, PLUS the genuinely column-restricted
     # `GRANT UPDATE (status, submitted_at, failed_attempts,
-    # last_attempt_at) ...` (P1-01) on just those 4 lifecycle columns.
+    # last_attempt_at) ...` (P1-01) on those 4 lifecycle columns, PLUS the
+    # separate `GRANT UPDATE (draft_answers) ...` (P3-09, 2f7e83611f52).
     ("deal_intake_link", "clerk_org_id", "SELECT"),
     ("deal_intake_link", "created_at", "SELECT"),
     ("deal_intake_link", "created_by_user_id", "SELECT"),
     ("deal_intake_link", "deal_id", "SELECT"),
+    ("deal_intake_link", "draft_answers", "SELECT"),
+    ("deal_intake_link", "draft_answers", "UPDATE"),
     ("deal_intake_link", "expires_at", "SELECT"),
     ("deal_intake_link", "failed_attempts", "SELECT"),
     ("deal_intake_link", "failed_attempts", "UPDATE"),
