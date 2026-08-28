@@ -276,13 +276,13 @@ async def test_ip_and_user_agent_persisted(
 
 
 def test_unknown_client_ip_maps_to_none():
-    from app.core.rate_limit_middleware import _client_ip
+    from app.core.rate_limit_middleware import client_ip
 
     class _FakeRequest:
         client = None
         headers: dict[str, str] = {}
 
-    ip = _client_ip(_FakeRequest())  # type: ignore[arg-type]
+    ip = client_ip(_FakeRequest())  # type: ignore[arg-type]
     assert ip == "unknown"
     mapped = None if ip == "unknown" else ip
     assert mapped is None

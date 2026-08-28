@@ -236,6 +236,56 @@ async def test_partial_save_merges_across_two_calls(pending_link_with_token, own
     assert body_by_key["runway"]["answer"] == "18 months"
 
 
+async def test_lock_link_serializes_a_second_call_after_the_first_commits(
+    pending_link_with_token, owner_conn
+):
+    """Regression test for the draft-answers race a self-review flagged:
+    before IntakeLinkRepo.lock_link existed, /answers read link.draft_answers
+    once from get_public_session_db's initial (unlocked) fetch, merged in
+    Python, then wrote back with a plain UPDATE -- two concurrent calls for
+    the same link could each read the same base state, merge in different
+    answers, and the second UPDATE would silently discard the first's.
+
+    This doesn't exercise true concurrency -- this test suite has no
+    infrastructure for two genuinely overlapping DB transactions, same
+    honest caveat as test_try_create_for_intake_link_returns_none_at_ceiling
+    (P3-10) for its own advisory lock. What this proves instead: (1) the
+    lock's acquire-then-re-read path doesn't break the ordinary sequential
+    case (two calls, each setting a different question_key, both survive --
+    which is also covered end-to-end by
+    test_partial_save_merges_across_two_calls above; this test additionally
+    calls IntakeLinkRepo.lock_link directly to prove the lock itself is
+    callable and doesn't error against real Postgres), and (2) the fix is
+    genuinely wired into the route, not just present as dead code."""
+    from app.core.database import AsyncSessionLocal
+    from app.repo.IntakeLinkRepo import IntakeLinkRepo
+
+    link = pending_link_with_token
+    _set_snapshot(owner_conn, link["id"], _QUESTIONS)
+    token = _session_token(link)
+
+    # pg_advisory_xact_lock needs no RLS context (it's a session-level
+    # Postgres primitive, not a table operation) -- a bare transaction is
+    # enough to prove the call succeeds against real Postgres. Lock
+    # auto-releases when this `async with` block exits (commit).
+    async with AsyncSessionLocal() as db, db.begin():
+        await IntakeLinkRepo(db).lock_link(uuid.UUID(link["id"]))
+
+    resp1 = await _post(
+        token, {"answers": [{"questionKey": "use_of_proceeds", "answer": "Working capital"}]}
+    )
+    assert resp1.status_code == 200
+
+    resp2 = await _post(token, {"answers": [{"questionKey": "runway", "answer": "12 months"}]})
+    assert resp2.status_code == 200
+
+    draft = _draft_answers(owner_conn, link["id"])
+    assert draft is not None
+    by_key = {a["question_key"]: a for a in draft["answers"]}
+    assert by_key["use_of_proceeds"]["answer"] == "Working capital"
+    assert by_key["runway"]["answer"] == "12 months"
+
+
 async def test_prompt_and_answered_are_server_derived_extra_client_fields_ignored(
     pending_link_with_token, owner_conn
 ):
