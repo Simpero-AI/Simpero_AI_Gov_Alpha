@@ -587,6 +587,13 @@ async def start_analysis(
             detail="Analysis is already running for this deal",
         )
 
+    pending_link = await IntakeLinkRepo(db).get_pending_for_deal_unlocked(deal_id)
+    if pending_link is not None and compute_intake_link_effective_status(pending_link) == "pending":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Cannot start analysis while an intake link is still pending for this deal",
+        )
+
     data_sources = await DataSourceRepo(db).list_for_deal(deal_id)
     usable = [ds for ds in data_sources if ds.status == "verified"]
     pending = [ds for ds in data_sources if ds.status == "pending"]
