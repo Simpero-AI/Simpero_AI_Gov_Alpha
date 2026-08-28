@@ -182,9 +182,29 @@ async def submit_intake_answers(
 
     _validate_answers(body.answers, lookup)
 
+    # Serialize concurrent /answers calls for the same link (two tabs, or
+    # an auto-save racing a manual save -- both plausible in normal use,
+    # not just adversarial): without this, two callers can each read the
+    # same base draft, merge in different answers, and the second UPDATE
+    # silently overwrites the first's with no error to either caller. See
+    # IntakeLinkRepo.lock_link's docstring for the full reasoning.
+    repo = IntakeLinkRepo(db)
+    await repo.lock_link(link.id)
+
+    # Re-read draft_answers AFTER the lock, not the value on `link` (loaded
+    # by get_public_session_db before this lock was ever taken) -- the
+    # whole point of the lock is that this read only happens after any
+    # concurrent caller's write is visible. If the link vanished from view
+    # here (status left pending/submitted since the dependency's own
+    # fetch), current_draft stays None and the merge below is moot anyway
+    # -- update_draft_answers' own zero-rows check at write time is still
+    # the real 404 gate, unchanged.
+    fresh_link = await repo.get_by_id(link.id)
+    current_draft = fresh_link.draft_answers if fresh_link is not None else None
+
     draft = (
-        {a["question_key"]: a for a in link.draft_answers["answers"]}
-        if link.draft_answers is not None
+        {a["question_key"]: a for a in current_draft["answers"]}
+        if current_draft is not None
         else _seed_draft(snapshot_questions)
     )
     for entry in body.answers:
@@ -196,7 +216,7 @@ async def submit_intake_answers(
         }
 
     merged = {"schema_version": 1, "answers": list(draft.values())}
-    updated = await IntakeLinkRepo(db).update_draft_answers(link.id, merged)
+    updated = await repo.update_draft_answers(link.id, merged)
     if not updated:
         # Same 404-only contract as every other public route -- a stale call
         # arriving after the link left `pending` (submitted/revoked/expired)
