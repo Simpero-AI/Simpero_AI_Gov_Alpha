@@ -41,6 +41,8 @@ from app.schemas.deals import (
     FormerNameResponse,
     LatestMemoSessionResponse,
     LivePipelineRowResponse,
+    MarketFactResponse,
+    MarketViewResponse,
     PipelineStepResponse,
     PipelineValueStat,
     ScreeningCitedFieldResponse,
@@ -56,6 +58,7 @@ from app.services.dashboard_stats import compute_month_bounds, compute_pipeline_
 from app.services.entity_resolution import get_resolver
 from app.services.entity_resolution.types import EntityResolutionError
 from app.services.intake_links import compute_intake_link_effective_status
+from app.services.market_view import build_market_view
 from app.services.memo_summary import derive_pipeline_metrics
 from app.services.pipeline_steps import no_job_steps
 from app.services.screening.rule_view import enrich_rule_results
@@ -421,6 +424,45 @@ async def get_deal_screening_insights(
         claims, company=deal.name, dashboard_structure=deal.dashboard_structure
     )
     return ScreeningInsightsResponse(highlights=highlights, risk_flags=risk_flags)
+
+
+@router.get("/{deal_id}/market", response_model=MarketViewResponse)
+async def get_deal_market(
+    deal_id: uuid.UUID, db: AsyncSession = Depends(get_db)
+) -> MarketViewResponse:
+    """The Market tab, derived deterministically from the deal's claims spine
+    (build_market_view): numeric market sizing (TAM/SAM/SOM/market size/CAGR)
+    recovered by label, plus the qualitative market-definition and
+    competitive-position assertions the parser's qualitative tier emits -- each
+    with its citation and trust status. Claims-only and LLM-free; RLS-scoped by
+    get_db; returns empty lists (never 404) for a deal with no market claims, so
+    each panel renders its own "information not available" state."""
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    claims = list((await db.execute(select(Claim).where(Claim.deal_id == deal_id))).scalars().all())
+    filenames = {ds.id: ds.filename for ds in await DataSourceRepo(db).list_for_deal(deal_id)}
+
+    view = build_market_view(claims, filenames=filenames)
+
+    def _facts(facts: list) -> list[MarketFactResponse]:
+        return [
+            MarketFactResponse(
+                label=f.label,
+                value=f.value,
+                citation=f.citation,
+                status=f.status,
+                entity=f.entity,
+            )
+            for f in facts
+        ]
+
+    return MarketViewResponse(
+        sizing=_facts(view.sizing),
+        market_definition=_facts(view.market_definition),
+        competitive_position=_facts(view.competitive_position),
+    )
 
 
 async def _compute_deal_status(db: AsyncSession, deal_id: uuid.UUID) -> DealStatusResponse:

@@ -288,6 +288,34 @@ class ScreeningInsightsResponse(CamelModel):
     risk_flags: list[str]
 
 
+class MarketFactResponse(CamelModel):
+    """One Market-tab fact copied from the claims spine (build_market_view): a
+    market-size figure's formatted value, or a qualitative market/competition
+    assertion verbatim. `label` is the metric name (e.g. "TAM") for sizing, or
+    the entity the assertion is about for a qualitative fact; `status` is the
+    trust status (verified/partially_verified/cited) so the tab can badge it;
+    `citation` is the human "file · p.N" string, null when unlocatable."""
+
+    label: str
+    value: str
+    citation: str | None = None
+    status: str
+    entity: str | None = None
+
+
+class MarketViewResponse(CamelModel):
+    """GET /deals/{id}/market — the Market tab's claims-driven content: numeric
+    market sizing recovered by label, plus the qualitative market-definition and
+    competitive-position assertions. Each list is empty when the deal has no
+    backing claims (the tab then renders "information not available"); never
+    404s for a claim-less deal. Corroboration/search enrichment is a separate
+    track (the corroboration engine and web search are not yet producing data)."""
+
+    sizing: list[MarketFactResponse]
+    market_definition: list[MarketFactResponse]
+    competitive_position: list[MarketFactResponse]
+
+
 class FormerNameResponse(CamelModel):
     """A previous legal name with the window it applied to.
 
