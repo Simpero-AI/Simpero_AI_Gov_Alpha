@@ -3,10 +3,13 @@ Screening tab's three panels (Extracted from Materials, Agent Highlights, Risk
 Flags) from the deal's claims spine.
 
 The claims table is the ground truth: one row per extracted fact, each carrying
-its canonical attribute, its unit-normalized value, its period, its trust
-status, and where in which document it came from. This module curates that into
-a screening-sized view -- for each key canonical metric of the deal's lead
-business subject, the latest actual figure, formatted and cited.
+its canonical attribute, its raw label, its unit-normalized value, its period,
+its trust status, and where in which document it came from. This module curates
+that into a screening-sized view -- for each headline metric of the deal's lead
+business subject, the latest actual figure, formatted and cited. A headline
+metric is either a genuine canonical attribute or, for a table-dense CIM whose
+statement cells the parser left in a catch-all bucket, a line item recovered
+from its raw label (see _headline_key).
 
 The curation mirrors the Pipeline Inspector's own "Financial trends" logic
 (app/api/templates/pipeline_inspector.html) so the two surfaces agree on what a
@@ -71,6 +74,28 @@ _CANON_ORDER = {
     "total_equity": 13,
     "total_debt": 14,
 }
+
+# Headline financial line items the parser leaves in a catch-all bucket
+# (operating_metric / core_unmapped) instead of mapping to a canonical metric --
+# the common case in table-dense CIMs, where every statement cell is extracted
+# verbatim and none resolves to a canonical attribute. Each entry lets such a
+# fact still surface on the screening snapshot, matched by a case-insensitive
+# substring of its raw label (attribute_raw). Ordered by reading priority;
+# keywords are kept mutually non-overlapping so a fact maps to at most one item.
+_HEADLINE_LABELS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("headline_net_revenue", "Net Revenue", ("net revenues", "net revenue")),
+    ("headline_gross_revenue", "Gross Revenue", ("gross revenues", "gross revenue")),
+    ("headline_ebitda", "EBITDA", ("ebitda",)),
+    ("headline_operating_income", "Operating Income", ("income from operations",)),
+    ("headline_net_income", "Net Income", ("net income",)),
+    ("headline_total_costs", "Total Costs & Expenses", ("total costs and expenses",)),
+    ("headline_sga", "SG&A", ("selling, general and administrative",)),
+    ("headline_dna", "D&A", ("depreciation and amortization",)),
+)
+
+# Headline items sort after every canonical metric (which rank well under 100 --
+# see _metric_rank), preserving their own reading order among themselves.
+_HEADLINE_RANK = {key: 1000 + i for i, (key, _label, _keywords) in enumerate(_HEADLINE_LABELS)}
 
 _UNIT_SYMBOL = {"USD": "$", "%": "%"}
 _PERIOD_KIND = {"A": "Actual", "E": "Estimate", "P": "Projected"}
@@ -145,10 +170,12 @@ def _fmt_period(period_year: int | None, period_kind: str | None) -> str:
     return f"FY{period_year}" + (f" {kind}" if kind and kind != "Actual" else "")
 
 
-def _field_label(claim: Claim) -> str:
+def _field_label(claim: Claim, label: str | None = None) -> str:
     """ "<Metric> · FY<year>" -- the period is dropped when the claim carries no
-    year (a period-less fact reads as just its metric name)."""
-    metric = _human_attr(claim.attribute)
+    year (a period-less fact reads as just its metric name). `label` overrides
+    the metric name for a headline line item recovered from a catch-all bucket,
+    whose canonical attribute would otherwise read as "Operating Metric"."""
+    metric = label or _human_attr(claim.attribute)
     period = _fmt_period(claim.period_year, claim.period_kind)
     return f"{metric} · {period}" if period else metric
 
@@ -223,6 +250,37 @@ def _metric_rank(dashboard_structure: dict[str, Any] | None) -> dict[str, int]:
     return rank
 
 
+def _headline_key(claim: Claim) -> tuple[str, str] | None:
+    """The metric a claim contributes to the screening snapshot, as
+    (grouping key, display label) -- or None when the claim is not a headline
+    fact and should be skipped.
+
+    A genuine canonical attribute keys on itself. A fact the parser left in a
+    catch-all bucket keys on the first headline line item its raw label matches,
+    so a table-dense CIM's verbatim statement cells still surface; everything
+    else in those buckets is skipped, keeping the snapshot a curated headline
+    set rather than the raw extract.
+    """
+    attribute = claim.attribute
+    if _is_canonical(attribute):
+        return attribute, _human_attr(attribute)
+    raw = (claim.attribute_raw or "").lower()
+    if not raw:
+        return None
+    for key, label, keywords in _HEADLINE_LABELS:
+        if any(keyword in raw for keyword in keywords):
+            return key, label
+    return None
+
+
+def _rank_for(metric_key: str, canonical_rank: dict[str, int]) -> int:
+    """Sort rank for a metric key: canonical metrics by the deal's own order,
+    headline line items after them in reading order."""
+    if metric_key in _HEADLINE_RANK:
+        return _HEADLINE_RANK[metric_key]
+    return canonical_rank.get(metric_key, 99)
+
+
 def build_screening_materials(
     claims: Sequence[Claim],
     *,
@@ -232,11 +290,14 @@ def build_screening_materials(
 ) -> ScreeningMaterials:
     """Curate the deal's claims into the screening snapshot.
 
-    Shows, for the lead business subject, each canonical metric's latest actual
+    Shows, for the lead business subject, each headline metric's latest actual
     figure (preferring an Actual period over an Estimate/Projection, then the
     most recent year, then the most corroborated status), ranked by the deal's
-    own metric order, capped at `limit`. `filenames` maps data_source_id -> the
-    document's filename for the citation string.
+    own metric order, capped at `limit`. A metric is either a genuine canonical
+    attribute or a headline line item recovered from a catch-all bucket by its
+    raw label (see _headline_key) -- so a table-dense CIM whose statement cells
+    never resolve to a canonical attribute still populates the panel.
+    `filenames` maps data_source_id -> the document's filename for the citation.
     """
     entity_subject, subject_order = _subject_map(dashboard_structure, claims)
     lead_subject = subject_order[0] if subject_order else "Other"
@@ -244,33 +305,36 @@ def build_screening_materials(
     def subject_of(claim: Claim) -> str:
         return entity_subject.get(claim.entity or "", "Other")
 
-    # Best claim per canonical attribute within the lead subject.
-    best: dict[str, Claim] = {}
+    # Best claim per headline metric within the lead subject. Keyed on the
+    # metric key from _headline_key, not claim.attribute -- catch-all facts all
+    # share one attribute ("operating_metric"), so keying on it would collapse
+    # every recovered line item onto a single row.
+    best: dict[str, tuple[Claim, str]] = {}
     for claim in claims:
-        if not _is_canonical(claim.attribute):
-            continue
         if claim.status not in _TRUSTED:
-            continue
-        if claim.period_year is None:
             continue
         if subject_of(claim) != lead_subject:
             continue
         if _fmt_value(claim.value) == "—":
             continue
-        current = best.get(claim.attribute)
-        if current is None or _prefer(claim, current):
-            best[claim.attribute] = claim
+        keyed = _headline_key(claim)
+        if keyed is None:
+            continue
+        metric_key, label = keyed
+        current = best.get(metric_key)
+        if current is None or _prefer(claim, current[0]):
+            best[metric_key] = (claim, label)
 
-    rank = _metric_rank(dashboard_structure)
-    chosen = sorted(best.values(), key=lambda c: rank.get(c.attribute or "", 99))[:limit]
+    canonical_rank = _metric_rank(dashboard_structure)
+    chosen = sorted(best.items(), key=lambda item: _rank_for(item[0], canonical_rank))[:limit]
 
     extracted_fields = [
         CitedField(
-            label=_field_label(c),
-            value=_fmt_value(c.value),
-            citation=_citation(c, filenames),
+            label=_field_label(claim, label),
+            value=_fmt_value(claim.value),
+            citation=_citation(claim, filenames),
         )
-        for c in chosen
+        for _key, (claim, label) in chosen
     ]
 
     # highlights / risk_flags are intentionally left empty here -- see the module
@@ -284,35 +348,41 @@ def render_claim_facts(
     dashboard_structure: dict[str, Any] | None,
     limit: int = 100,
 ) -> list[str]:
-    """Human-readable fact lines for the deal's trusted canonical claims -- the
+    """Human-readable fact lines for the deal's trusted headline claims -- the
     grounding handed to the LLM insights pass (app/services/screening_insights.py).
 
-    Lead business subject only, every canonical metric's figures ACROSS its
+    Lead business subject only, every headline metric's figures ACROSS its
     periods (so the model can see trends, not just the latest point), ranked by
     the deal's own metric order then latest-year-first, capped at `limit`. Same
-    trust filter and value formatting as the extracted panel, so the model reads
-    exactly the figures the user sees -- and no fact that is not one of them.
+    selection, trust filter and value formatting as the extracted panel -- a
+    metric is either a canonical attribute or a headline line item recovered
+    from a catch-all bucket (see _headline_key) -- so the model reads exactly
+    the figures the user sees, and no fact that is not one of them.
     """
     entity_subject, subject_order = _subject_map(dashboard_structure, claims)
     lead_subject = subject_order[0] if subject_order else "Other"
-    rank = _metric_rank(dashboard_structure)
+    canonical_rank = _metric_rank(dashboard_structure)
 
-    rows = [
-        claim
-        for claim in claims
-        if _is_canonical(claim.attribute)
-        and claim.status in _TRUSTED
-        and claim.period_year is not None
-        and entity_subject.get(claim.entity or "", "Other") == lead_subject
-        and _fmt_value(claim.value) != "—"
-    ]
-    rows.sort(key=lambda c: (rank.get(c.attribute or "", 99), -(c.period_year or 0)))
+    rows: list[tuple[Claim, str, str]] = []  # (claim, metric_key, display label)
+    for claim in claims:
+        if claim.status not in _TRUSTED:
+            continue
+        if entity_subject.get(claim.entity or "", "Other") != lead_subject:
+            continue
+        if _fmt_value(claim.value) == "—":
+            continue
+        keyed = _headline_key(claim)
+        if keyed is None:
+            continue
+        rows.append((claim, keyed[0], keyed[1]))
+    rows.sort(key=lambda r: (_rank_for(r[1], canonical_rank), -(r[0].period_year or 0)))
 
     lines: list[str] = []
     seen: set[str] = set()
-    for claim in rows[:limit]:
+    for claim, _key, label in rows[:limit]:
         period = _fmt_period(claim.period_year, claim.period_kind)
-        line = f"{_human_attr(claim.attribute)} ({period}): {_fmt_value(claim.value)}"
+        value = _fmt_value(claim.value)
+        line = f"{label} ({period}): {value}" if period else f"{label}: {value}"
         if line not in seen:
             seen.add(line)
             lines.append(line)

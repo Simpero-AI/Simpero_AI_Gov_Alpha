@@ -13,6 +13,7 @@ def _claim(
     *,
     attribute: str,
     normalized: float | None,
+    attribute_raw: str | None = None,
     entity: str = "AcmeCo",
     period_year: int | None = 2023,
     period_kind: str | None = "A",
@@ -29,6 +30,7 @@ def _claim(
     return Claim(
         entity=entity,
         attribute=attribute,
+        attribute_raw=attribute_raw,
         period_year=period_year,
         period_kind=period_kind,
         claim_type="numerical",
@@ -81,11 +83,18 @@ def test_unmarked_historical_year_beats_a_later_estimate():
     assert materials.extracted_fields[0].value == "$70.10M"
 
 
-def test_excludes_untrusted_and_catchall_facts():
+def test_excludes_untrusted_and_unlabelled_catchall_facts():
     claims = [
         _claim(attribute="revenue", normalized=100_000_000, status="proposed"),  # not trusted
-        _claim(attribute="operating_metric", normalized=5, status="verified"),  # catch-all bucket
-        _claim(attribute="core_unmapped", normalized=9, status="verified"),  # catch-all bucket
+        # Catch-all facts whose raw label matches no headline line item -- stay
+        # out of the curated snapshot even though they are verified.
+        _claim(
+            attribute="operating_metric",
+            attribute_raw="Suncoast | Hotel Rooms",
+            normalized=5,
+            status="verified",
+        ),
+        _claim(attribute="core_unmapped", attribute_raw=None, normalized=9, status="verified"),
         _claim(attribute="net_income", normalized=20_700_000, status="cited"),  # trusted, shown
     ]
 
@@ -93,6 +102,98 @@ def test_excludes_untrusted_and_catchall_facts():
 
     assert [f.label for f in materials.extracted_fields] == ["Net Income · FY2023"]
     assert materials.extracted_fields[0].value == "$20.70M"
+
+
+def test_recovers_headline_line_items_from_catchall_buckets():
+    # A table-dense CIM: every statement cell lands in a catch-all bucket with a
+    # verbatim raw label and never a canonical attribute. Headline line items are
+    # recovered by that label, latest ACTUAL per metric, labelled by the clean
+    # display name (not "Operating Metric"), in reading order.
+    claims = [
+        _claim(
+            attribute="operating_metric",
+            attribute_raw="Revenues: | Net Revenues",
+            normalized=300_000_000,
+            period_year=2004,
+        ),
+        _claim(
+            attribute="operating_metric",
+            attribute_raw="Revenues: | Net Revenues",
+            normalized=328_000_000,
+            period_year=2005,
+        ),
+        # A later year, but only an Estimate -- the latest ACTUAL must win.
+        _claim(
+            attribute="operating_metric",
+            attribute_raw="Revenues: | Net Revenues",
+            normalized=385_700_000,
+            period_year=2006,
+            period_kind="E",
+        ),
+        _claim(
+            attribute="core_unmapped",
+            attribute_raw="Adjusted EBITDA",
+            normalized=110_000_000,
+            period_year=2005,
+        ),
+        _claim(
+            attribute="operating_metric",
+            attribute_raw="Net Income",
+            normalized=45_000_000,
+            period_year=2005,
+        ),
+    ]
+
+    materials = build_screening_materials(claims, dashboard_structure=None, filenames={})
+
+    # Net Revenue leads EBITDA leads Net Income (headline reading order); revenue
+    # shows the FY2005 actual, not the FY2006 estimate.
+    assert [f.label for f in materials.extracted_fields] == [
+        "Net Revenue · FY2005",
+        "EBITDA · FY2005",
+        "Net Income · FY2005",
+    ]
+    assert [f.value for f in materials.extracted_fields] == ["$328.00M", "$110.00M", "$45.00M"]
+
+
+def test_headline_line_item_without_period_year_still_shows():
+    # A recovered headline fact the parser did not stamp with a year still
+    # surfaces -- as just its metric name, no "· FY".
+    claims = [
+        _claim(
+            attribute="operating_metric",
+            attribute_raw="Net Revenues",
+            normalized=328_000_000,
+            period_year=None,
+            period_kind=None,
+        ),
+    ]
+
+    materials = build_screening_materials(claims, dashboard_structure=None, filenames={})
+
+    assert [f.label for f in materials.extracted_fields] == ["Net Revenue"]
+    assert materials.extracted_fields[0].value == "$328.00M"
+
+
+def test_canonical_metric_beats_a_catchall_duplicate():
+    # When the same metric exists both canonically and as a recovered catch-all
+    # line item, they are separate keys -- the canonical one sorts first.
+    claims = [
+        _claim(attribute="revenue", normalized=168_000_000, period_year=2005),
+        _claim(
+            attribute="operating_metric",
+            attribute_raw="Net Income",
+            normalized=45_000_000,
+            period_year=2005,
+        ),
+    ]
+
+    materials = build_screening_materials(claims, dashboard_structure=None, filenames={})
+
+    assert [f.label for f in materials.extracted_fields] == [
+        "Revenue · FY2005",
+        "Net Income · FY2005",
+    ]
 
 
 def test_formats_percent_and_sub_million_currency():
