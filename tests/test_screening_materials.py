@@ -156,9 +156,10 @@ def test_recovers_headline_line_items_from_catchall_buckets():
     assert [f.value for f in materials.extracted_fields] == ["$328.00M", "$110.00M", "$45.00M"]
 
 
-def test_headline_line_item_without_period_year_still_shows():
-    # A recovered headline fact the parser did not stamp with a year still
-    # surfaces -- as just its metric name, no "· FY".
+def test_a_period_less_fact_is_excluded():
+    # A fact the parser did not stamp with a year is not shown -- picking one of
+    # several same-label period-less values would be arbitrary, and a period-less
+    # actual must not outrank a properly dated figure.
     claims = [
         _claim(
             attribute="operating_metric",
@@ -167,33 +168,94 @@ def test_headline_line_item_without_period_year_still_shows():
             period_year=None,
             period_kind=None,
         ),
+        _claim(attribute="revenue", normalized=100_000_000, period_year=None, period_kind=None),
     ]
 
     materials = build_screening_materials(claims, dashboard_structure=None, filenames={})
 
-    assert [f.label for f in materials.extracted_fields] == ["Net Revenue"]
-    assert materials.extracted_fields[0].value == "$328.00M"
+    assert materials.extracted_fields == []
 
 
-def test_canonical_metric_beats_a_catchall_duplicate():
-    # When the same metric exists both canonically and as a recovered catch-all
-    # line item, they are separate keys -- the canonical one sorts first.
+def test_a_recovered_fact_dedupes_against_its_canonical_twin():
+    # The same metric present both canonically (revenue) and as a recovered
+    # catch-all line item ("Net Revenues") keys the same, so it shows ONCE, not as
+    # two near-identical rows.
     claims = [
         _claim(attribute="revenue", normalized=168_000_000, period_year=2005),
         _claim(
             attribute="operating_metric",
-            attribute_raw="Net Income",
-            normalized=45_000_000,
+            attribute_raw="Revenues: | Net Revenues",
+            normalized=168_000_000,
             period_year=2005,
         ),
     ]
 
     materials = build_screening_materials(claims, dashboard_structure=None, filenames={})
 
-    assert [f.label for f in materials.extracted_fields] == [
-        "Revenue · FY2005",
-        "Net Income · FY2005",
+    assert len(materials.extracted_fields) == 1
+    assert materials.extracted_fields[0].value == "$168.00M"
+
+
+def test_a_percent_margin_never_wins_a_dollar_slot():
+    # A catch-all "EBITDA margin" (percent) carries the EBITDA keyword but is not
+    # the dollar figure; it must not be recovered, and the real dollar EBITDA
+    # keeps the slot.
+    claims = [
+        _claim(
+            attribute="core_unmapped",
+            attribute_raw="Adjusted EBITDA margin",
+            normalized=24.5,
+            value_type="percent",
+            unit="%",
+            period_year=2005,
+        ),
+        _claim(
+            attribute="core_unmapped",
+            attribute_raw="Adjusted EBITDA",
+            normalized=110_000_000,
+            period_year=2005,
+        ),
     ]
+
+    materials = build_screening_materials(claims, dashboard_structure=None, filenames={})
+
+    assert [f.label for f in materials.extracted_fields] == ["EBITDA · FY2005"]
+    assert materials.extracted_fields[0].value == "$110.00M"
+
+
+def test_eps_does_not_masquerade_as_net_income():
+    # Earnings per share is currency-typed too, so value_type can't disqualify it
+    # -- the "per share" phrase must. It is not the Net Income figure.
+    claims = [
+        _claim(
+            attribute="operating_metric",
+            attribute_raw="Net Income Per Share",
+            normalized=2.15,
+            period_year=2005,
+        ),
+    ]
+
+    materials = build_screening_materials(claims, dashboard_structure=None, filenames={})
+
+    assert materials.extracted_fields == []
+
+
+def test_net_income_from_operations_resolves_to_operating_income():
+    # "Net Income from Operations" carries both the Operating Income and Net
+    # Income keywords; exclude phrases resolve it deterministically to Operating
+    # Income (declared first, and Net Income excludes "from operations").
+    claims = [
+        _claim(
+            attribute="operating_metric",
+            attribute_raw="Net Income from Operations",
+            normalized=52_000_000,
+            period_year=2005,
+        ),
+    ]
+
+    materials = build_screening_materials(claims, dashboard_structure=None, filenames={})
+
+    assert [f.label for f in materials.extracted_fields] == ["Operating Income · FY2005"]
 
 
 def test_formats_percent_and_sub_million_currency():

@@ -11,11 +11,14 @@ metric is either a genuine canonical attribute or, for a table-dense CIM whose
 statement cells the parser left in a catch-all bucket, a line item recovered
 from its raw label (see _headline_key).
 
-The curation mirrors the Pipeline Inspector's own "Financial trends" logic
-(app/api/templates/pipeline_inspector.html) so the two surfaces agree on what a
-canonical metric is, which subject a fact belongs to, and how a value is
-formatted -- this is the JSON, screening-sized cut of the same data the
-inspector renders as a diagnostic HTML page.
+Subject folding and value formatting mirror the Pipeline Inspector
+(app/api/templates/pipeline_inspector.html) -- this is a JSON, screening-sized
+cut of the same claims the inspector renders as a diagnostic page. It is NOT
+identical in scope, though: the inspector's "Financial trends" panel is
+canonical-only, while this view additionally recovers headline line items from
+the catch-all buckets (see _headline_key), so on a table-dense CIM it shows
+metrics the inspector's trends panel does not. Bringing the inspector to the same
+recovery is a separate follow-up.
 
 Accuracy contract: values are copied verbatim from the claims (formatted, never
 re-derived), only trust-earned statuses are shown, and a fact is shown only when
@@ -32,6 +35,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.models.claim import Claim
+from app.services.entity_resolution.resolved import normalize_name
 
 # The two E2 catch-all buckets the parser assigns when a fact does not map to a
 # real canonical metric; everything else is a genuine canonical attribute.
@@ -75,27 +79,71 @@ _CANON_ORDER = {
     "total_debt": 14,
 }
 
+
 # Headline financial line items the parser leaves in a catch-all bucket
 # (operating_metric / core_unmapped) instead of mapping to a canonical metric --
 # the common case in table-dense CIMs, where every statement cell is extracted
-# verbatim and none resolves to a canonical attribute. Each entry lets such a
-# fact still surface on the screening snapshot, matched by a case-insensitive
-# substring of its raw label (attribute_raw). Ordered by reading priority;
-# keywords are kept mutually non-overlapping so a fact maps to at most one item.
-_HEADLINE_LABELS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
-    ("headline_net_revenue", "Net Revenue", ("net revenues", "net revenue")),
-    ("headline_gross_revenue", "Gross Revenue", ("gross revenues", "gross revenue")),
-    ("headline_ebitda", "EBITDA", ("ebitda",)),
-    ("headline_operating_income", "Operating Income", ("income from operations",)),
-    ("headline_net_income", "Net Income", ("net income",)),
-    ("headline_total_costs", "Total Costs & Expenses", ("total costs and expenses",)),
-    ("headline_sga", "SG&A", ("selling, general and administrative",)),
-    ("headline_dna", "D&A", ("depreciation and amortization",)),
+# verbatim and none resolves to a canonical attribute. Each entry recovers such a
+# fact onto the screening snapshot from its raw label. Matching is over
+# normalize_name(attribute_raw) (reused from entity resolution), so case,
+# punctuation and spacing variants fold together.
+#
+# `key` is the grouping key: a real canonical attribute where the metric has one,
+# so a recovered fact and its canonical twin collapse onto ONE row instead of
+# showing as duplicates; otherwise a distinct headline_* key. A fact matches the
+# first label whose `exclude` phrases are all absent and one `include` phrase is
+# present -- `exclude` is what makes overlapping names deterministic ("net income
+# from operations" is Operating Income, not Net Income), so the set is
+# non-overlapping by construction, not by luck. Every label here is a dollar
+# figure; a percent/ratio fact carrying the same words (an "EBITDA margin") is
+# rejected up front by value_type (see _headline_key), so a margin can never win
+# a dollar slot.
+@dataclass(frozen=True)
+class _HeadlineLabel:
+    key: str
+    display: str
+    include: tuple[str, ...]
+    exclude: tuple[str, ...] = ()
+
+
+_HEADLINE_LABELS: tuple[_HeadlineLabel, ...] = (
+    _HeadlineLabel("revenue", "Net Revenue", ("net revenue",), ("growth", "per share")),
+    _HeadlineLabel(
+        "headline_gross_revenue", "Gross Revenue", ("gross revenue",), ("growth", "per share")
+    ),
+    _HeadlineLabel("ebitda", "EBITDA", ("ebitda",), ("margin", "per share", "growth")),
+    _HeadlineLabel(
+        "ebit",
+        "Operating Income",
+        ("income from operations", "operating income"),
+        ("margin", "per share"),
+    ),
+    _HeadlineLabel(
+        "net_income",
+        "Net Income",
+        ("net income",),
+        ("from operations", "per share", "margin", "growth"),
+    ),
+    _HeadlineLabel(
+        "headline_total_costs",
+        "Total Costs & Expenses",
+        ("total costs and expenses",),
+        ("per share",),
+    ),
+    _HeadlineLabel("headline_sga", "SG&A", ("selling general and administrative",), ("per share",)),
+    _HeadlineLabel("headline_dna", "D&A", ("depreciation and amortization",), ("per share",)),
 )
 
-# Headline items sort after every canonical metric (which rank well under 100 --
-# see _metric_rank), preserving their own reading order among themselves.
-_HEADLINE_RANK = {key: 1000 + i for i, (key, _label, _keywords) in enumerate(_HEADLINE_LABELS)}
+# A dollar headline metric never matches a fact of these value types: a percent
+# margin or a ratio can carry the same label words but is not the figure shown.
+_NON_DOLLAR_TYPES = frozenset({"percent", "ratio"})
+
+# Headline items with no canonical twin sort after every canonical metric (which
+# rank well under 100 -- see _metric_rank), keeping their own reading order. The
+# ones keyed on a canonical attribute rank through _metric_rank like any other.
+_HEADLINE_RANK = {
+    label.key: 1000 + i for i, label in enumerate(_HEADLINE_LABELS) if label.key not in _CANON_ORDER
+}
 
 _UNIT_SYMBOL = {"USD": "$", "%": "%"}
 _PERIOD_KIND = {"A": "Actual", "E": "Estimate", "P": "Projected"}
@@ -250,35 +298,76 @@ def _metric_rank(dashboard_structure: dict[str, Any] | None) -> dict[str, int]:
     return rank
 
 
+def _value_type(claim: Claim) -> str | None:
+    return claim.value.get("value_type") if isinstance(claim.value, dict) else None
+
+
 def _headline_key(claim: Claim) -> tuple[str, str] | None:
     """The metric a claim contributes to the screening snapshot, as
     (grouping key, display label) -- or None when the claim is not a headline
     fact and should be skipped.
 
     A genuine canonical attribute keys on itself. A fact the parser left in a
-    catch-all bucket keys on the first headline line item its raw label matches,
-    so a table-dense CIM's verbatim statement cells still surface; everything
-    else in those buckets is skipped, keeping the snapshot a curated headline
+    catch-all bucket is recovered from its raw label: it keys on the first
+    _HEADLINE_LABEL whose value type fits (a percent/ratio never matches a dollar
+    metric) and whose include/exclude phrases resolve to it. A recovered fact
+    whose metric has a canonical form keys on that canonical attribute, so it
+    dedupes against a canonical twin rather than showing twice. Everything else
+    in the catch-all buckets is skipped, keeping the snapshot a curated headline
     set rather than the raw extract.
     """
     attribute = claim.attribute
     if _is_canonical(attribute):
         return attribute, _human_attr(attribute)
-    raw = (claim.attribute_raw or "").lower()
+    raw = normalize_name(claim.attribute_raw or "")
     if not raw:
         return None
-    for key, label, keywords in _HEADLINE_LABELS:
-        if any(keyword in raw for keyword in keywords):
-            return key, label
+    # Every headline label is a dollar figure; a margin/ratio carrying the same
+    # words is not the figure shown, so reject it before any phrase match.
+    if _value_type(claim) in _NON_DOLLAR_TYPES:
+        return None
+    for label in _HEADLINE_LABELS:
+        if any(bad in raw for bad in label.exclude):
+            continue
+        if any(inc in raw for inc in label.include):
+            return label.key, label.display
     return None
 
 
 def _rank_for(metric_key: str, canonical_rank: dict[str, int]) -> int:
-    """Sort rank for a metric key: canonical metrics by the deal's own order,
-    headline line items after them in reading order."""
+    """Sort rank for a metric key: canonical metrics (including recovered facts
+    keyed on a canonical attribute) by the deal's own order, headline line items
+    with no canonical twin after them in reading order."""
     if metric_key in _HEADLINE_RANK:
         return _HEADLINE_RANK[metric_key]
     return canonical_rank.get(metric_key, 99)
+
+
+def _headline_claims(
+    claims: Sequence[Claim], *, dashboard_structure: dict[str, Any] | None
+) -> tuple[list[tuple[Claim, str, str]], dict[str, int]]:
+    """(claim, metric_key, display) for every trusted, dated, displayable headline
+    claim of the deal's lead business subject, plus the metric-rank map. The one
+    eligibility gate shared by the extracted panel and the LLM grounding, so the
+    two never drift on which facts count."""
+    entity_subject, subject_order = _subject_map(dashboard_structure, claims)
+    lead_subject = subject_order[0] if subject_order else "Other"
+
+    rows: list[tuple[Claim, str, str]] = []
+    for claim in claims:
+        if claim.status not in _TRUSTED:
+            continue
+        if claim.period_year is None:
+            continue
+        if entity_subject.get(claim.entity or "", "Other") != lead_subject:
+            continue
+        if _fmt_value(claim.value) == "—":
+            continue
+        keyed = _headline_key(claim)
+        if keyed is None:
+            continue
+        rows.append((claim, keyed[0], keyed[1]))
+    return rows, _metric_rank(dashboard_structure)
 
 
 def build_screening_materials(
@@ -299,35 +388,19 @@ def build_screening_materials(
     never resolve to a canonical attribute still populates the panel.
     `filenames` maps data_source_id -> the document's filename for the citation.
     """
-    entity_subject, subject_order = _subject_map(dashboard_structure, claims)
-    lead_subject = subject_order[0] if subject_order else "Other"
+    rows, canonical_rank = _headline_claims(claims, dashboard_structure=dashboard_structure)
 
-    def subject_of(claim: Claim) -> str:
-        return entity_subject.get(claim.entity or "", "Other")
-
-    # Best claim per headline metric within the lead subject. Keyed on the
-    # metric key from _headline_key, not claim.attribute -- catch-all facts all
-    # share one attribute ("operating_metric"), so keying on it would collapse
-    # every recovered line item onto a single row.
+    # Best claim per metric key. Keying on the metric (not claim.attribute -- the
+    # catch-all facts all share "operating_metric") both spreads recovered line
+    # items across their own rows and folds a recovered fact onto its canonical
+    # twin, so a metric present both ways shows once, not twice.
     best: dict[str, tuple[Claim, str]] = {}
-    for claim in claims:
-        if claim.status not in _TRUSTED:
-            continue
-        if subject_of(claim) != lead_subject:
-            continue
-        if _fmt_value(claim.value) == "—":
-            continue
-        keyed = _headline_key(claim)
-        if keyed is None:
-            continue
-        metric_key, label = keyed
+    for claim, metric_key, label in rows:
         current = best.get(metric_key)
         if current is None or _prefer(claim, current[0]):
             best[metric_key] = (claim, label)
 
-    canonical_rank = _metric_rank(dashboard_structure)
     chosen = sorted(best.items(), key=lambda item: _rank_for(item[0], canonical_rank))[:limit]
-
     extracted_fields = [
         CitedField(
             label=_field_label(claim, label),
@@ -354,35 +427,19 @@ def render_claim_facts(
     Lead business subject only, every headline metric's figures ACROSS its
     periods (so the model can see trends, not just the latest point), ranked by
     the deal's own metric order then latest-year-first, capped at `limit`. Same
-    selection, trust filter and value formatting as the extracted panel -- a
-    metric is either a canonical attribute or a headline line item recovered
-    from a catch-all bucket (see _headline_key) -- so the model reads exactly
-    the figures the user sees, and no fact that is not one of them.
+    eligibility (via _headline_claims), trust filter and value formatting as the
+    extracted panel -- a metric is either a canonical attribute or a headline
+    line item recovered from a catch-all bucket -- so the model reads exactly the
+    figures the user sees, and no fact that is not one of them.
     """
-    entity_subject, subject_order = _subject_map(dashboard_structure, claims)
-    lead_subject = subject_order[0] if subject_order else "Other"
-    canonical_rank = _metric_rank(dashboard_structure)
-
-    rows: list[tuple[Claim, str, str]] = []  # (claim, metric_key, display label)
-    for claim in claims:
-        if claim.status not in _TRUSTED:
-            continue
-        if entity_subject.get(claim.entity or "", "Other") != lead_subject:
-            continue
-        if _fmt_value(claim.value) == "—":
-            continue
-        keyed = _headline_key(claim)
-        if keyed is None:
-            continue
-        rows.append((claim, keyed[0], keyed[1]))
+    rows, canonical_rank = _headline_claims(claims, dashboard_structure=dashboard_structure)
     rows.sort(key=lambda r: (_rank_for(r[1], canonical_rank), -(r[0].period_year or 0)))
 
     lines: list[str] = []
     seen: set[str] = set()
     for claim, _key, label in rows[:limit]:
         period = _fmt_period(claim.period_year, claim.period_kind)
-        value = _fmt_value(claim.value)
-        line = f"{label} ({period}): {value}" if period else f"{label}: {value}"
+        line = f"{label} ({period}): {_fmt_value(claim.value)}"
         if line not in seen:
             seen.add(line)
             lines.append(line)

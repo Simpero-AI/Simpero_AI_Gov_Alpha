@@ -371,7 +371,9 @@ async def get_deal_screening_materials(
 ) -> ScreeningMaterialsResponse:
     """The Initial Screening tab's "Extracted from Materials" panel, derived
     deterministically from the deal's claims spine (build_screening_materials):
-    each canonical metric's latest actual figure, with its citation. RLS-scoped
+    each headline metric's latest actual figure, with its citation -- a metric
+    being a canonical attribute or a line item recovered from a catch-all bucket
+    by its raw label, so a table-dense CIM still populates the panel. RLS-scoped
     by get_db.
 
     Claims-only and LLM-free on purpose -- fast and reliable, and never blocked
