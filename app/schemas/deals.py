@@ -288,6 +288,38 @@ class ScreeningInsightsResponse(CamelModel):
     risk_flags: list[str]
 
 
+class CompanyFactResponse(CamelModel):
+    """One Business Overview fact copied from the claims spine (build_company_view):
+    a company-identity value (sector/HQ/headcount/founded) or a qualitative
+    assertion verbatim. `label` is the field name for a fact, or the entity the
+    assertion is about; `status` is the trust status ("verified"/"cited"/... , or
+    "derived" for the deal-profile sector/HQ) so the tab can badge it; `citation`
+    is the human "file · p.N" string, null when unlocatable (or derived)."""
+
+    label: str
+    value: str
+    citation: str | None = None
+    status: str
+    entity: str | None = None
+
+
+class CompanyViewResponse(CamelModel):
+    """GET /deals/{id}/company — the Business Overview tab's claims-driven content:
+    company-identity facts (sector/HQ from the deal profile, headcount/founded by
+    label), plus qualitative assertions grouped by kind -- overview
+    (operating_model), risks (risk_or_dependency), commercial (commercial_terms),
+    related_parties (related_party), plans (plan_or_commitment). Each list is
+    empty when the deal has no backing claims (the tab renders "information not
+    available"); never 404s for a claim-less deal."""
+
+    facts: list[CompanyFactResponse]
+    overview: list[CompanyFactResponse]
+    risks: list[CompanyFactResponse]
+    commercial: list[CompanyFactResponse]
+    related_parties: list[CompanyFactResponse]
+    plans: list[CompanyFactResponse]
+
+
 class FormerNameResponse(CamelModel):
     """A previous legal name with the window it applied to.
 
