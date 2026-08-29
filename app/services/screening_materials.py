@@ -255,7 +255,11 @@ def _subject_map(
 ) -> tuple[dict[str, str], list[str]]:
     """Fold entity strings into business subjects. The parser's grounded
     organizing pass leads when present; otherwise the most-mentioned entities
-    become their own subjects (frequency fallback). Mirrors the inspector."""
+    become their own subjects (frequency fallback). Mirrors the inspector, but
+    the map is keyed case-insensitively (casefolded entity -> subject): a deck
+    that writes "American Casino" in the dashboard structure and "american
+    casino" on the claims must still fold together, or the whole subject's facts
+    fall to "Other" and vanish from the panel. Look claims up via _subject_of."""
     entity_subject: dict[str, str] = {}
     order: list[str] = []
     subjects = (dashboard_structure or {}).get("subjects")
@@ -266,18 +270,24 @@ def _subject_map(
             name = str(subject["name"])
             order.append(name)
             for entity in subject.get("entities") or []:
-                if entity and entity not in entity_subject:
-                    entity_subject[entity] = name
+                if entity and entity.casefold() not in entity_subject:
+                    entity_subject[entity.casefold()] = name
     else:
         freq = Counter(c.entity for c in claims if c.entity)
         for entity, _count in sorted(
             ((e, f) for e, f in freq.items() if f >= 2),
             key=lambda item: (-item[1], item[0]),
         ):
-            entity_subject[entity] = entity
+            entity_subject[entity.casefold()] = entity
             order.append(entity)
     order.append("Other")
     return entity_subject, order
+
+
+def _subject_of(entity_subject: dict[str, str], entity: str | None) -> str:
+    """The business subject a claim's entity folds to, matched case-insensitively
+    (see _subject_map); "Other" when it matches no subject."""
+    return entity_subject.get((entity or "").casefold(), "Other")
 
 
 def _metric_rank(dashboard_structure: dict[str, Any] | None) -> dict[str, int]:
@@ -346,10 +356,16 @@ def _rank_for(metric_key: str, canonical_rank: dict[str, int]) -> int:
 def _headline_claims(
     claims: Sequence[Claim], *, dashboard_structure: dict[str, Any] | None
 ) -> tuple[list[tuple[Claim, str, str]], dict[str, int]]:
-    """(claim, metric_key, display) for every trusted, dated, displayable headline
+    """(claim, metric_key, display) for every trusted, displayable headline
     claim of the deal's lead business subject, plus the metric-rank map. The one
     eligibility gate shared by the extracted panel and the LLM grounding, so the
-    two never drift on which facts count."""
+    two never drift on which facts count.
+
+    A missing period_year is NOT a filter: many CIMs carry statement figures with
+    no machine-readable year, and dropping them empties the panel on exactly the
+    deals it exists for. When a metric has several undated values, _prefer picks
+    one deterministically (see _rank_key); when years ARE present it still prefers
+    the latest actual."""
     entity_subject, subject_order = _subject_map(dashboard_structure, claims)
     lead_subject = subject_order[0] if subject_order else "Other"
 
@@ -357,9 +373,7 @@ def _headline_claims(
     for claim in claims:
         if claim.status not in _TRUSTED:
             continue
-        if claim.period_year is None:
-            continue
-        if entity_subject.get(claim.entity or "", "Other") != lead_subject:
+        if _subject_of(entity_subject, claim.entity) != lead_subject:
             continue
         if _fmt_value(claim.value) == "—":
             continue
@@ -439,7 +453,8 @@ def render_claim_facts(
     seen: set[str] = set()
     for claim, _key, label in rows[:limit]:
         period = _fmt_period(claim.period_year, claim.period_kind)
-        line = f"{label} ({period}): {_fmt_value(claim.value)}"
+        value = _fmt_value(claim.value)
+        line = f"{label} ({period}): {value}" if period else f"{label}: {value}"
         if line not in seen:
             seen.add(line)
             lines.append(line)
@@ -449,15 +464,23 @@ def render_claim_facts(
 def _prefer(candidate: Claim, current: Claim) -> bool:
     """True when `candidate` is the better figure to show for its metric: a
     historical period beats a forecast, then a later year, then a more
-    corroborated status."""
+    corroborated status, then the larger magnitude."""
     return _rank_key(candidate) > _rank_key(current)
 
 
-def _rank_key(claim: Claim) -> tuple[int, int, int]:
+def _rank_key(claim: Claim) -> tuple[int, int, int, float]:
     # A forecast (Estimate/Projection) ranks below any historical figure; an
     # unmarked period counts as historical, not a forecast -- so a latest actual
     # is never passed over for a later-year estimate even when the actuals carry
-    # no explicit "A" kind.
+    # no explicit "A" kind. The magnitude is the final tiebreak: when a metric's
+    # figures carry no year (period_year None -> -1 for all), preferring the
+    # larger value is a stable, deterministic choice instead of insertion order.
     is_historical = 0 if claim.period_kind in ("E", "P") else 1
     year = claim.period_year if claim.period_year is not None else -1
-    return (is_historical, year, _STATUS_RANK.get(claim.status, 0))
+    normalized = claim.value.get("normalized") if isinstance(claim.value, dict) else None
+    magnitude = (
+        normalized
+        if isinstance(normalized, (int, float)) and not isinstance(normalized, bool)
+        else float("-inf")
+    )
+    return (is_historical, year, _STATUS_RANK.get(claim.status, 0), magnitude)

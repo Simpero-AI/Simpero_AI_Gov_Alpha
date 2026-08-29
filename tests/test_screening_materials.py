@@ -156,24 +156,49 @@ def test_recovers_headline_line_items_from_catchall_buckets():
     assert [f.value for f in materials.extracted_fields] == ["$328.00M", "$110.00M", "$45.00M"]
 
 
-def test_a_period_less_fact_is_excluded():
-    # A fact the parser did not stamp with a year is not shown -- picking one of
-    # several same-label period-less values would be arbitrary, and a period-less
-    # actual must not outrank a properly dated figure.
+def test_a_period_less_fact_still_shows():
+    # A year is NOT required: a CIM whose statement figures carry no
+    # machine-readable year must still populate the panel (labelled by metric
+    # name, no "· FY"). Among several undated values for a metric, the larger
+    # magnitude wins deterministically (see _rank_key).
     claims = [
         _claim(
-            attribute="operating_metric",
-            attribute_raw="Net Revenues",
+            attribute="revenue",
+            normalized=300_000_000,
+            period_year=None,
+            period_kind=None,
+        ),
+        _claim(
+            attribute="revenue",
             normalized=328_000_000,
             period_year=None,
             period_kind=None,
         ),
-        _claim(attribute="revenue", normalized=100_000_000, period_year=None, period_kind=None),
     ]
 
     materials = build_screening_materials(claims, dashboard_structure=None, filenames={})
 
-    assert materials.extracted_fields == []
+    assert [f.label for f in materials.extracted_fields] == ["Revenue"]
+    assert materials.extracted_fields[0].value == "$328.00M"
+
+
+def test_subject_folding_is_case_insensitive():
+    # The dashboard names the subject "American Casino"; the claims carry entity
+    # "american casino". They must fold together, or the whole subject's facts
+    # drop to "Other" and the panel comes up empty.
+    claims = [
+        _claim(
+            attribute="revenue", normalized=328_000_000, entity="american casino", period_year=2005
+        ),
+    ]
+    structure = {
+        "subjects": [{"name": "American Casino", "entities": ["American Casino"]}],
+        "metric_order": ["revenue"],
+    }
+
+    materials = build_screening_materials(claims, dashboard_structure=structure, filenames={})
+
+    assert [f.value for f in materials.extracted_fields] == ["$328.00M"]
 
 
 def test_a_recovered_fact_dedupes_against_its_canonical_twin():
