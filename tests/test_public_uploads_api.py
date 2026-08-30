@@ -64,8 +64,8 @@ def mocked_spaces(monkeypatch: pytest.MonkeyPatch):
         build_calls.append((org_name, clerk_org_id, deal_id, upload_id, filename))
         return f"{org_name}-{clerk_org_id}/{deal_id}/{upload_id}-{filename}"
 
-    def fake_presign_put(key, ttl_seconds):
-        presign_calls.append((key, ttl_seconds))
+    def fake_presign_put(key, ttl_seconds, *, content_length=None):
+        presign_calls.append((key, ttl_seconds, content_length))
         return f"https://example-spaces.test/{key}?signed=1"
 
     def fake_head_object(key: str) -> bool:
@@ -177,6 +177,11 @@ async def test_presign_happy_path_under_ceiling(pending_link_with_token, mocked_
     body = resp.json()
     assert set(body.keys()) == {"uploadId", "presignedUrl", "storageKey"}
     assert len(mocked_spaces["presign_calls"]) == 1
+    # P3-15/F9: the client's declared (already-validated) size is what gets
+    # bound into the signature -- see test_presign_content_length.py for
+    # proof that actually enforces an exact-match ceiling.
+    _, _, content_length = mocked_spaces["presign_calls"][0]
+    assert content_length == 1024
 
 
 # --- /complete happy path ---------------------------------------------------

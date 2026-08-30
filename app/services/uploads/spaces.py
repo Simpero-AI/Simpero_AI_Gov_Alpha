@@ -68,11 +68,23 @@ def build_object_key(
     return f"{safe_org_name}-{clerk_org_id}/{deal_id}/{upload_id}-{filename}"
 
 
-def presign_put(key: str, ttl_seconds: int) -> str:
+def presign_put(key: str, ttl_seconds: int, *, content_length: int | None = None) -> str:
+    """`content_length`, when given, is signed as an EXACT match (SigV4 binds
+    Content-Length into the signed headers), not a maximum -- a PUT whose
+    actual Content-Length differs at all fails signature verification, it
+    doesn't get capped. That's the desired behaviour for public_uploads.py's
+    already-validated declared size (P3-15/F9): the client validated <= 10 MB
+    request becomes the only size the resulting URL will ever accept.
+    Omitted (the authenticated app/api/uploads.py path) keeps today's
+    behaviour -- a URL that accepts a PUT of any size.
+    """
     settings = get_settings()
+    params: dict[str, str | int] = {"Bucket": settings.spaces_bucket, "Key": key}
+    if content_length is not None:
+        params["ContentLength"] = content_length
     return _client().generate_presigned_url(
         "put_object",
-        Params={"Bucket": settings.spaces_bucket, "Key": key},
+        Params=params,
         ExpiresIn=ttl_seconds,
     )
 

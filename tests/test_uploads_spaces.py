@@ -81,6 +81,28 @@ def test_presign_put_calls_generate_presigned_url_with_right_params(_isolated_cl
     )
 
 
+def test_presign_put_with_content_length_adds_it_to_params(_isolated_client):
+    """The authenticated app/api/uploads.py path never passes content_length
+    -- this call shape is exercised only by public_uploads.py (P3-15/F9).
+    See tests/test_presign_content_length.py for proof this actually binds
+    into the signature, not just the call shape.
+    """
+    mock_client = _isolated_client
+    mock_client.generate_presigned_url.return_value = "https://example.com/signed"
+
+    spaces.presign_put("acme-org_abc/deal/upload-file.pdf", ttl_seconds=600, content_length=1024)
+
+    mock_client.generate_presigned_url.assert_called_once_with(
+        "put_object",
+        Params={
+            "Bucket": FAKE_BUCKET,
+            "Key": "acme-org_abc/deal/upload-file.pdf",
+            "ContentLength": 1024,
+        },
+        ExpiresIn=600,
+    )
+
+
 def test_head_object_true_on_success(_isolated_client):
     mock_client = _isolated_client
     mock_client.head_object.return_value = {}

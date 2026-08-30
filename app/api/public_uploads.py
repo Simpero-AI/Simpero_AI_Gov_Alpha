@@ -119,7 +119,9 @@ async def create_presigned_url(
     storage_key = build_object_key(
         org_name, link.clerk_org_id, link.deal_id, upload_id, body.filename
     )
-    presigned_url = presign_put(storage_key, ttl_seconds=_PRESIGN_TTL_SECONDS)
+    presigned_url = presign_put(
+        storage_key, ttl_seconds=_PRESIGN_TTL_SECONDS, content_length=body.size
+    )
 
     return PresignResponse(
         upload_id=upload_id, presigned_url=presigned_url, storage_key=storage_key
