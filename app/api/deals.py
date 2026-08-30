@@ -958,7 +958,20 @@ async def get_intake_link(
     helper, so a row still stored `pending` past its `expires_at` reads
     `expired` here even though P3-01's lazy-expire UPDATE has not run yet --
     this route never performs that write itself. Never returns the token or
-    its hash; see IntakeLinkStatusResponse's field list."""
+    its hash; see IntakeLinkStatusResponse's field list.
+
+    Deliberately writes NO audit row, decided rather than inherited. The
+    response does carry the external recipient's email, but that address was
+    supplied by this same org when it generated the link (P3-01, which does
+    audit the write) -- reading it back is not a disclosure of anything the
+    caller's org did not already provide. `get_deal`'s `document_access` row
+    exists because that route hands back document content; the read-only
+    neighbours that do not (`get_deal_screening`,
+    `get_deal_screening_materials`, `list_deal_documents`) write nothing, and
+    this follows them. P3-13's audit review covers the unauthenticated public
+    surface, where the actor is not otherwise identified; an org-authenticated
+    status poll behind Clerk is not that surface, and auditing every Step 2
+    waiting-panel poll would bury the intake trail's real entries in noise."""
     deal = await DealRepo(db).get_by_id(deal_id)
     if deal is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")

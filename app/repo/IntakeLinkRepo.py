@@ -133,8 +133,18 @@ class IntakeLinkRepo(BaseRepo[DealIntakeLink, dict]):
 
         Ordered by `id` as well as `created_at` because `created_at`'s
         server_default is `now()` -- transaction time, not statement time --
-        so two rows inserted in one transaction share a timestamp exactly and
-        the ordering would otherwise be arbitrary between them.
+        so two rows inserted in one transaction would share a timestamp
+        exactly. The `id DESC` tie-break makes that case *deterministic*, not
+        recency-ordered: `id` is `gen_random_uuid()`, so when a real tie
+        exists the winner is arbitrary-but-stable, NOT the newer row.
+        No such tie arises today -- P3-01's reissue lazy-expires the old row
+        with an UPDATE, so it keeps its original transaction's `created_at`
+        and the two rows never collide. If a same-transaction insert of two
+        link rows ever becomes possible this ordering is wrong rather than
+        merely ambiguous (P3-02 would report `expired` for a deal with a live
+        pending link; P3-06 would report `none` and never offer the waiting
+        panel at all), and the escape hatch is to order on something
+        monotonic -- `expires_at DESC`, or a dedicated sequence -- not `id`.
 
         Read-only: never writes `status = 'expired'`, even for a row whose
         `expires_at` has passed. Callers pass the row through
