@@ -106,37 +106,56 @@ class _HeadlineLabel:
     exclude: tuple[str, ...] = ()
 
 
+# normalize_name collapses "&" and other non-word runs to a single space (it
+# does NOT turn "&" into "and"), so "Total Costs & Expenses" normalizes to
+# "total costs expenses" and "Depreciation & amortization" to "depreciation
+# amortization". Each include tuple therefore carries BOTH the spelled-out
+# ("... and ...") and the ampersand-collapsed form, or the "&" renderings common
+# in CIMs would never match. `exclude` uses "per " (trailing space) so it catches
+# every per-unit variant -- "per share", "per available room" -- not just shares.
 _HEADLINE_LABELS: tuple[_HeadlineLabel, ...] = (
-    _HeadlineLabel("revenue", "Net Revenue", ("net revenue",), ("growth", "per share")),
+    _HeadlineLabel("revenue", "Net Revenue", ("net revenue",), ("growth", "per ")),
     _HeadlineLabel(
-        "headline_gross_revenue", "Gross Revenue", ("gross revenue",), ("growth", "per share")
+        "headline_gross_revenue", "Gross Revenue", ("gross revenue",), ("growth", "per ")
     ),
-    _HeadlineLabel("ebitda", "EBITDA", ("ebitda",), ("margin", "per share", "growth")),
+    _HeadlineLabel("ebitda", "EBITDA", ("ebitda",), ("margin", "per ", "growth")),
     _HeadlineLabel(
         "ebit",
         "Operating Income",
         ("income from operations", "operating income"),
-        ("margin", "per share"),
+        ("margin", "per "),
     ),
     _HeadlineLabel(
         "net_income",
         "Net Income",
         ("net income",),
-        ("from operations", "per share", "margin", "growth"),
+        ("from operations", "per ", "margin", "growth"),
     ),
     _HeadlineLabel(
         "headline_total_costs",
         "Total Costs & Expenses",
-        ("total costs and expenses",),
-        ("per share",),
+        ("total costs and expenses", "total costs expenses"),
+        ("per ",),
     ),
-    _HeadlineLabel("headline_sga", "SG&A", ("selling general and administrative",), ("per share",)),
-    _HeadlineLabel("headline_dna", "D&A", ("depreciation and amortization",), ("per share",)),
+    _HeadlineLabel(
+        "headline_sga",
+        "SG&A",
+        ("selling general and administrative", "selling general administrative"),
+        ("per ",),
+    ),
+    _HeadlineLabel(
+        "headline_dna",
+        "D&A",
+        ("depreciation and amortization", "depreciation amortization"),
+        ("per ",),
+    ),
 )
 
 # A dollar headline metric never matches a fact of these value types: a percent
-# margin or a ratio can carry the same label words but is not the figure shown.
-_NON_DOLLAR_TYPES = frozenset({"percent", "ratio"})
+# margin, a ratio, a count, or a date can carry the same label words but is not
+# the dollar figure the panel shows. (A currency- or ambiguously-typed fact still
+# qualifies, so a real figure the parser left untyped is not dropped.)
+_NON_DOLLAR_TYPES = frozenset({"percent", "ratio", "count", "date"})
 
 # Headline items with no canonical twin sort after every canonical metric (which
 # rank well under 100 -- see _metric_rank), keeping their own reading order. The
@@ -278,6 +297,14 @@ def _subject_map(
             ((e, f) for e, f in freq.items() if f >= 2),
             key=lambda item: (-item[1], item[0]),
         ):
+            # Guard the casefolded key exactly as the structure branch does: two
+            # spellings that differ only in case ("American Casino" / "american
+            # casino") must fold to ONE subject. Without the guard the last
+            # spelling would win the map while `order[0]` kept the first, so
+            # _subject_of would never equal lead_subject and the panel would come
+            # up empty -- the opposite of what the casefold change is for.
+            if entity.casefold() in entity_subject:
+                continue
             entity_subject[entity.casefold()] = entity
             order.append(entity)
     order.append("Other")
