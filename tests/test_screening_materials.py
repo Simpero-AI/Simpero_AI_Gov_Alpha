@@ -6,7 +6,7 @@ cited."""
 import uuid
 
 from app.models.claim import Claim
-from app.services.screening_materials import build_screening_materials
+from app.services.screening_materials import build_screening_materials, render_claim_facts
 
 
 def _claim(
@@ -544,3 +544,52 @@ def test_abbreviation_match_is_token_bounded_not_substring():
     materials = build_screening_materials(claims, dashboard_structure=None, filenames={})
 
     assert materials.extracted_fields == []
+
+
+def test_row_label_is_pinned_to_the_metric_key_not_the_winning_claim():
+    # A canonical revenue claim and a recovered "Net Revenue" catch-all claim both
+    # key on `revenue`. The recovered one is a later year so it wins the figure,
+    # but the row must still read "Revenue" (the metric key's label), not flip to
+    # the winning claim's own "Net Revenue".
+    claims = [
+        _claim(attribute="revenue", normalized=100_000_000, period_year=2022),
+        _claim(
+            attribute="operating_metric",
+            attribute_raw="Net Revenue",
+            normalized=140_000_000,
+            period_year=2023,
+        ),
+    ]
+
+    materials = build_screening_materials(claims, dashboard_structure=None, filenames={})
+
+    assert [f.label for f in materials.extracted_fields] == ["Revenue · FY2023"]
+    assert materials.extracted_fields[0].value == "$140.00M"
+
+
+def test_grounding_dedupes_conflicting_values_for_the_same_metric_and_period():
+    # Two catch-all facts for the same metric AND period but different values must
+    # not both reach the model -- the grounding dedupes on (metric key, period) and
+    # prefers the same figure the panel would (larger magnitude), rather than on
+    # the formatted line (which lets both conflicting values through).
+    claims = [
+        _claim(
+            attribute="operating_metric",
+            attribute_raw="Net Revenue",
+            normalized=328_000_000,
+            period_year=2005,
+        ),
+        _claim(
+            attribute="operating_metric",
+            attribute_raw="Net Revenue",
+            normalized=168_000_000,
+            period_year=2005,
+        ),
+    ]
+
+    lines = render_claim_facts(claims, dashboard_structure=None)
+
+    # Recovered-only facts read under their headline display ("Net Revenue").
+    revenue_lines = [ln for ln in lines if ln.startswith("Net Revenue")]
+    assert len(revenue_lines) == 1
+    assert "$328.00M" in revenue_lines[0]

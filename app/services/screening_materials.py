@@ -254,6 +254,21 @@ def _field_label(claim: Claim, label: str | None = None) -> str:
     return f"{metric} · {period}" if period else metric
 
 
+def _labels_by_key(rows: Sequence[tuple[Claim, str, str]]) -> dict[str, str]:
+    """The one display label per metric key, pinned so a row never flips its name
+    with the _prefer tiebreak. A canonical claim's label (e.g. "Revenue") wins the
+    key when one is present; otherwise the recovered headline display (e.g. "Net
+    Revenue", "Operating Income") stands. The choice depends only on WHICH claims
+    exist for the key, never on which one wins the value."""
+    labels: dict[str, str] = {}
+    for claim, metric_key, display in rows:
+        if _is_canonical(claim.attribute):
+            labels[metric_key] = display
+        else:
+            labels.setdefault(metric_key, display)
+    return labels
+
+
 def _where_text(claim: Claim) -> str | None:
     if claim.kind == "xlsx":
         return f"Sheet {claim.sheet or '?'} · cell {claim.cell_ref or '?'}"
@@ -360,10 +375,7 @@ def _tokens_contain(raw: str, phrase: str) -> bool:
     if not phrase_tokens or len(phrase_tokens) > len(raw_tokens):
         return False
     span = len(phrase_tokens)
-    return any(
-        raw_tokens[i : i + span] == phrase_tokens
-        for i in range(len(raw_tokens) - span + 1)
-    )
+    return any(raw_tokens[i : i + span] == phrase_tokens for i in range(len(raw_tokens) - span + 1))
 
 
 def _headline_key(claim: Claim) -> tuple[str, str] | None:
@@ -464,20 +476,25 @@ def build_screening_materials(
     # catch-all facts all share "operating_metric") both spreads recovered line
     # items across their own rows and folds a recovered fact onto its canonical
     # twin, so a metric present both ways shows once, not twice.
-    best: dict[str, tuple[Claim, str]] = {}
-    for claim, metric_key, label in rows:
+    best: dict[str, Claim] = {}
+    for claim, metric_key, _label in rows:
         current = best.get(metric_key)
-        if current is None or _prefer(claim, current[0]):
-            best[metric_key] = (claim, label)
+        if current is None or _prefer(claim, current):
+            best[metric_key] = claim
 
+    # The row label is pinned per key (canonical name when a canonical claim is
+    # present, else the recovered display), NOT taken from whichever claim wins the
+    # value -- so a metric present both canonically and as a recovered catch-all
+    # fact does not flip its displayed name with the _prefer tiebreak.
+    labels = _labels_by_key(rows)
     chosen = sorted(best.items(), key=lambda item: _rank_for(item[0], canonical_rank))[:limit]
     extracted_fields = [
         CitedField(
-            label=_field_label(claim, label),
+            label=_field_label(claim, labels[key]),
             value=_fmt_value(claim.value),
             citation=_citation(claim, filenames),
         )
-        for _key, (claim, label) in chosen
+        for key, claim in chosen
     ]
 
     # highlights / risk_flags are intentionally left empty here -- see the module
@@ -503,17 +520,31 @@ def render_claim_facts(
     figures the user sees, and no fact that is not one of them.
     """
     rows, canonical_rank = _headline_claims(claims, dashboard_structure=dashboard_structure)
-    rows.sort(key=lambda r: (_rank_for(r[1], canonical_rank), -(r[0].period_year or 0)))
+
+    # One claim per (metric key, period): a metric legitimately spans periods
+    # here (trend context), but two catch-all facts for the SAME metric and period
+    # with different values must not both reach the model -- dedup on (key, period)
+    # and prefer the same figure the panel would (see _prefer), rather than on the
+    # formatted line, which lets two conflicting values through.
+    best: dict[tuple[str, int | None], Claim] = {}
+    for claim, metric_key, _label in rows:
+        kp = (metric_key, claim.period_year)
+        current = best.get(kp)
+        if current is None or _prefer(claim, current):
+            best[kp] = claim
+
+    labels = _labels_by_key(rows)
+    ordered = sorted(
+        best.items(),
+        key=lambda item: (_rank_for(item[0][0], canonical_rank), -(item[0][1] or 0)),
+    )[:limit]
 
     lines: list[str] = []
-    seen: set[str] = set()
-    for claim, _key, label in rows[:limit]:
+    for (metric_key, _period), claim in ordered:
+        metric = labels[metric_key]
         period = _fmt_period(claim.period_year, claim.period_kind)
         value = _fmt_value(claim.value)
-        line = f"{label} ({period}): {value}" if period else f"{label}: {value}"
-        if line not in seen:
-            seen.add(line)
-            lines.append(line)
+        lines.append(f"{metric} ({period}): {value}" if period else f"{metric}: {value}")
     return lines
 
 
