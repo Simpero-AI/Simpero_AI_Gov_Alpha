@@ -459,3 +459,88 @@ def test_magnitude_breaks_ties_for_the_same_metric_and_period():
     materials = build_screening_materials(claims, dashboard_structure=None, filenames={})
 
     assert [f.value for f in materials.extracted_fields] == ["$328.00M"]
+
+
+def test_magnitude_tiebreak_uses_absolute_value_for_losses():
+    # Two net-income claims for the same period+status, both losses. "Larger
+    # magnitude" is the bigger ABSOLUTE figure -- the deeper loss -- not the signed
+    # max, which would wrongly prefer the smaller loss.
+    claims = [
+        _claim(attribute="net_income", normalized=-100_000_000, period_year=2005),
+        _claim(attribute="net_income", normalized=-500_000_000, period_year=2005),
+    ]
+
+    materials = build_screening_materials(claims, dashboard_structure=None, filenames={})
+
+    assert [f.value for f in materials.extracted_fields] == ["$-500.00M"]
+
+
+def test_frequency_fallback_counts_case_variants_as_one_entity():
+    # The target is mentioned twice but split across two case spellings (once
+    # each); a competitor is mentioned once. Counting the CASEFOLDED entity lets
+    # the target reach the f>=2 subject threshold and become the lead, so the
+    # competitor's figure is excluded. Counting the raw string would leave every
+    # entity at count 1 -> no subject -> the filter degrades to a no-op and the
+    # competitor's figure leaks into the panel.
+    claims = [
+        _claim(
+            attribute="revenue", normalized=328_000_000, entity="American Casino", period_year=2005
+        ),
+        _claim(
+            attribute="ebitda", normalized=89_000_000, entity="american casino", period_year=2005
+        ),
+        _claim(
+            attribute="net_income", normalized=12_000_000, entity="Rival Corp", period_year=2005
+        ),
+    ]
+
+    materials = build_screening_materials(claims, dashboard_structure=None, filenames={})
+
+    labels = {f.label for f in materials.extracted_fields}
+    assert "Revenue · FY2005" in labels
+    assert "Ebitda · FY2005" in labels
+    # Rival Corp (a single mention) is not the lead subject, so its figure is out.
+    assert len(materials.extracted_fields) == 2
+
+
+def test_recovers_abbreviated_sga_and_dna_line_items():
+    # The raw labels use the bare abbreviations, which normalize to "sg a"/"d a"
+    # and match via whole-token abbreviation matching.
+    claims = [
+        _claim(
+            attribute="operating_metric",
+            attribute_raw="SG&A",
+            normalized=40_000_000,
+            period_year=2005,
+        ),
+        _claim(
+            attribute="operating_metric",
+            attribute_raw="D&A",
+            normalized=25_000_000,
+            period_year=2005,
+        ),
+    ]
+
+    materials = build_screening_materials(claims, dashboard_structure=None, filenames={})
+
+    labels = {f.label for f in materials.extracted_fields}
+    assert "SG&A · FY2005" in labels
+    assert "D&A · FY2005" in labels
+
+
+def test_abbreviation_match_is_token_bounded_not_substring():
+    # "Stand Alone Adjustments" normalizes to "stand alone adjustments", which
+    # CONTAINS the substring "d a" but not the token run ["d", "a"]; it must not be
+    # misclassified as D&A (it is not a headline metric, so it is dropped entirely).
+    claims = [
+        _claim(
+            attribute="operating_metric",
+            attribute_raw="Stand Alone Adjustments",
+            normalized=5_000_000,
+            period_year=2005,
+        ),
+    ]
+
+    materials = build_screening_materials(claims, dashboard_structure=None, filenames={})
+
+    assert materials.extracted_fields == []

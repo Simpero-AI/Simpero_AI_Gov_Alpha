@@ -104,6 +104,11 @@ class _HeadlineLabel:
     display: str
     include: tuple[str, ...]
     exclude: tuple[str, ...] = ()
+    # Short abbreviations (e.g. "sg a" for SG&A, "d a" for D&A) matched as a
+    # contiguous run of WHOLE tokens, never as a substring: "d a" is a substring
+    # of "stand alone" but not a token run, so substring matching would
+    # misclassify unrelated line items. See _tokens_contain.
+    include_abbr: tuple[str, ...] = ()
 
 
 # normalize_name collapses "&" and other non-word runs to a single space (it
@@ -142,12 +147,14 @@ _HEADLINE_LABELS: tuple[_HeadlineLabel, ...] = (
         "SG&A",
         ("selling general and administrative", "selling general administrative"),
         ("per ",),
+        include_abbr=("sg a",),
     ),
     _HeadlineLabel(
         "headline_dna",
         "D&A",
         ("depreciation and amortization", "depreciation amortization"),
         ("per ",),
+        include_abbr=("d a",),
     ),
 )
 
@@ -292,21 +299,25 @@ def _subject_map(
                 if entity and entity.casefold() not in entity_subject:
                     entity_subject[entity.casefold()] = name
     else:
-        freq = Counter(c.entity for c in claims if c.entity)
-        for entity, _count in sorted(
+        # Count by the CASEFOLDED entity so two spellings of one company
+        # ("American Casino" / "american casino") accumulate toward the f>=2
+        # threshold TOGETHER. Counting the raw string gives each spelling its own
+        # sub-threshold tally (1 and 1), so a company mentioned once per spelling
+        # never becomes a subject and its facts fall to "Other" -- the opposite
+        # of what folding is for.
+        freq = Counter(c.entity.casefold() for c in claims if c.entity)
+        # First-seen original spelling per folded key, for a readable subject name.
+        display: dict[str, str] = {}
+        for claim in claims:
+            if claim.entity:
+                display.setdefault(claim.entity.casefold(), claim.entity)
+        for folded, _count in sorted(
             ((e, f) for e, f in freq.items() if f >= 2),
             key=lambda item: (-item[1], item[0]),
         ):
-            # Guard the casefolded key exactly as the structure branch does: two
-            # spellings that differ only in case ("American Casino" / "american
-            # casino") must fold to ONE subject. Without the guard the last
-            # spelling would win the map while `order[0]` kept the first, so
-            # _subject_of would never equal lead_subject and the panel would come
-            # up empty -- the opposite of what the casefold change is for.
-            if entity.casefold() in entity_subject:
-                continue
-            entity_subject[entity.casefold()] = entity
-            order.append(entity)
+            name = display.get(folded, folded)
+            entity_subject[folded] = name
+            order.append(name)
     order.append("Other")
     return entity_subject, order
 
@@ -339,6 +350,22 @@ def _value_type(claim: Claim) -> str | None:
     return claim.value.get("value_type") if isinstance(claim.value, dict) else None
 
 
+def _tokens_contain(raw: str, phrase: str) -> bool:
+    """True when `phrase`'s whitespace tokens appear as a contiguous run in
+    `raw`'s tokens. Used for short abbreviations ("sg a", "d a") where a plain
+    substring test would false-positive -- "d a" is a substring of "stand alone"
+    but not a run of its tokens."""
+    raw_tokens = raw.split()
+    phrase_tokens = phrase.split()
+    if not phrase_tokens or len(phrase_tokens) > len(raw_tokens):
+        return False
+    span = len(phrase_tokens)
+    return any(
+        raw_tokens[i : i + span] == phrase_tokens
+        for i in range(len(raw_tokens) - span + 1)
+    )
+
+
 def _headline_key(claim: Claim) -> tuple[str, str] | None:
     """The metric a claim contributes to the screening snapshot, as
     (grouping key, display label) -- or None when the claim is not a headline
@@ -367,6 +394,8 @@ def _headline_key(claim: Claim) -> tuple[str, str] | None:
         if any(bad in raw for bad in label.exclude):
             continue
         if any(inc in raw for inc in label.include):
+            return label.key, label.display
+        if any(_tokens_contain(raw, abbr) for abbr in label.include_abbr):
             return label.key, label.display
     return None
 
@@ -501,12 +530,15 @@ def _rank_key(claim: Claim) -> tuple[int, int, int, float]:
     # is never passed over for a later-year estimate even when the actuals carry
     # no explicit "A" kind. The magnitude is the final tiebreak: when a metric's
     # figures carry no year (period_year None -> -1 for all), preferring the
-    # larger value is a stable, deterministic choice instead of insertion order.
+    # larger magnitude is a stable, deterministic choice instead of insertion
+    # order. It is the ABSOLUTE value: for a loss (a negative figure) the bigger
+    # number is the more negative one, so a signed comparison would wrongly prefer
+    # the smaller loss.
     is_historical = 0 if claim.period_kind in ("E", "P") else 1
     year = claim.period_year if claim.period_year is not None else -1
     normalized = claim.value.get("normalized") if isinstance(claim.value, dict) else None
     magnitude = (
-        normalized
+        abs(normalized)
         if isinstance(normalized, (int, float)) and not isinstance(normalized, bool)
         else float("-inf")
     )
