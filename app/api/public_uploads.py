@@ -2,6 +2,7 @@ import logging
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -135,7 +136,7 @@ async def complete_upload(
     request: Request,
     session_and_link: tuple[AsyncSession, DealIntakeLink] = Depends(get_public_session_db),
     claims: IntakeSessionClaims = Depends(_decode_claims),
-) -> CompleteResponse:
+) -> CompleteResponse | JSONResponse:
     db, link = session_and_link
     org_name = await _org_name_for_link(db, link)
 
@@ -172,9 +173,32 @@ async def complete_upload(
             MAX_UPLOAD_BYTES,
             stored_size,
         )
-        raise HTTPException(
+        # Reaching this branch means either a client bypassed presign_put's
+        # signature or Spaces isn't honouring it -- an abuse signal at least
+        # as notable as intake_email_attempt_failed, so it gets its own audit
+        # row (P3-13 will review this surface). Returning a Response directly
+        # here (never raising) for the same reason create_intake_session does
+        # (see that function's own comment): raising would propagate into
+        # get_public_session_db's generator at its `yield`, and
+        # session.begin()'s exception-exit path would roll back this audit
+        # write along with everything else in the transaction.
+        await HumanAuditRepo(db).append(
+            {
+                "org_id": link.org_id,
+                "actor_id": None,
+                "actor_email": claims.email,
+                "event_type": "intake_document_rejected",
+                "deal_id": link.deal_id,
+                "payload": {"storage_key": storage_key, "actual_size": stored_size},
+                "ip_address": ip_address,
+                "user_agent": user_agent,
+            }
+        )
+        return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=f"Uploaded file exceeds the {MAX_UPLOAD_BYTES} byte (10 MB) upload limit",
+            content={
+                "detail": f"Uploaded file exceeds the {MAX_UPLOAD_BYTES} byte (10 MB) upload limit"
+            },
         )
 
     # The real ceiling enforcement (advisory-locked) -- /presigned-url's own

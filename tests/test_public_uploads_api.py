@@ -112,11 +112,12 @@ def _cleanup_seeded_documents(owner_conn, pending_link_with_token):
     unlike data_source there's no FK forcing this, but human_audit_log rows
     are otherwise never cleaned up (append-only, no test-side DELETE path
     elsewhere either) and org_a_id/test_org_id is shared across the whole
-    suite, so leftover intake_document_uploaded rows from a prior run
-    silently break tests/test_human_audit_log_immutability.py's exact-count
-    assertion on a later run against the same DB. Scoped by deal_id, which is
-    unique per pending_link_with_token call (org_a_deal_id fixture creates a
-    fresh deal every time), so this can't touch another test's rows.
+    suite, so leftover intake_document_uploaded/intake_document_rejected rows
+    from a prior run silently break tests/test_human_audit_log_immutability.py's
+    exact-count assertion on a later run against the same DB. Scoped by
+    deal_id, which is unique per pending_link_with_token call (org_a_deal_id
+    fixture creates a fresh deal every time), so this can't touch another
+    test's rows.
     """
     yield
     with owner_conn.cursor() as cur:
@@ -125,8 +126,11 @@ def _cleanup_seeded_documents(owner_conn, pending_link_with_token):
             (pending_link_with_token["id"],),
         )
         cur.execute(
-            "DELETE FROM human_audit_log WHERE deal_id = %s AND event_type = %s",
-            (pending_link_with_token["deal_id"], "intake_document_uploaded"),
+            "DELETE FROM human_audit_log WHERE deal_id = %s AND event_type IN %s",
+            (
+                pending_link_with_token["deal_id"],
+                ("intake_document_uploaded", "intake_document_rejected"),
+            ),
         )
 
 
@@ -339,8 +343,8 @@ async def test_complete_without_prior_put_returns_4xx_no_row_no_audit(
     assert not mocked_spaces["enqueue_calls"]
 
 
-async def test_complete_rejects_oversized_stored_object_no_row_no_enqueue(
-    pending_link_with_token, owner_conn, mocked_spaces
+async def test_complete_rejects_oversized_stored_object_no_row_no_enqueue_writes_audit(
+    pending_link_with_token, owner_conn, org_a_id, mocked_spaces, _cleanup_seeded_documents
 ):
     """P3-15/F9 Fix 1: /complete checks the ACTUAL stored size (what
     head_object_size reports), not just the client's declared size at
@@ -348,6 +352,14 @@ async def test_complete_rejects_oversized_stored_object_no_row_no_enqueue(
     not S3) actually honoured presign_put's signed content_length. Even if a
     client uploaded more than it declared and Spaces let it through, this
     stops a data_source row and ingest job from being created for it.
+
+    F9 fix-prompt round 2 (Fix 4/5): reaching this branch means either a
+    client bypassed presign_put's signature or Spaces isn't honouring it --
+    an abuse signal, so it also gets an audit row (mirrors
+    intake_email_attempt_failed's precedent in public_intake.py), written via
+    a returned JSONResponse rather than a raised HTTPException so it survives
+    get_public_session_db's rollback-on-raise (see public_uploads.py's
+    comment at the call site).
     """
     mocked_spaces["set_object_size"](public_uploads.MAX_UPLOAD_BYTES + 1)
     link = pending_link_with_token
@@ -355,7 +367,7 @@ async def test_complete_rejects_oversized_stored_object_no_row_no_enqueue(
 
     resp = await _post(
         f"/{upload_id}/complete",
-        _session_token(link),
+        _session_token(link, email="recipient@org-a.example"),
         {"filename": _ALLOWED_FILENAME, "declaredSha256": _DECLARED_HASH},
     )
 
@@ -364,6 +376,21 @@ async def test_complete_rejects_oversized_stored_object_no_row_no_enqueue(
         cur.execute("SELECT count(*) FROM data_source WHERE id = %s", (upload_id,))
         assert cur.fetchone()[0] == 0
     assert not mocked_spaces["enqueue_calls"]
+
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "SELECT deal_id, org_id, actor_email, payload FROM human_audit_log "
+            "WHERE event_type = 'intake_document_rejected' AND deal_id = %s",
+            (link["deal_id"],),
+        )
+        rows = cur.fetchall()
+    assert len(rows) == 1
+    deal_id, org_id, actor_email, payload = rows[0]
+    assert str(deal_id) == link["deal_id"]
+    assert org_id == org_a_id
+    assert actor_email == "recipient@org-a.example"
+    assert payload["actual_size"] == public_uploads.MAX_UPLOAD_BYTES + 1
+    assert "storage_key" in payload
 
 
 async def test_complete_at_ceiling_returns_409_no_enqueue_no_audit(
