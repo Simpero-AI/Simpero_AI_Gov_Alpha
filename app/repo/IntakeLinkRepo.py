@@ -1,4 +1,5 @@
 import uuid
+from collections.abc import Sequence
 
 from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -168,3 +169,61 @@ class IntakeLinkRepo(BaseRepo[DealIntakeLink, dict]):
         move off a terminal status regardless."""
         link.status = "revoked"
         return link
+
+    async def latest_for_deals(
+        self, deal_ids: Sequence[uuid.UUID]
+    ) -> dict[uuid.UUID, DealIntakeLink]:
+        """Every listed deal's most recent link row, in ONE query, keyed by
+        deal_id -- deals with no link at all are simply absent from the dict.
+
+        Batched deliberately rather than looped: the Live Pipeline grid
+        (P3-06) is the dashboard's main table and already runs two queries
+        per row (see list_pipeline's own note). Adding a third per row, for
+        a feature most deals will never use, is a real regression on the
+        common path; DISTINCT ON keeps it at one query for the whole grid.
+
+        Unfiltered by status, same reasoning as latest_for_deal: a reissue
+        leaves older terminal rows behind and the caller needs the newest row
+        whatever state it is in. Ordered by `id` as well as `created_at`
+        because `created_at`'s now() default is transaction time, so rows
+        written in one transaction would share a timestamp exactly -- but
+        that tie-break is *deterministic*, not recency-ordered: `id` is
+        `gen_random_uuid()`, so a genuine tie resolves arbitrarily-but-stably
+        and the newer row can lose. No tie is reachable today (P3-01's
+        reissue lazy-expires the old row with an UPDATE, which keeps its
+        original transaction's `created_at`). If a same-transaction insert of
+        two link rows ever becomes possible the failure here is worse than
+        P3-02's: the deal collapses to `intakeStatus: "none"` and the grid
+        routes it as though it never had a link, so the org user is never
+        offered the waiting panel at all -- a silent wrong branch rather than
+        a visibly wrong status string. The escape hatch is to order on
+        something monotonic (`expires_at DESC`, or a dedicated sequence),
+        not on `id`.
+
+        Ceiling worth knowing: `deal_ids` is spread into an `IN (...)` list,
+        one bind parameter per deal, and `DealRepo.list()` applies no limit.
+        Postgres caps a single statement at 65535 bind parameters, so a large
+        enough org hits a hard wall here rather than merely getting slower --
+        the per-row loop this replaced would not. Fine at Alpha volume, and
+        still strictly better than the loop. If list_pipeline ever paginates
+        or deal counts grow, the fix is a correlated
+        `deal_id IN (SELECT id FROM deals)` -- which RLS scopes for free --
+        or chunking the input.
+
+        Read-only -- never writes `status = 'expired'` for a row past its
+        expires_at. The caller passes each row through
+        compute_pipeline_intake_status; only P3-01 persists that.
+        """
+        if not deal_ids:
+            return {}
+        result = await self.session.execute(
+            select(DealIntakeLink)
+            .where(DealIntakeLink.deal_id.in_(deal_ids))
+            .distinct(DealIntakeLink.deal_id)
+            .order_by(
+                DealIntakeLink.deal_id,
+                DealIntakeLink.created_at.desc(),
+                DealIntakeLink.id.desc(),
+            )
+        )
+        return {link.deal_id: link for link in result.scalars().all()}

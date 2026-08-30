@@ -43,6 +43,7 @@ from app.schemas.deals import (
     DealWithLatestMemoResponse,
     EntityResolutionResponse,
     FormerNameResponse,
+    IntakePipelineStatus,
     LatestMemoSessionResponse,
     LivePipelineRowResponse,
     PipelineStepResponse,
@@ -68,7 +69,10 @@ from app.schemas.intake_response import (
 from app.services.dashboard_stats import compute_month_bounds, compute_pipeline_value_delta
 from app.services.entity_resolution import get_resolver
 from app.services.entity_resolution.types import EntityResolutionError
-from app.services.intake_links import compute_intake_link_effective_status
+from app.services.intake_links import (
+    compute_intake_link_effective_status,
+    compute_pipeline_intake_status,
+)
 from app.services.memo_summary import derive_pipeline_metrics
 from app.services.pipeline_steps import no_job_steps
 from app.services.screening.rule_view import enrich_rule_results
@@ -238,6 +242,11 @@ async def list_pipeline(db: AsyncSession = Depends(get_db)) -> list[LivePipeline
     session_repo = SessionRepo(db)
     deals = await deal_repo.list()
 
+    # One query for the whole grid, not one per row -- see
+    # IntakeLinkRepo.latest_for_deals on why this one is batched while the
+    # two below are not.
+    latest_links = await IntakeLinkRepo(db).latest_for_deals([deal.id for deal in deals])
+
     rows: list[LivePipelineRowResponse] = []
     for deal in deals:
         # ponytail: one query per deal for its latest session, and one more
@@ -255,6 +264,10 @@ async def list_pipeline(db: AsyncSession = Depends(get_db)) -> list[LivePipeline
                 state=deal.status,
                 created_at=deal.created_at,
                 agent_status=await _compute_deal_status(db, deal.id),
+                intake_status=cast(
+                    IntakePipelineStatus,
+                    compute_pipeline_intake_status(latest_links.get(deal.id)),
+                ),
                 **metrics,
             )
         )
