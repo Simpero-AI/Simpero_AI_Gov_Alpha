@@ -51,7 +51,12 @@ from app.schemas.deals import (
     UpdateDealRequest,
     ValueDelta,
 )
-from app.schemas.intake_link import CreateIntakeLinkRequest, CreateIntakeLinkResponse
+from app.schemas.intake_link import (
+    CreateIntakeLinkRequest,
+    CreateIntakeLinkResponse,
+    IntakeLinkStatus,
+    IntakeLinkStatusResponse,
+)
 from app.services.dashboard_stats import compute_month_bounds, compute_pipeline_value_delta
 from app.services.entity_resolution import get_resolver
 from app.services.entity_resolution.types import EntityResolutionError
@@ -960,4 +965,46 @@ async def create_intake_link(
         token=raw_token,
         status=compute_intake_link_effective_status(link),
         expires_at=link.expires_at,
+    )
+
+
+@router.get("/{deal_id}/intake-link", response_model=IntakeLinkStatusResponse)
+async def get_intake_link(
+    deal_id: uuid.UUID, db: AsyncSession = Depends(get_db)
+) -> IntakeLinkStatusResponse:
+    """P3-02. Status read for the wizard's Step 2 waiting panel (P5-04).
+    Reports the deal's most recent link row via the shared effective-status
+    helper, so a row still stored `pending` past its `expires_at` reads
+    `expired` here even though P3-01's lazy-expire UPDATE has not run yet --
+    this route never performs that write itself. Never returns the token or
+    its hash; see IntakeLinkStatusResponse's field list.
+
+    Deliberately writes NO audit row, decided rather than inherited. The
+    response does carry the external recipient's email, but that address was
+    supplied by this same org when it generated the link (P3-01, which does
+    audit the write) -- reading it back is not a disclosure of anything the
+    caller's org did not already provide. `get_deal`'s `document_access` row
+    exists because that route hands back document content; the read-only
+    neighbours that do not (`get_deal_screening`,
+    `get_deal_screening_materials`, `list_deal_documents`) write nothing, and
+    this follows them. P3-13's audit review covers the unauthenticated public
+    surface, where the actor is not otherwise identified; an org-authenticated
+    status poll behind Clerk is not that surface, and auditing every Step 2
+    waiting-panel poll would bury the intake trail's real entries in noise."""
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    link = await IntakeLinkRepo(db).latest_for_deal(deal_id)
+    if link is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No intake link exists for this deal",
+        )
+
+    return IntakeLinkStatusResponse(
+        status=cast(IntakeLinkStatus, compute_intake_link_effective_status(link)),
+        recipient_email=link.recipient_email,
+        expires_at=link.expires_at,
+        submitted_at=link.submitted_at,
     )
