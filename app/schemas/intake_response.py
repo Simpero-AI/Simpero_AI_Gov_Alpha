@@ -36,6 +36,22 @@ class IntakeResponseResponse(CamelModel):
     Nothing here identifies the link's token: `link_id` is deliberately left
     out too, since the org-side reader has no use for it and P3-02 is the
     endpoint for anything about the link itself.
+
+    `submitted_at` stays `datetime | None`, matching its nullable column, and
+    the Web contract widens to meet it rather than the reverse. Review raised
+    that Simpero_AI_Gov_Web's `IntakeResponse` types `submittedAt: string`
+    (non-nullable) while this admits None. NULL is unreachable through today's
+    writer -- P3-11's submit_intake always sets `func.now()`, and this route
+    404s until a submit has happened -- so either side could be made to agree.
+    Tightening this one to non-optional was rejected because it would
+    manufacture exactly the failure this endpoint just removed one level in:
+    `deal_intake_response` is insert-only at the grant layer, so a row that
+    somehow landed with a NULL `submitted_at` could never be repaired, and a
+    non-optional field would 500 that deal's Step 3 panel permanently. The
+    precedent for the other direction is already in the same Web file --
+    `IntakeLink.submittedAt` is `string | null` there, and `createdAt` is
+    optional-and-nullable rendered as an em dash -- so `IntakeResponse` is the
+    outlier, not this. Tracked as a Web-side follow-up on P5-05.
     """
 
     id: str

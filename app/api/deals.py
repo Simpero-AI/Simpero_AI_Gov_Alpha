@@ -1,10 +1,12 @@
 import json
+import logging
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -67,7 +69,36 @@ from app.services.screening.rulebook import load_rulebook
 from app.services.screening_insights import derive_screening_insights
 from app.services.screening_materials import build_screening_materials
 
+logger = logging.getLogger(__name__)
+
 _INTAKE_LINK_TTL_DAYS = 7
+
+
+def _parse_answer(entry: Any, response_id: uuid.UUID) -> IntakeResponseAnswerResponse | None:
+    """One entry of `deal_intake_response.answers -> answers[]`, or None if it
+    does not validate.
+
+    Skipping a malformed entry rather than letting ValidationError escape as a
+    500 is about this table's immutability posture, not about the shape being
+    likely to be wrong. `deal_intake_response` carries a blanket
+    `REVOKE UPDATE, DELETE ... FROM dd_app`, so a row that ever lands malformed
+    can never be repaired through the application -- a single bad entry would
+    500 that deal's Step 3 answers panel permanently, with no operational
+    recovery short of a direct owner-role write. Today's writer (P3-11's
+    submit_intake) cannot produce one, so this is defence against a future
+    writer or a manual fix-up, and it logs the response id loudly so a bad row
+    is noticed rather than silently short-rendered -- same idiom as
+    _org_name_for_link in public_intake.py.
+    """
+    try:
+        return IntakeResponseAnswerResponse.model_validate(entry)
+    except ValidationError:
+        logger.error(
+            "intake response %s carries a malformed answers entry; skipping it",
+            response_id,
+        )
+        return None
+
 
 router = APIRouter(prefix="/deals", tags=["deals"])
 
@@ -977,13 +1008,18 @@ async def get_intake_response(
         )
 
     stored = response.answers or {}
+    # `or []` rather than a `.get` default: the default only fires on a MISSING
+    # key, so a blob storing `"answers": null` would return None and make this
+    # `for entry in None` -- a 500 on a row that can never be repaired (see
+    # _parse_answer). Same reasoning as `response.answers or {}` one level out.
     return IntakeResponseResponse(
         id=str(response.id),
         deal_id=str(response.deal_id),
         respondent_email=response.respondent_email,
         submitted_at=response.submitted_at,
         answers=[
-            IntakeResponseAnswerResponse.model_validate(entry)
-            for entry in stored.get("answers", [])
+            parsed
+            for entry in (stored.get("answers") or [])
+            if (parsed := _parse_answer(entry, response.id)) is not None
         ],
     )

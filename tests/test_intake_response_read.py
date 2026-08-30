@@ -314,6 +314,67 @@ def test_null_answers_blob_yields_an_empty_list_not_a_500(
     assert response.json()["answers"] == []
 
 
+def test_json_null_answers_key_yields_an_empty_list_not_a_500(
+    client, owner_conn, seeded_org, seeded_deal
+):
+    """Distinct from the null-blob case above: here the blob EXISTS and its
+    `answers` key is present but JSON `null`. A `.get("answers", [])` default
+    only fires on a missing key, so this is the shape that would hand the
+    comprehension a None to iterate. `deal_intake_response` is insert-only at
+    the grant layer, so such a row could never be repaired -- it would 500
+    this deal's Step 3 panel permanently."""
+    link_id = _seed_link(
+        owner_conn, seeded_org["org_pk"], seeded_org["clerk_org_id"], seeded_deal, "null-key"
+    )
+    _seed_response(
+        owner_conn,
+        seeded_org["org_pk"],
+        seeded_deal,
+        link_id,
+        answers={"schema_version": 1, "answers": None},
+    )
+    _authed(seeded_org["clerk_org_id"], "user-response-8")
+
+    response = client.get(f"/deals/{seeded_deal}/intake-response")
+
+    assert response.status_code == 200
+    assert response.json()["answers"] == []
+
+
+def test_a_malformed_entry_is_skipped_rather_than_500ing_the_whole_response(
+    client, owner_conn, seeded_org, seeded_deal
+):
+    """A single entry missing a required key must not take the whole panel
+    down with it. The well-formed entries alongside it still render, so the
+    org user sees what was actually recorded instead of an error page on a
+    row nothing can repair."""
+    link_id = _seed_link(
+        owner_conn, seeded_org["org_pk"], seeded_org["clerk_org_id"], seeded_deal, "malformed"
+    )
+    stored = {
+        "schema_version": 1,
+        "answers": [
+            {
+                "question_key": "use_of_proceeds",
+                "prompt": "What are the proceeds being used for?",
+                "answer": "Runway.",
+                "answered": True,
+            },
+            # `answer` present but null, and no `answered` -- the two ways a
+            # hand-written or future-writer entry realistically goes wrong.
+            {"question_key": "headcount", "prompt": "How many staff?", "answer": None},
+        ],
+    }
+    _seed_response(owner_conn, seeded_org["org_pk"], seeded_deal, link_id, answers=stored)
+    _authed(seeded_org["clerk_org_id"], "user-response-9")
+
+    response = client.get(f"/deals/{seeded_deal}/intake-response")
+
+    assert response.status_code == 200
+    answers = response.json()["answers"]
+    assert [a["questionKey"] for a in answers] == ["use_of_proceeds"]
+
+
 def test_404_when_nothing_has_been_submitted_yet(client, owner_conn, seeded_org, seeded_deal):
     """A link existing -- even a live pending one -- is not a response."""
     _seed_link(

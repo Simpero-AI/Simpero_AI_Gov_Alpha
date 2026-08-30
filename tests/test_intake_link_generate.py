@@ -9,6 +9,7 @@ itself is already exercised in depth by tests/test_intake_link_rls.py).
 """
 
 import hashlib
+import logging
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -235,7 +236,7 @@ def test_questions_snapshot_shape_is_the_wrapper_object(
 
 
 def test_token_field_never_reappears_after_the_create_response(
-    client, owner_conn, seeded_org, seeded_deal
+    client, owner_conn, seeded_org, seeded_deal, caplog
 ):
     """No GET/list endpoint for intake links exists in this ticket's scope
     (grep of app/api confirms only the POST route references
@@ -244,9 +245,10 @@ def test_token_field_never_reappears_after_the_create_response(
     never the raw value."""
     _authed(seeded_org["clerk_org_id"], "user-1")
 
-    resp = client.post(
-        f"/deals/{seeded_deal}/intake-link", json={"recipientEmail": "gp@example.com"}
-    )
+    with caplog.at_level(logging.DEBUG):
+        resp = client.post(
+            f"/deals/{seeded_deal}/intake-link", json={"recipientEmail": "gp@example.com"}
+        )
     body = resp.json()
     raw_token = body["token"]
 
@@ -257,14 +259,26 @@ def test_token_field_never_reappears_after_the_create_response(
     assert stored_hash != raw_token
     assert stored_hash == _token_hash(raw_token)
 
-    # deals.py has no logger/logging calls at all -- nothing there can log the
-    # raw token, so there's no log-capture test to write for it.
+    # deals.py DOES log now (P3-05's _parse_answer reports a malformed stored
+    # answers entry by response id), so the original blanket
+    # "no logging at all" proxy for "cannot leak the token" no longer holds
+    # and would fail for a reason unrelated to token safety. Replaced with the
+    # two checks that actually pin the property.
     import inspect
+    import re
 
     from app.api import deals as deals_module
 
+    # 1. The real one the old comment said could not be written: nothing
+    #    emitted while minting a link contains the raw token.
+    assert raw_token not in caplog.text
+
+    # 2. Static backstop for call sites this request never reaches: no
+    #    logger.* call in deals.py interpolates anything token-derived.
     source = inspect.getsource(deals_module)
-    assert "logger" not in source and "logging" not in source
+    log_calls = re.findall(r"logger\.\w+\([^)]*\)", source, re.DOTALL)
+    assert log_calls, "expected at least one logger call; update this test if logging was removed"
+    assert not [c for c in log_calls if "token" in c.lower()]
 
 
 # --- (b) second call while a live pending link exists -----------------------
