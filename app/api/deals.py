@@ -967,7 +967,25 @@ async def revoke_intake_link(
     it is functionally dead already, and flipping it to `revoked` would both
     write a misleading audit row and take the lazy-expire path away from
     P3-01, which the plan pins as the only place `status = 'expired'` is ever
-    written."""
+    written. Confirmed in review rather than left open: "dead because nobody
+    acted" and "dead because a human pulled it" are different facts, and the
+    audit trail is the artifact whose whole value is telling them apart. The
+    409 needs a frontend counterpart -- `revokeIntakeLink` in
+    Simpero_AI_Gov_Web/src/api/intakeLink.ts throws a bare `Error` on any
+    non-ok response, so this reaches an org user clicking Revoke on a stale
+    link as a raw JSON detail string. The pattern to copy already exists in
+    that repo (`startDealAnalysis`'s typed `AnalysisApiError` carrying
+    `status`, precisely so callers can branch on documented 409s). Tracked as
+    a Web-side follow-up on P5-04, not a blocker here.
+
+    Documents already uploaded under the link are deliberately left in place:
+    revoking kills the token, not the evidence. Nothing here touches
+    `data_source`, and `list_deal_documents` does not filter on
+    `intake_link_id`, so a file the external party already sent stays visible
+    to the org exactly as before. Recorded as a decision rather than left to
+    be discovered: the recipient's ability to send more is what is being
+    withdrawn, and retracting what they already sent would destroy diligence
+    material the org may have already relied on."""
     deal = await DealRepo(db).get_by_id(deal_id)
     if deal is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
