@@ -23,10 +23,12 @@ permanent empties.
 
 Every fact is scoped to the deal's LEAD business subject (a competitor's or
 segment's figure never surfaces as the target's), picked latest-actual-first,
-and value-guarded, mirroring screening_materials' rules. Only the pure display
-helpers (_fmt_value/_citation/_STATUS_RANK) are shared with screening_materials
--- the subject fold is kept local so this module does not depend on that one's
-evolving internals.
+and value-guarded, mirroring screening_materials' rules. The helpers borrowed
+from screening_materials -- _fmt_value/_citation formatting, _STATUS_RANK, and
+the _TRUSTED status filter (the trust invariant, not just display) -- are
+underscore-prefixed internals; promoting them to a shared public module is a
+tracked follow-up. The subject fold is kept local so this module does not depend
+on that one's evolving internals.
 """
 
 import re

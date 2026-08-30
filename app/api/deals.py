@@ -461,16 +461,10 @@ async def get_deal_company(
     )
 
     def _facts(facts: list) -> list[CompanyFactResponse]:
-        return [
-            CompanyFactResponse(
-                label=f.label,
-                value=f.value,
-                citation=f.citation,
-                status=f.status,
-                entity=f.entity,
-            )
-            for f in facts
-        ]
+        # CamelModel sets from_attributes=True and the field names match, so
+        # model_validate copies CompanyFact -> CompanyFactResponse without a
+        # hand-maintained field list that could silently drop a new field.
+        return [CompanyFactResponse.model_validate(f) for f in facts]
 
     return CompanyViewResponse(
         facts=_facts(view.facts),
