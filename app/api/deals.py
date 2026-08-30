@@ -47,13 +47,19 @@ from app.schemas.deals import (
     PipelineStepResponse,
     PipelineValueStat,
     ScreeningCitedFieldResponse,
+    ScreeningInsightsResponse,
     ScreeningMaterialsResponse,
     ScreeningResultResponse,
     StartAnalysisRequest,
     UpdateDealRequest,
     ValueDelta,
 )
-from app.schemas.intake_link import CreateIntakeLinkRequest, CreateIntakeLinkResponse
+from app.schemas.intake_link import (
+    CreateIntakeLinkRequest,
+    CreateIntakeLinkResponse,
+    IntakeLinkStatus,
+    IntakeLinkStatusResponse,
+)
 from app.schemas.intake_response import (
     IntakeResponseAnswerResponse,
     IntakeResponseResponse,
@@ -404,15 +410,16 @@ async def get_deal_screening(
 async def get_deal_screening_materials(
     deal_id: uuid.UUID, db: AsyncSession = Depends(get_db)
 ) -> ScreeningMaterialsResponse:
-    """The Initial Screening tab's materials panels, derived from the deal's
-    claims spine (build_screening_materials): the key extracted facts with their
-    citations, plus highlights/risk-flags (the latter empty until the LLM pass
-    lands). RLS-scoped by get_db like every other deal route.
+    """The Initial Screening tab's "Extracted from Materials" panel, derived
+    deterministically from the deal's claims spine (build_screening_materials):
+    each canonical metric's latest actual figure, with its citation. RLS-scoped
+    by get_db.
 
-    Unlike GET /{deal_id}/screening, this does NOT require the deal to have been
-    screened -- extracted facts exist as soon as a deal is parsed, independent of
-    the rulebook pass. Returns empty lists (never 404) for a deal with no
-    displayable claims, so the panels render their own empty state.
+    Claims-only and LLM-free on purpose -- fast and reliable, and never blocked
+    by the insights model call (that lives on GET /{deal_id}/screening-insights).
+    Does NOT require the deal to have been screened; returns empty (never 404)
+    for a deal with no displayable claims, so the panel renders its own empty
+    state.
     """
     deal = await DealRepo(db).get_by_id(deal_id)
     if deal is None:
@@ -424,20 +431,37 @@ async def get_deal_screening_materials(
     materials = build_screening_materials(
         claims, dashboard_structure=deal.dashboard_structure, filenames=filenames
     )
-    # Extracted facts are deterministic; highlights/risk-flags are the LLM pass
-    # over the same claims. It fails soft (no key / error -> empty lists), so the
-    # extracted panel is never held back by it beyond one model round-trip.
-    highlights, risk_flags = await derive_screening_insights(
-        claims, company=deal.name, dashboard_structure=deal.dashboard_structure
-    )
     return ScreeningMaterialsResponse(
         extracted_fields=[
             ScreeningCitedFieldResponse(label=f.label, value=f.value, citation=f.citation)
             for f in materials.extracted_fields
         ],
-        highlights=highlights,
-        risk_flags=risk_flags,
     )
+
+
+@router.get("/{deal_id}/screening-insights", response_model=ScreeningInsightsResponse)
+async def get_deal_screening_insights(
+    deal_id: uuid.UUID, db: AsyncSession = Depends(get_db)
+) -> ScreeningInsightsResponse:
+    """The Initial Screening tab's Agent Highlights + Risk Flags -- the LLM pass
+    (derive_screening_insights) over the same trusted claims the extracted panel
+    shows.
+
+    A separate endpoint from screening-materials on purpose: this call can be
+    slow or fail, and isolating it means it can only ever affect these two
+    panels, never the extracted facts. Fails soft to empty lists (no key, no
+    claims, or any model/transport error/timeout); RLS-scoped by get_db; never
+    404s for a claim-less deal.
+    """
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    claims = list((await db.execute(select(Claim).where(Claim.deal_id == deal_id))).scalars().all())
+    highlights, risk_flags = await derive_screening_insights(
+        claims, company=deal.name, dashboard_structure=deal.dashboard_structure
+    )
+    return ScreeningInsightsResponse(highlights=highlights, risk_flags=risk_flags)
 
 
 async def _compute_deal_status(db: AsyncSession, deal_id: uuid.UUID) -> DealStatusResponse:
@@ -977,6 +1001,48 @@ async def create_intake_link(
         token=raw_token,
         status=compute_intake_link_effective_status(link),
         expires_at=link.expires_at,
+    )
+
+
+@router.get("/{deal_id}/intake-link", response_model=IntakeLinkStatusResponse)
+async def get_intake_link(
+    deal_id: uuid.UUID, db: AsyncSession = Depends(get_db)
+) -> IntakeLinkStatusResponse:
+    """P3-02. Status read for the wizard's Step 2 waiting panel (P5-04).
+    Reports the deal's most recent link row via the shared effective-status
+    helper, so a row still stored `pending` past its `expires_at` reads
+    `expired` here even though P3-01's lazy-expire UPDATE has not run yet --
+    this route never performs that write itself. Never returns the token or
+    its hash; see IntakeLinkStatusResponse's field list.
+
+    Deliberately writes NO audit row, decided rather than inherited. The
+    response does carry the external recipient's email, but that address was
+    supplied by this same org when it generated the link (P3-01, which does
+    audit the write) -- reading it back is not a disclosure of anything the
+    caller's org did not already provide. `get_deal`'s `document_access` row
+    exists because that route hands back document content; the read-only
+    neighbours that do not (`get_deal_screening`,
+    `get_deal_screening_materials`, `list_deal_documents`) write nothing, and
+    this follows them. P3-13's audit review covers the unauthenticated public
+    surface, where the actor is not otherwise identified; an org-authenticated
+    status poll behind Clerk is not that surface, and auditing every Step 2
+    waiting-panel poll would bury the intake trail's real entries in noise."""
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    link = await IntakeLinkRepo(db).latest_for_deal(deal_id)
+    if link is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No intake link exists for this deal",
+        )
+
+    return IntakeLinkStatusResponse(
+        status=cast(IntakeLinkStatus, compute_intake_link_effective_status(link)),
+        recipient_email=link.recipient_email,
+        expires_at=link.expires_at,
+        submitted_at=link.submitted_at,
     )
 
 
