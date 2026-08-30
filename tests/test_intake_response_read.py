@@ -146,7 +146,7 @@ def _seed_response(
     deal_id: str,
     link_id: str,
     *,
-    answers: dict | None,
+    answers: dict | list | str | None,
     respondent_email: str = "founder@example.com",
     submitted_at: datetime | None = None,
     created_at: datetime | None = None,
@@ -373,6 +373,32 @@ def test_a_malformed_entry_is_skipped_rather_than_500ing_the_whole_response(
     assert response.status_code == 200
     answers = response.json()["answers"]
     assert [a["questionKey"] for a in answers] == ["use_of_proceeds"]
+
+
+def test_a_non_object_stored_blob_yields_an_empty_list_not_a_500(
+    client, owner_conn, seeded_org, seeded_deal
+):
+    """`answers` is typed `dict | None` on the model, but the column is plain
+    JSONB with no `jsonb_typeof(answers) = 'object'` CHECK, so a blob stored
+    as a JSON array is reachable at the database level. `.get` on a list
+    raises AttributeError -- and `deal_intake_response` is insert-only at the
+    grant layer, so that would 500 this deal's Step 3 panel permanently."""
+    link_id = _seed_link(
+        owner_conn, seeded_org["org_pk"], seeded_org["clerk_org_id"], seeded_deal, "array-blob"
+    )
+    _seed_response(
+        owner_conn,
+        seeded_org["org_pk"],
+        seeded_deal,
+        link_id,
+        answers=[{"question_key": "k", "prompt": "p", "answer": "a", "answered": True}],
+    )
+    _authed(seeded_org["clerk_org_id"], "user-response-10")
+
+    response = client.get(f"/deals/{seeded_deal}/intake-response")
+
+    assert response.status_code == 200
+    assert response.json()["answers"] == []
 
 
 def test_404_when_nothing_has_been_submitted_yet(client, owner_conn, seeded_org, seeded_deal):

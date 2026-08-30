@@ -264,8 +264,8 @@ def test_token_field_never_reappears_after_the_create_response(
     # "no logging at all" proxy for "cannot leak the token" no longer holds
     # and would fail for a reason unrelated to token safety. Replaced with the
     # two checks that actually pin the property.
+    import ast
     import inspect
-    import re
 
     from app.api import deals as deals_module
 
@@ -275,8 +275,20 @@ def test_token_field_never_reappears_after_the_create_response(
 
     # 2. Static backstop for call sites this request never reaches: no
     #    logger.* call in deals.py interpolates anything token-derived.
-    source = inspect.getsource(deals_module)
-    log_calls = re.findall(r"logger\.\w+\([^)]*\)", source, re.DOTALL)
+    #    Parsed rather than regexed -- a `logger.x(...)` pattern bounded by
+    #    [^)]* stops at the first ")", so any call wrapping an argument in
+    #    str()/dict()/sanitize() is truncated there and everything after it,
+    #    including a trailing token argument, escapes the check entirely.
+    #    ast.walk sees the whole call however deeply it nests.
+    tree = ast.parse(inspect.getsource(deals_module))
+    log_calls = [
+        ast.unparse(node)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "logger"
+    ]
     assert log_calls, "expected at least one logger call; update this test if logging was removed"
     assert not [c for c in log_calls if "token" in c.lower()]
 

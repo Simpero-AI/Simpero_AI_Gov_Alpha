@@ -1007,11 +1007,21 @@ async def get_intake_response(
             detail="No intake response has been submitted for this deal",
         )
 
-    stored = response.answers or {}
+    # isinstance rather than `or {}`: `answers` is typed `dict | None` on the
+    # model, but the column is plain JSONB with no
+    # `jsonb_typeof(answers) = 'object'` CHECK behind it, so a blob stored as a
+    # JSON array or scalar is reachable at the database level. `or {}` would
+    # pass such a value straight through and the `.get` below would raise
+    # AttributeError -- the same permanent 500 on an unrepairable row that
+    # _parse_answer exists to prevent, one level further out.
+    raw = response.answers
+    stored = raw if isinstance(raw, dict) else {}
     # `or []` rather than a `.get` default: the default only fires on a MISSING
     # key, so a blob storing `"answers": null` would return None and make this
-    # `for entry in None` -- a 500 on a row that can never be repaired (see
-    # _parse_answer). Same reasoning as `response.answers or {}` one level out.
+    # `for entry in None` -- a 500, same reasoning as the isinstance guard
+    # above. A non-list value here is already safe: a dict or string iterates
+    # into entries that fail validation and are skipped, degrading to an empty
+    # list plus log lines rather than crashing.
     return IntakeResponseResponse(
         id=str(response.id),
         deal_id=str(response.deal_id),
