@@ -109,17 +109,10 @@ def head_object(key: str) -> bool:
     """Existence check used at /complete to confirm the presigned PUT
     actually happened before a data_source row is created. A missing object
     is an expected, non-exceptional outcome here -- only unexpected errors
-    (auth, permissions, etc.) propagate.
+    (auth, permissions, etc.) propagate. Delegates to head_object_size so
+    the 404/NoSuchKey/NotFound handling lives in exactly one place.
     """
-    settings = get_settings()
-    try:
-        _client().head_object(Bucket=settings.spaces_bucket, Key=key)
-        return True
-    except ClientError as exc:
-        error_code = exc.response.get("Error", {}).get("Code", "")
-        if error_code in ("404", "NoSuchKey", "NotFound"):
-            return False
-        raise
+    return head_object_size(key) is not None
 
 
 def head_object_size(key: str) -> int | None:

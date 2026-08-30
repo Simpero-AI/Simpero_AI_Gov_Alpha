@@ -105,7 +105,10 @@ def test_presign_put_with_content_length_adds_it_to_params(_isolated_client):
 
 def test_head_object_true_on_success(_isolated_client):
     mock_client = _isolated_client
-    mock_client.head_object.return_value = {}
+    # Real HeadObject responses always include ContentLength; this mock
+    # includes it so it stays realistic now that head_object delegates to
+    # head_object_size, which reads that key.
+    mock_client.head_object.return_value = {"ContentLength": 1024}
 
     assert spaces.head_object("some-key") is True
     mock_client.head_object.assert_called_once_with(Bucket=FAKE_BUCKET, Key="some-key")
