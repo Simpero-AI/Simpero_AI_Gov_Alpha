@@ -19,6 +19,17 @@ class Settings(BaseSettings):
     clerk_jwks_url: str
     valkey_url: str
     voyage_api_key: str = ""
+    # Anthropic credential for the on-demand screening-insights pass
+    # (app/services/screening_insights.py). "" => that pass is skipped and the
+    # Agent Highlights / Risk Flags panels stay empty (the endpoint still serves
+    # the deterministic extracted facts) -- fails soft, same posture as
+    # voyage_api_key. The rest of the LLM/parse work runs in the separate parser
+    # service, which carries its own key; this is the only Anthropic call this
+    # app makes itself.
+    anthropic_api_key: str = ""
+    # Small, fast model for the screening-insights summarisation. Proven
+    # available to this account (the parser uses it for attribute classification).
+    screening_insights_model: str = "claude-haiku-4-5-20251001"
     embedding_model: str = "voyage-4-large"
     # Must match the chunks.embedding column dim (Vector(1024)); changing it
     # needs a matching migration. voyage-4 serves 2048/1024/512/256.

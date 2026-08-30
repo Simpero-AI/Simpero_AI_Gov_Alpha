@@ -230,6 +230,7 @@ jobs:
             CLERK_SECRET_KEY=${{ secrets.CLERK_SECRET_KEY }}
             CLERK_JWKS_URL=${{ secrets.CLERK_JWKS_URL }}
             VALKEY_URL=${{ secrets.VALKEY_URL }}
+            ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
             ENVIRONMENT=${{ secrets.ENVIRONMENT }}
             CORS_ALLOWED_ORIGINS=${{ secrets.CORS_ALLOWED_ORIGINS }}
             SIMPERO_PLATFORM_ORG_ID=${{ secrets.SIMPERO_PLATFORM_ORG_ID }}

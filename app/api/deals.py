@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,6 +13,7 @@ from app.core.dependencies import get_claims, get_db
 from app.core.intake_security import sha256_hex
 from app.jobs.queue import get_queue
 from app.models.analysis_run import AnalysisRun
+from app.models.claim import Claim
 from app.models.deal import Deal
 from app.models.entity_resolution import EntityResolution
 from app.repo.AnalysisRunRepo import AnalysisRunRepo
@@ -41,6 +43,8 @@ from app.schemas.deals import (
     LivePipelineRowResponse,
     PipelineStepResponse,
     PipelineValueStat,
+    ScreeningCitedFieldResponse,
+    ScreeningMaterialsResponse,
     ScreeningResultResponse,
     StartAnalysisRequest,
     UpdateDealRequest,
@@ -60,6 +64,8 @@ from app.services.memo_summary import derive_pipeline_metrics
 from app.services.pipeline_steps import no_job_steps
 from app.services.screening.rule_view import enrich_rule_results
 from app.services.screening.rulebook import load_rulebook
+from app.services.screening_insights import derive_screening_insights
+from app.services.screening_materials import build_screening_materials
 
 _INTAKE_LINK_TTL_DAYS = 7
 
@@ -360,6 +366,46 @@ async def get_deal_screening(
         # them field by field.
         rule_results=enriched_rules,
         created_at=result.created_at,
+    )
+
+
+@router.get("/{deal_id}/screening-materials", response_model=ScreeningMaterialsResponse)
+async def get_deal_screening_materials(
+    deal_id: uuid.UUID, db: AsyncSession = Depends(get_db)
+) -> ScreeningMaterialsResponse:
+    """The Initial Screening tab's materials panels, derived from the deal's
+    claims spine (build_screening_materials): the key extracted facts with their
+    citations, plus highlights/risk-flags (the latter empty until the LLM pass
+    lands). RLS-scoped by get_db like every other deal route.
+
+    Unlike GET /{deal_id}/screening, this does NOT require the deal to have been
+    screened -- extracted facts exist as soon as a deal is parsed, independent of
+    the rulebook pass. Returns empty lists (never 404) for a deal with no
+    displayable claims, so the panels render their own empty state.
+    """
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    claims = list((await db.execute(select(Claim).where(Claim.deal_id == deal_id))).scalars().all())
+    filenames = {ds.id: ds.filename for ds in await DataSourceRepo(db).list_for_deal(deal_id)}
+
+    materials = build_screening_materials(
+        claims, dashboard_structure=deal.dashboard_structure, filenames=filenames
+    )
+    # Extracted facts are deterministic; highlights/risk-flags are the LLM pass
+    # over the same claims. It fails soft (no key / error -> empty lists), so the
+    # extracted panel is never held back by it beyond one model round-trip.
+    highlights, risk_flags = await derive_screening_insights(
+        claims, company=deal.name, dashboard_structure=deal.dashboard_structure
+    )
+    return ScreeningMaterialsResponse(
+        extracted_fields=[
+            ScreeningCitedFieldResponse(label=f.label, value=f.value, citation=f.citation)
+            for f in materials.extracted_fields
+        ],
+        highlights=highlights,
+        risk_flags=risk_flags,
     )
 
 
