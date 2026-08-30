@@ -141,7 +141,29 @@ class IntakeLinkRepo(BaseRepo[DealIntakeLink, dict]):
         leaves older terminal rows behind and the caller needs the newest row
         whatever state it is in. Ordered by `id` as well as `created_at`
         because `created_at`'s now() default is transaction time, so rows
-        written in one transaction share a timestamp exactly.
+        written in one transaction would share a timestamp exactly -- but
+        that tie-break is *deterministic*, not recency-ordered: `id` is
+        `gen_random_uuid()`, so a genuine tie resolves arbitrarily-but-stably
+        and the newer row can lose. No tie is reachable today (P3-01's
+        reissue lazy-expires the old row with an UPDATE, which keeps its
+        original transaction's `created_at`). If a same-transaction insert of
+        two link rows ever becomes possible the failure here is worse than
+        P3-02's: the deal collapses to `intakeStatus: "none"` and the grid
+        routes it as though it never had a link, so the org user is never
+        offered the waiting panel at all -- a silent wrong branch rather than
+        a visibly wrong status string. The escape hatch is to order on
+        something monotonic (`expires_at DESC`, or a dedicated sequence),
+        not on `id`.
+
+        Ceiling worth knowing: `deal_ids` is spread into an `IN (...)` list,
+        one bind parameter per deal, and `DealRepo.list()` applies no limit.
+        Postgres caps a single statement at 65535 bind parameters, so a large
+        enough org hits a hard wall here rather than merely getting slower --
+        the per-row loop this replaced would not. Fine at Alpha volume, and
+        still strictly better than the loop. If list_pipeline ever paginates
+        or deal counts grow, the fix is a correlated
+        `deal_id IN (SELECT id FROM deals)` -- which RLS scopes for free --
+        or chunking the input.
 
         Read-only -- never writes `status = 'expired'` for a row past its
         expires_at. The caller passes each row through

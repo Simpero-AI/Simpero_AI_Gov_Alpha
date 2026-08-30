@@ -98,6 +98,18 @@ class DashboardStatsResponse(CamelModel):
 # past its expires_at -- collapses to "none" and routes exactly like a deal
 # that never had a link. See compute_pipeline_intake_status.
 IntakePipelineStatus = Literal["none", "pending", "submitted"]
+# Cross-repo contract, enforced by nothing but this comment: the Web half is
+# `LivePipelineRow` in Simpero_AI_Gov_Web/src/shared/dealsListPipeline.ts,
+# whose member list must stay character-identical to this Literal. As of this
+# change that type stops at `agentStatus` and has no `intakeStatus` at all --
+# on `staging` and on the P4/P5 branch alike -- even though
+# Simpero_AI_Gov_Web/src/api/intakeLink.ts already documents the consumer
+# side ("Callers only enable this query once `intakeStatus === 'submitted'`").
+# Adding a field to a JSON response is non-breaking under TypeScript's
+# structural typing, so nothing in Web breaks when this lands; but P5-07's
+# conditional grid routing cannot be written until that shared type gains
+# `intakeStatus: "none" | "pending" | "submitted";`. Tracked as a Web-side
+# follow-up, not a blocker here.
 
 
 class LivePipelineRowResponse(CamelModel):
