@@ -41,6 +41,9 @@ _TIMEOUT = 10.0
 # company_tickers.json) or refiles a restated 10-K/A must become visible without a
 # process restart. Cache entries refresh after this TTL. Env-tunable.
 _CACHE_TTL_S = float(os.getenv("SEC_EDGAR_CACHE_TTL_S", "3600") or "3600")
+# Bound the per-CIK facts cache so a long-running worker screening many deals does
+# not grow it without limit; the oldest entry is evicted past this size. Env-tunable.
+_MAX_CACHED_FACTS = int(os.getenv("SEC_EDGAR_MAX_CACHED_FACTS", "512") or "512")
 _COMPANY_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 _COMPANY_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"
 
@@ -199,6 +202,12 @@ class SecEdgarSource:
                 data = await self._fetch(_COMPANY_TICKERS_URL)
             except Exception:
                 logger.exception("EDGAR company_tickers fetch failed; treating as no-signal")
+                # Cache the failure (empty map) with a timestamp, exactly as
+                # _company_facts caches a failed facts fetch: a transient outage of
+                # the tickers endpoint must not re-download the ~1MB file on every
+                # subsequent claim. The TTL still lets it recover without a restart.
+                self._tickers = {}
+                self._tickers_at = time.monotonic()
                 return None
             rows = data.values() if isinstance(data, dict) else (data or [])
             seen: dict[str, int | None] = {}
@@ -227,6 +236,11 @@ class SecEdgarSource:
             except Exception:
                 logger.exception("EDGAR companyfacts fetch failed for CIK %s; no-signal", cik)
                 facts = None
+            # Bound the cache: evict the oldest entry before adding a new CIK once
+            # at capacity, so a long-running worker cannot grow it without limit.
+            if cik not in self._facts and len(self._facts) >= _MAX_CACHED_FACTS:
+                oldest = min(self._facts, key=lambda c: self._facts[c][0])
+                del self._facts[oldest]
             self._facts[cik] = (time.monotonic(), facts)
         return self._facts[cik][1]
 

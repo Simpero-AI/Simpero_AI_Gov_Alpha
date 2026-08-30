@@ -356,3 +356,47 @@ async def test_cache_expires_after_the_ttl(monkeypatch):
         await src.check(None, _claim(period_year=year, normalized=1000.0))
 
     assert calls["companyfacts"] == 3
+
+
+async def test_a_failed_tickers_fetch_is_not_re_downloaded_per_claim():
+    # A transient outage of the ~1MB company_tickers endpoint is cached as a
+    # no-signal failure, not re-fetched for every claim (mirrors the facts cache).
+    calls = {"tickers": 0}
+
+    async def failing_tickers(url: str):
+        if "company_tickers" in url:
+            calls["tickers"] += 1
+            raise RuntimeError("boom")
+        raise AssertionError(f"unexpected url {url}")
+
+    src = SecEdgarSource(fetch=failing_tickers)
+    for year in (2021, 2022, 2023):
+        assert await src.check(None, _claim(period_year=year)) is None
+
+    assert calls["tickers"] == 1
+
+
+async def test_the_facts_cache_is_bounded_and_evicts_the_oldest(monkeypatch):
+    # Past the size bound the oldest CIK entry is evicted, so a long-running worker
+    # cannot grow the cache without limit.
+    import app.services.corroboration_sources.sec_edgar as edgar_mod
+
+    monkeypatch.setattr(edgar_mod, "_MAX_CACHED_FACTS", 1)
+    calls = {"companyfacts": 0}
+
+    async def counting_fetch(url: str):
+        if "company_tickers" in url:
+            return _TICKERS
+        if "companyfacts" in url:
+            calls["companyfacts"] += 1
+            return _facts("Revenues", 2023, 1000.0)
+        raise AssertionError(f"unexpected url {url}")
+
+    src = SecEdgarSource(fetch=counting_fetch)
+    await src.check(None, _claim(entity="Apple Inc.", period_year=2023))
+    await src.check(None, _claim(entity="Microsoft Corporation", period_year=2023))
+    assert len(src._facts) == 1  # Apple evicted when Microsoft was cached
+
+    # Apple was evicted, so it must be re-fetched -- proof the bound is enforced.
+    await src.check(None, _claim(entity="Apple Inc.", period_year=2023))
+    assert calls["companyfacts"] == 3
