@@ -32,6 +32,8 @@ from app.repo.UserRepo import UserRepo
 from app.schemas.common import SuccessResponse
 from app.schemas.deals import (
     AvgAiScoreStat,
+    CompanyFactResponse,
+    CompanyViewResponse,
     CreateDealRequest,
     CreateDealResponse,
     DashboardStatsResponse,
@@ -66,6 +68,7 @@ from app.schemas.intake_response import (
     IntakeResponseAnswerResponse,
     IntakeResponseResponse,
 )
+from app.services.company_view import build_company_view
 from app.services.dashboard_stats import compute_month_bounds, compute_pipeline_value_delta
 from app.services.entity_resolution import get_resolver
 from app.services.entity_resolution.types import EntityResolutionError
@@ -476,6 +479,56 @@ async def get_deal_screening_insights(
         claims, company=deal.name, dashboard_structure=deal.dashboard_structure
     )
     return ScreeningInsightsResponse(highlights=highlights, risk_flags=risk_flags)
+
+
+@router.get("/{deal_id}/company", response_model=CompanyViewResponse)
+async def get_deal_company(
+    deal_id: uuid.UUID, db: AsyncSession = Depends(get_db)
+) -> CompanyViewResponse:
+    """The Business Overview tab, derived from the deal's claims spine
+    (build_company_view): company-identity facts (sector/HQ from the deal profile,
+    headcount/founded recovered by label) plus qualitative assertions grouped by
+    kind -- overview (operating_model), risks, commercial terms, related parties,
+    plans -- each with its citation and trust status. Claims-only and LLM-free;
+    RLS-scoped by get_db; returns empty lists (never 404) for a deal with no
+    company claims, so each panel renders its own "information not available"."""
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    # Deterministic row order: build_company_view breaks an exact rank tie between
+    # identity claims by first-seen, so without a stable ORDER BY the displayed
+    # headcount/founded could differ across requests.
+    claims = list(
+        (await db.execute(select(Claim).where(Claim.deal_id == deal_id).order_by(Claim.id)))
+        .scalars()
+        .all()
+    )
+    filenames = {ds.id: ds.filename for ds in await DataSourceRepo(db).list_for_deal(deal_id)}
+
+    view = build_company_view(
+        claims,
+        filenames=filenames,
+        dashboard_structure=deal.dashboard_structure,
+        sector=deal.sector,
+        hq_geography=deal.hq_geography,
+        company=deal.name,
+    )
+
+    def _facts(facts: list) -> list[CompanyFactResponse]:
+        # CamelModel sets from_attributes=True and the field names match, so
+        # model_validate copies CompanyFact -> CompanyFactResponse without a
+        # hand-maintained field list that could silently drop a new field.
+        return [CompanyFactResponse.model_validate(f) for f in facts]
+
+    return CompanyViewResponse(
+        facts=_facts(view.facts),
+        overview=_facts(view.overview),
+        risks=_facts(view.risks),
+        commercial=_facts(view.commercial),
+        related_parties=_facts(view.related_parties),
+        plans=_facts(view.plans),
+    )
 
 
 async def _compute_deal_status(db: AsyncSession, deal_id: uuid.UUID) -> DealStatusResponse:
