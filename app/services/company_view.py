@@ -111,6 +111,31 @@ _IDENTITY_LABELS: tuple[tuple[str, str, tuple[tuple[str, ...], ...]], ...] = (
 
 _IDENTITY_ORDER = {key: i for i, (key, _d, _t) in enumerate(_IDENTITY_LABELS)}
 
+# Tokens that disqualify a label from an identity metric even when its words match
+# and its value type fits: a headcount is a stock ("Total Employees"), never a
+# flow or change ("Employees Terminated", "Employee Turnover") -- both are counts,
+# so the value-type guard alone cannot tell them apart.
+_IDENTITY_EXCLUDE: dict[str, frozenset[str]] = {
+    "headcount": frozenset(
+        {
+            "terminated",
+            "turnover",
+            "attrition",
+            "hired",
+            "hires",
+            "added",
+            "resigned",
+            "departures",
+            "left",
+            "reduction",
+            "layoffs",
+            "laid",
+            "growth",
+            "per",
+        }
+    ),
+}
+
 _YEAR_RE = re.compile(r"\b(1[89]\d\d|20\d\d)\b")
 
 
@@ -126,7 +151,10 @@ def _identity_label(claim: Claim) -> tuple[str, str] | None:
         if not norm:
             continue
         tokens = norm.split()
+        token_set = set(tokens)
         for key, display, phrase_sets in _IDENTITY_LABELS:
+            if _IDENTITY_EXCLUDE.get(key, frozenset()) & token_set:
+                continue
             if any(_tokens_contain(p, tokens) for p in phrase_sets):
                 return key, display
     return None
@@ -154,6 +182,34 @@ def _identity_value_ok(key: str, claim: Claim) -> bool:
     return True
 
 
+def _founded_year(claim: Claim) -> int | None:
+    """The 4-digit founding year from a claim's value, or None."""
+    value = claim.value if isinstance(claim.value, dict) else {}
+    for cand in (value.get("normalized"), value.get("raw")):
+        if cand is None:
+            continue
+        text = (
+            f"{int(cand)}"
+            if isinstance(cand, (int, float)) and not isinstance(cand, bool)
+            else str(cand)
+        )
+        match = _YEAR_RE.search(text)
+        if match:
+            return int(match.group(0))
+    return None
+
+
+def _identity_value(key: str, claim: Claim) -> str:
+    """Display value for an identity fact. A founding year reads "1998", never the
+    numeric formatter's comma-grouped "1,998" (value_type "date" falls through to
+    _fmt_num otherwise)."""
+    if key == "founded":
+        year = _founded_year(claim)
+        if year is not None:
+            return str(year)
+    return _fmt_value(claim.value)
+
+
 def _rank(claim: Claim) -> tuple[int, int, int]:
     """Latest-actual-first: a forecast ranks below any historical figure (an
     unmarked period counts as historical), then a later year, then a more
@@ -165,12 +221,15 @@ def _rank(claim: Claim) -> tuple[int, int, int]:
 
 
 def _fold_subjects(
-    claims: Sequence[Claim], dashboard_structure: dict[str, Any] | None
+    claims: Sequence[Claim],
+    dashboard_structure: dict[str, Any] | None,
+    company: str | None = None,
 ) -> tuple[str, dict[str, str]]:
     """(lead_subject, {casefolded entity: subject}). The parser's grounded
     organizing pass leads when present; otherwise the most-mentioned entities are
-    their own subjects. Keyed casefolded so "American Casino" and "american
-    casino" fold to one subject -- mirrors screening_materials but kept local."""
+    their own subjects, and -- when none crosses the threshold -- the deal's own
+    company anchors the lead so the subject filter is never a no-op. Keyed
+    casefolded so "American Casino" and "american casino" fold to one subject."""
     entity_subject: dict[str, str] = {}
     order: list[str] = []
     subjects = (dashboard_structure or {}).get("subjects")
@@ -184,20 +243,38 @@ def _fold_subjects(
                 if entity and entity.casefold() not in entity_subject:
                     entity_subject[entity.casefold()] = name
     else:
-        freq = Counter(c.entity for c in claims if c.entity)
-        for entity, _count in sorted(
+        # Count by the CASEFOLDED entity so case-variant spellings of one company
+        # accumulate together toward the f>=2 threshold.
+        freq = Counter(c.entity.casefold() for c in claims if c.entity)
+        display: dict[str, str] = {}
+        for claim in claims:
+            if claim.entity:
+                display.setdefault(claim.entity.casefold(), claim.entity)
+        for folded, _count in sorted(
             ((e, f) for e, f in freq.items() if f >= 2), key=lambda item: (-item[1], item[0])
         ):
-            if entity.casefold() in entity_subject:
-                continue
-            entity_subject[entity.casefold()] = entity
-            order.append(entity)
+            entity_subject[folded] = display.get(folded, folded)
+            order.append(entity_subject[folded])
+        if not order and company:
+            # No entity crossed the threshold. Without an anchor every entity
+            # folds to "Other", which equals the "Other" lead, so the subject
+            # filter passes EVERYTHING -- a competitor's figure could win an
+            # identity slot. Anchor the lead on the deal's own company: an untagged
+            # fact (see _subject_of) or one whose entity IS the company is kept;
+            # any other named entity folds to "Other" and is dropped.
+            entity_subject[company.casefold()] = company
+            order.append(company)
     lead = order[0] if order else "Other"
     return lead, entity_subject
 
 
-def _subject_of(entity_subject: dict[str, str], entity: str | None) -> str:
-    return entity_subject.get((entity or "").casefold(), "Other")
+def _subject_of(entity_subject: dict[str, str], entity: str | None, lead: str) -> str:
+    """The subject a claim folds to. An untagged claim (no entity) is taken to be
+    about the deal's primary subject (the lead) -- a CIM fact left without an
+    entity is about the target by default; a competitor's fact carries its name."""
+    if not entity:
+        return lead
+    return entity_subject.get(entity.casefold(), "Other")
 
 
 def _qual_fact(claim: Claim, filenames: Mapping[uuid.UUID, str]) -> CompanyFact:
@@ -226,7 +303,7 @@ def build_company_view(
     """Curate the deal's claims (plus the deal-profile sector/HQ) into the
     Business Overview tab. Only trust-earned claims of the lead business subject
     are shown; a section with none comes back empty."""
-    lead_subject, entity_subject = _fold_subjects(claims, dashboard_structure)
+    lead_subject, entity_subject = _fold_subjects(claims, dashboard_structure, company)
 
     facts: list[CompanyFact] = []
     if sector:
@@ -240,7 +317,7 @@ def build_company_view(
     for claim in claims:
         if claim.status not in _TRUSTED:
             continue
-        if _subject_of(entity_subject, claim.entity) != lead_subject:
+        if _subject_of(entity_subject, claim.entity, lead_subject) != lead_subject:
             continue
         if _fmt_value(claim.value) == "—":
             continue
@@ -264,12 +341,12 @@ def build_company_view(
     facts.extend(
         CompanyFact(
             label=display,
-            value=_fmt_value(claim.value),
+            value=_identity_value(key, claim),
             citation=_citation(claim, filenames),
             status=claim.status,
             entity=claim.entity,
         )
-        for _key, (claim, display) in sorted(
+        for key, (claim, display) in sorted(
             identity_best.items(), key=lambda item: _IDENTITY_ORDER.get(item[0], 99)
         )
     )

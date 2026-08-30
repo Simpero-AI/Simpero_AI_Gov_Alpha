@@ -213,3 +213,55 @@ def test_a_qualitative_claim_with_no_text_does_not_show_an_empty_row():
     view = build_company_view(claims, filenames={})
 
     assert [f.value for f in view.overview] == ["Real ops note."]
+
+
+def test_founded_date_renders_the_year_without_grouping():
+    # A founding date typed "date" with a numeric year falls through the numeric
+    # formatter and would read "1,998"; the year must read "1998".
+    claims = [
+        _claim(attribute_raw="Founded", normalized=1998, value_type="date", raw="1998"),
+    ]
+
+    view = build_company_view(claims, filenames={}, company="AcmeCo")
+
+    by_label = {f.label: f.value for f in view.facts}
+    assert by_label["Founded"] == "1998"
+
+
+def test_employees_terminated_is_not_mislabeled_as_headcount():
+    # "Employees Terminated" is a count too, so the value-type guard can't reject
+    # it -- the exclude token ("terminated") must. It is a flow, not a headcount.
+    claims = [
+        _claim(attribute_raw="Employees Terminated", normalized=120, value_type="count"),
+    ]
+
+    view = build_company_view(claims, filenames={}, company="AcmeCo")
+
+    assert all(f.label != "Headcount" for f in view.facts)
+
+
+def test_freq_fallback_anchors_the_lead_on_the_company_excluding_competitors():
+    # No dashboard structure and no entity crosses the frequency threshold (each
+    # appears once). Without an anchor the subject filter is a no-op and the
+    # competitor's later, larger headcount would win; anchoring the lead on the
+    # deal's company keeps the target's figure and drops the competitor's.
+    claims = [
+        _claim(
+            attribute_raw="Total Employees",
+            normalized=1_450,
+            value_type="count",
+            entity="AcmeCo",
+            period_year=2023,
+        ),
+        _claim(
+            attribute_raw="Total Employees",
+            normalized=50_000,
+            value_type="count",
+            entity="Rival Corp",
+            period_year=2024,
+        ),
+    ]
+
+    view = build_company_view(claims, filenames={}, company="AcmeCo")
+
+    assert [f.value for f in view.facts if f.label == "Headcount"] == ["1,450"]

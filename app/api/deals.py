@@ -441,7 +441,14 @@ async def get_deal_company(
     if deal is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
 
-    claims = list((await db.execute(select(Claim).where(Claim.deal_id == deal_id))).scalars().all())
+    # Deterministic row order: build_company_view breaks an exact rank tie between
+    # identity claims by first-seen, so without a stable ORDER BY the displayed
+    # headcount/founded could differ across requests.
+    claims = list(
+        (await db.execute(select(Claim).where(Claim.deal_id == deal_id).order_by(Claim.id)))
+        .scalars()
+        .all()
+    )
     filenames = {ds.id: ds.filename for ds in await DataSourceRepo(db).list_for_deal(deal_id)}
 
     view = build_company_view(
