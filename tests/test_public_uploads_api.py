@@ -5,7 +5,7 @@ Full app (app.main.app) over httpx.ASGITransport, same pattern as
 tests/test_public_intake_session.py -- session_token is a real, verified
 intake-session JWT (encode_intake_session_jwt), never a stubbed dependency
 override, so RLS is genuinely exercised end to end. The Spaces adapter
-(presign_put, head_object) and the job queue (get_queue) are mocked at their
+(presign_put, head_object_size) and the job queue (get_queue) are mocked at their
 call sites in app.api.public_uploads, mirroring tests/test_uploads_api.py's
 pattern for the authenticated router.
 """
@@ -58,18 +58,21 @@ def mocked_spaces(monkeypatch: pytest.MonkeyPatch):
     build_calls: list[tuple] = []
     presign_calls: list[tuple] = []
     enqueue_calls: list[tuple[str, dict[str, Any]]] = []
-    object_exists = {"value": True}
+    # None => object missing (404 at /complete). A small default size keeps
+    # every existing happy-path test under MAX_UPLOAD_BYTES without having to
+    # know or care about the actual number.
+    object_state: dict[str, int | None] = {"size": 1024}
 
     def fake_build_object_key(org_name, clerk_org_id, deal_id, upload_id, filename):
         build_calls.append((org_name, clerk_org_id, deal_id, upload_id, filename))
         return f"{org_name}-{clerk_org_id}/{deal_id}/{upload_id}-{filename}"
 
-    def fake_presign_put(key, ttl_seconds):
-        presign_calls.append((key, ttl_seconds))
+    def fake_presign_put(key, ttl_seconds, *, content_length=None):
+        presign_calls.append((key, ttl_seconds, content_length))
         return f"https://example-spaces.test/{key}?signed=1"
 
-    def fake_head_object(key: str) -> bool:
-        return object_exists["value"]
+    def fake_head_object_size(key: str) -> int | None:
+        return object_state["size"]
 
     class _FakeQueue:
         async def enqueue(self, job_name: str, **kwargs: Any) -> None:
@@ -83,7 +86,7 @@ def mocked_spaces(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr(public_uploads, "build_object_key", fake_build_object_key)
     monkeypatch.setattr(public_uploads, "presign_put", fake_presign_put)
-    monkeypatch.setattr(public_uploads, "head_object", fake_head_object)
+    monkeypatch.setattr(public_uploads, "head_object_size", fake_head_object_size)
     monkeypatch.setattr(public_uploads, "get_queue", lambda: fake_queue)
     monkeypatch.setattr(parse_client, "get_parse_queue", _fail_if_called)
 
@@ -91,7 +94,8 @@ def mocked_spaces(monkeypatch: pytest.MonkeyPatch):
         "build_calls": build_calls,
         "presign_calls": presign_calls,
         "enqueue_calls": enqueue_calls,
-        "set_object_exists": lambda v: object_exists.__setitem__("value", v),
+        "set_object_exists": lambda v: object_state.__setitem__("size", 1024 if v else None),
+        "set_object_size": lambda n: object_state.__setitem__("size", n),
     }
 
 
@@ -108,11 +112,12 @@ def _cleanup_seeded_documents(owner_conn, pending_link_with_token):
     unlike data_source there's no FK forcing this, but human_audit_log rows
     are otherwise never cleaned up (append-only, no test-side DELETE path
     elsewhere either) and org_a_id/test_org_id is shared across the whole
-    suite, so leftover intake_document_uploaded rows from a prior run
-    silently break tests/test_human_audit_log_immutability.py's exact-count
-    assertion on a later run against the same DB. Scoped by deal_id, which is
-    unique per pending_link_with_token call (org_a_deal_id fixture creates a
-    fresh deal every time), so this can't touch another test's rows.
+    suite, so leftover intake_document_uploaded/intake_document_rejected rows
+    from a prior run silently break tests/test_human_audit_log_immutability.py's
+    exact-count assertion on a later run against the same DB. Scoped by
+    deal_id, which is unique per pending_link_with_token call (org_a_deal_id
+    fixture creates a fresh deal every time), so this can't touch another
+    test's rows.
     """
     yield
     with owner_conn.cursor() as cur:
@@ -121,8 +126,11 @@ def _cleanup_seeded_documents(owner_conn, pending_link_with_token):
             (pending_link_with_token["id"],),
         )
         cur.execute(
-            "DELETE FROM human_audit_log WHERE deal_id = %s AND event_type = %s",
-            (pending_link_with_token["deal_id"], "intake_document_uploaded"),
+            "DELETE FROM human_audit_log WHERE deal_id = %s AND event_type IN %s",
+            (
+                pending_link_with_token["deal_id"],
+                ("intake_document_uploaded", "intake_document_rejected"),
+            ),
         )
 
 
@@ -177,6 +185,46 @@ async def test_presign_happy_path_under_ceiling(pending_link_with_token, mocked_
     body = resp.json()
     assert set(body.keys()) == {"uploadId", "presignedUrl", "storageKey"}
     assert len(mocked_spaces["presign_calls"]) == 1
+    # P3-15/F9: the client's declared (already-validated) size is what gets
+    # bound into the signature -- see test_presign_content_length.py for
+    # proof that actually enforces an exact-match ceiling.
+    _, _, content_length = mocked_spaces["presign_calls"][0]
+    assert content_length == 1024
+
+
+async def test_presign_rejects_oversized_declared_size(pending_link_with_token, mocked_spaces):
+    link = pending_link_with_token
+
+    resp = await _post(
+        "/presigned-url",
+        _session_token(link),
+        {
+            "filename": _ALLOWED_FILENAME,
+            "size": public_uploads.MAX_UPLOAD_BYTES + 1,
+            "declaredSha256": _DECLARED_HASH,
+        },
+    )
+
+    assert resp.status_code == 422
+    assert not mocked_spaces["presign_calls"]
+
+
+async def test_presign_rejects_non_positive_declared_size(pending_link_with_token, mocked_spaces):
+    """P3-15/F9 Fix 2: size is now bound into presign_put's signature, so a
+    zero/negative value would sign a URL no real PUT could ever satisfy --
+    Field(ge=1) rejects it at the schema layer instead of wasting a round
+    trip on an opaque signature-mismatch 403.
+    """
+    link = pending_link_with_token
+
+    resp = await _post(
+        "/presigned-url",
+        _session_token(link),
+        {"filename": _ALLOWED_FILENAME, "size": 0, "declaredSha256": _DECLARED_HASH},
+    )
+
+    assert resp.status_code == 422
+    assert not mocked_spaces["presign_calls"]
 
 
 # --- /complete happy path ---------------------------------------------------
@@ -276,7 +324,7 @@ async def test_complete_persists_ip_and_user_agent_on_audit_row(
 
 
 async def test_complete_without_prior_put_returns_4xx_no_row_no_audit(
-    pending_link_with_token, owner_conn, mocked_spaces
+    pending_link_with_token, owner_conn, mocked_spaces, _cleanup_seeded_documents
 ):
     mocked_spaces["set_object_exists"](False)
     link = pending_link_with_token
@@ -293,6 +341,62 @@ async def test_complete_without_prior_put_returns_4xx_no_row_no_audit(
         cur.execute("SELECT count(*) FROM data_source WHERE id = %s", (upload_id,))
         assert cur.fetchone()[0] == 0
     assert not mocked_spaces["enqueue_calls"]
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM human_audit_log WHERE deal_id = %s",
+            (link["deal_id"],),
+        )
+        assert cur.fetchone()[0] == 0
+
+
+async def test_complete_rejects_oversized_stored_object_no_row_no_enqueue_writes_audit(
+    pending_link_with_token, owner_conn, org_a_id, mocked_spaces, _cleanup_seeded_documents
+):
+    """P3-15/F9 Fix 1: /complete checks the ACTUAL stored size (what
+    head_object_size reports), not just the client's declared size at
+    /presigned-url -- this is the backstop for whether Spaces (S3-compatible,
+    not S3) actually honoured presign_put's signed content_length. Even if a
+    client uploaded more than it declared and Spaces let it through, this
+    stops a data_source row and ingest job from being created for it.
+
+    F9 fix-prompt round 2 (Fix 4/5): reaching this branch means either a
+    client bypassed presign_put's signature or Spaces isn't honouring it --
+    an abuse signal, so it also gets an audit row (mirrors
+    intake_email_attempt_failed's precedent in public_intake.py), written via
+    a returned JSONResponse rather than a raised HTTPException so it survives
+    get_public_session_db's rollback-on-raise (see public_uploads.py's
+    comment at the call site).
+    """
+    mocked_spaces["set_object_size"](public_uploads.MAX_UPLOAD_BYTES + 1)
+    link = pending_link_with_token
+    upload_id = str(uuid.uuid4())
+
+    resp = await _post(
+        f"/{upload_id}/complete",
+        _session_token(link, email="recipient@org-a.example"),
+        {"filename": _ALLOWED_FILENAME, "declaredSha256": _DECLARED_HASH},
+    )
+
+    assert resp.status_code == 422
+    with owner_conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM data_source WHERE id = %s", (upload_id,))
+        assert cur.fetchone()[0] == 0
+    assert not mocked_spaces["enqueue_calls"]
+
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "SELECT deal_id, org_id, actor_email, payload FROM human_audit_log "
+            "WHERE event_type = 'intake_document_rejected' AND deal_id = %s",
+            (link["deal_id"],),
+        )
+        rows = cur.fetchall()
+    assert len(rows) == 1
+    deal_id, org_id, actor_email, payload = rows[0]
+    assert str(deal_id) == link["deal_id"]
+    assert org_id == org_a_id
+    assert actor_email == "recipient@org-a.example"
+    assert payload["actual_size"] == public_uploads.MAX_UPLOAD_BYTES + 1
+    assert "storage_key" in payload
 
 
 async def test_complete_at_ceiling_returns_409_no_enqueue_no_audit(
@@ -313,6 +417,12 @@ async def test_complete_at_ceiling_returns_409_no_enqueue_no_audit(
         cur.execute("SELECT count(*) FROM data_source WHERE id = %s", (upload_id,))
         assert cur.fetchone()[0] == 0
     assert not mocked_spaces["enqueue_calls"]
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM human_audit_log WHERE deal_id = %s",
+            (link["deal_id"],),
+        )
+        assert cur.fetchone()[0] == 0
 
 
 # --- cross-org isolation ----------------------------------------------------
