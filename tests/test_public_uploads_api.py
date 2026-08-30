@@ -324,7 +324,7 @@ async def test_complete_persists_ip_and_user_agent_on_audit_row(
 
 
 async def test_complete_without_prior_put_returns_4xx_no_row_no_audit(
-    pending_link_with_token, owner_conn, mocked_spaces
+    pending_link_with_token, owner_conn, mocked_spaces, _cleanup_seeded_documents
 ):
     mocked_spaces["set_object_exists"](False)
     link = pending_link_with_token
@@ -341,6 +341,12 @@ async def test_complete_without_prior_put_returns_4xx_no_row_no_audit(
         cur.execute("SELECT count(*) FROM data_source WHERE id = %s", (upload_id,))
         assert cur.fetchone()[0] == 0
     assert not mocked_spaces["enqueue_calls"]
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM human_audit_log WHERE deal_id = %s",
+            (link["deal_id"],),
+        )
+        assert cur.fetchone()[0] == 0
 
 
 async def test_complete_rejects_oversized_stored_object_no_row_no_enqueue_writes_audit(
@@ -411,6 +417,12 @@ async def test_complete_at_ceiling_returns_409_no_enqueue_no_audit(
         cur.execute("SELECT count(*) FROM data_source WHERE id = %s", (upload_id,))
         assert cur.fetchone()[0] == 0
     assert not mocked_spaces["enqueue_calls"]
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM human_audit_log WHERE deal_id = %s",
+            (link["deal_id"],),
+        )
+        assert cur.fetchone()[0] == 0
 
 
 # --- cross-org isolation ----------------------------------------------------
