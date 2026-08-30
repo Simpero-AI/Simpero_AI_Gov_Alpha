@@ -14,6 +14,7 @@ from app.api import (
     logs,
     mandates,
     public_intake,
+    public_uploads,
     uploads,
 )
 from app.core.config import get_settings
@@ -83,6 +84,7 @@ app.include_router(logs.router, prefix=API_PREFIX)
 app.include_router(mandates.router, prefix=API_PREFIX)
 app.include_router(intake_questions.router, prefix=API_PREFIX)
 app.include_router(public_intake.router, prefix=API_PREFIX)
+app.include_router(public_uploads.router, prefix=API_PREFIX)
 app.include_router(admin.router, prefix=API_PREFIX)
 app.include_router(uploads.router, prefix=API_PREFIX)
 app.include_router(inspector.router, prefix=API_PREFIX)

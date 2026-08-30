@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from pydantic import EmailStr
 
 from app.schemas.common import CamelModel
@@ -54,3 +56,10 @@ class SubmitAnswersResponse(CamelModel):
     minimal, matches this codebase's CamelModel wire convention."""
 
     answers: list[DraftAnswerResponse]
+
+
+class IntakeSubmitResponse(CamelModel):
+    """Minimal ack for POST /public/intake/submit."""
+
+    submitted: bool
+    submitted_at: datetime
