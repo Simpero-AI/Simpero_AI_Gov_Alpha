@@ -447,6 +447,7 @@ async def get_deal_company(
     view = build_company_view(
         claims,
         filenames=filenames,
+        dashboard_structure=deal.dashboard_structure,
         sector=deal.sector,
         hq_geography=deal.hq_geography,
         company=deal.name,

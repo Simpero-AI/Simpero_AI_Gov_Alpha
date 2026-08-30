@@ -19,13 +19,22 @@ What maps to what:
 market_definition / competitive_position live on the Market tab, not here.
 Sections the pipeline has no source for (funding history, co-investor syndicate,
 per-region breakdown) are deliberately not surfaced rather than shown as
-permanent empties. Formatting/citation/trust helpers are shared with
-screening_materials so every surface agrees.
+permanent empties.
+
+Every fact is scoped to the deal's LEAD business subject (a competitor's or
+segment's figure never surfaces as the target's), picked latest-actual-first,
+and value-guarded, mirroring screening_materials' rules. Only the pure display
+helpers (_fmt_value/_citation/_STATUS_RANK) are shared with screening_materials
+-- the subject fold is kept local so this module does not depend on that one's
+evolving internals.
 """
 
+import re
 import uuid
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
 from app.models.claim import Claim
 from app.services.entity_resolution.resolved import normalize_name
@@ -65,40 +74,50 @@ _SECTION_BY_CLASS = {
     "plan_or_commitment": "plans",
 }
 
-# Company identity metrics recovered from a claim's raw label (matched over
-# normalize_name). Acronyms match only as a standalone token; phrases as a
-# substring -- same discipline as market_view's sizing labels.
-_IDENTITY_LABELS: tuple[tuple[str, str, frozenset[str], tuple[str, ...]], ...] = (
+# Company identity metrics recovered from a claim's raw label. `tokens` are whole
+# normalized tokens whose presence (in order, as a contiguous run) identifies the
+# metric -- not a raw substring, so "employees" matches "Total Employees" but the
+# value_type guard (below) is what rejects "Total Employees Turnover %". Each
+# metric also names the value types it accepts.
+_IDENTITY_LABELS: tuple[tuple[str, str, tuple[tuple[str, ...], ...]], ...] = (
     (
         "headcount",
         "Headcount",
-        frozenset({"fte", "ftes"}),
         (
-            "headcount",
-            "employees",
-            "full time employees",
-            "number of employees",
-            "total employees",
-            "total staff",
+            ("headcount",),
+            ("employees",),
+            ("fte",),
+            ("ftes",),
+            ("full", "time", "employees"),
+            ("number", "of", "employees"),
+            ("total", "employees"),
+            ("total", "staff"),
         ),
     ),
     (
         "founded",
         "Founded",
-        frozenset(),
         (
-            "year founded",
-            "founded",
-            "incorporated",
-            "date of incorporation",
-            "year of incorporation",
-            "inception",
-            "established",
+            ("founded",),
+            ("year", "founded"),
+            ("incorporated",),
+            ("date", "of", "incorporation"),
+            ("year", "of", "incorporation"),
+            ("inception",),
+            ("established",),
         ),
     ),
 )
 
-_IDENTITY_ORDER = {key: i for i, (key, _d, _a, _p) in enumerate(_IDENTITY_LABELS)}
+_IDENTITY_ORDER = {key: i for i, (key, _d, _t) in enumerate(_IDENTITY_LABELS)}
+
+_YEAR_RE = re.compile(r"\b(1[89]\d\d|20\d\d)\b")
+
+
+def _tokens_contain(phrase: tuple[str, ...], tokens: list[str]) -> bool:
+    """True when `phrase` appears as a contiguous run within `tokens`."""
+    n = len(phrase)
+    return any(tuple(tokens[i : i + n]) == phrase for i in range(len(tokens) - n + 1))
 
 
 def _identity_label(claim: Claim) -> tuple[str, str] | None:
@@ -106,21 +125,79 @@ def _identity_label(claim: Claim) -> tuple[str, str] | None:
         norm = normalize_name(source or "")
         if not norm:
             continue
-        tokens = set(norm.split())
-        for key, display, acronyms, phrases in _IDENTITY_LABELS:
-            if (acronyms & tokens) or any(phrase in norm for phrase in phrases):
+        tokens = norm.split()
+        for key, display, phrase_sets in _IDENTITY_LABELS:
+            if any(_tokens_contain(p, tokens) for p in phrase_sets):
                 return key, display
     return None
 
 
-def _identity_rank(claim: Claim) -> tuple[int, float]:
-    normalized = claim.value.get("normalized") if isinstance(claim.value, dict) else None
-    magnitude = (
-        normalized
-        if isinstance(normalized, (int, float)) and not isinstance(normalized, bool)
-        else float("-inf")
-    )
-    return (_STATUS_RANK.get(claim.status, 0), magnitude)
+def _identity_value_ok(key: str, claim: Claim) -> bool:
+    """A value-type / shape guard so a label's WORDS alone can't mislabel an
+    unrelated figure: headcount must be a count (not a "... turnover %"), and a
+    founding date must actually look like a plausible year (not a "score")."""
+    value = claim.value if isinstance(claim.value, dict) else {}
+    if key == "headcount":
+        return value.get("value_type") == "count"
+    if key == "founded":
+        for cand in (value.get("raw"), value.get("normalized")):
+            if cand is None:
+                continue
+            text = (
+                f"{int(cand)}"
+                if isinstance(cand, (int, float)) and not isinstance(cand, bool)
+                else str(cand)
+            )
+            if _YEAR_RE.search(text):
+                return True
+        return False
+    return True
+
+
+def _rank(claim: Claim) -> tuple[int, int, int]:
+    """Latest-actual-first: a forecast ranks below any historical figure (an
+    unmarked period counts as historical), then a later year, then a more
+    corroborated status. Recency, NOT magnitude -- so a company that shrank shows
+    its latest headcount, not the larger stale one."""
+    is_historical = 0 if claim.period_kind in ("E", "P") else 1
+    year = claim.period_year if claim.period_year is not None else -1
+    return (is_historical, year, _STATUS_RANK.get(claim.status, 0))
+
+
+def _fold_subjects(
+    claims: Sequence[Claim], dashboard_structure: dict[str, Any] | None
+) -> tuple[str, dict[str, str]]:
+    """(lead_subject, {casefolded entity: subject}). The parser's grounded
+    organizing pass leads when present; otherwise the most-mentioned entities are
+    their own subjects. Keyed casefolded so "American Casino" and "american
+    casino" fold to one subject -- mirrors screening_materials but kept local."""
+    entity_subject: dict[str, str] = {}
+    order: list[str] = []
+    subjects = (dashboard_structure or {}).get("subjects")
+    if isinstance(subjects, list) and subjects:
+        for subject in subjects:
+            if not isinstance(subject, dict) or not subject.get("name"):
+                continue
+            name = str(subject["name"])
+            order.append(name)
+            for entity in subject.get("entities") or []:
+                if entity and entity.casefold() not in entity_subject:
+                    entity_subject[entity.casefold()] = name
+    else:
+        freq = Counter(c.entity for c in claims if c.entity)
+        for entity, _count in sorted(
+            ((e, f) for e, f in freq.items() if f >= 2), key=lambda item: (-item[1], item[0])
+        ):
+            if entity.casefold() in entity_subject:
+                continue
+            entity_subject[entity.casefold()] = entity
+            order.append(entity)
+    lead = order[0] if order else "Other"
+    return lead, entity_subject
+
+
+def _subject_of(entity_subject: dict[str, str], entity: str | None) -> str:
+    return entity_subject.get((entity or "").casefold(), "Other")
 
 
 def _qual_fact(claim: Claim, filenames: Mapping[uuid.UUID, str]) -> CompanyFact:
@@ -141,13 +218,16 @@ def build_company_view(
     claims: Sequence[Claim],
     *,
     filenames: Mapping[uuid.UUID, str],
+    dashboard_structure: dict[str, Any] | None = None,
     sector: str | None = None,
     hq_geography: str | None = None,
     company: str | None = None,
 ) -> CompanyView:
     """Curate the deal's claims (plus the deal-profile sector/HQ) into the
-    Business Overview tab. Only trust-earned claims are shown; a section with none
-    comes back empty."""
+    Business Overview tab. Only trust-earned claims of the lead business subject
+    are shown; a section with none comes back empty."""
+    lead_subject, entity_subject = _fold_subjects(claims, dashboard_structure)
+
     facts: list[CompanyFact] = []
     if sector:
         facts.append(CompanyFact("Sector", sector, None, _DERIVED, company))
@@ -160,6 +240,10 @@ def build_company_view(
     for claim in claims:
         if claim.status not in _TRUSTED:
             continue
+        if _subject_of(entity_subject, claim.entity) != lead_subject:
+            continue
+        if _fmt_value(claim.value) == "—":
+            continue
 
         if claim.claim_kind == "qualitative":
             section = _SECTION_BY_CLASS.get(claim.assertion_class or "")
@@ -167,14 +251,14 @@ def build_company_view(
                 sections[section].append(_qual_fact(claim, filenames))
             continue
 
-        if _fmt_value(claim.value) == "—":
-            continue
         keyed = _identity_label(claim)
         if keyed is None:
             continue
         key, display = keyed
+        if not _identity_value_ok(key, claim):
+            continue
         current = identity_best.get(key)
-        if current is None or _identity_rank(claim) > _identity_rank(current[0]):
+        if current is None or _rank(claim) > _rank(current[0]):
             identity_best[key] = (claim, display)
 
     facts.extend(

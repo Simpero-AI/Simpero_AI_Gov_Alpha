@@ -14,10 +14,13 @@ def _claim(
     normalized: float | None = None,
     raw: str | None = None,
     value_type: str = "currency",
+    unit: str | None = None,
     entity: str = "AcmeCo",
     status: str = "verified",
     claim_kind: str | None = None,
     assertion_class: str | None = None,
+    period_year: int | None = None,
+    period_kind: str | None = None,
     kind: str = "pdf",
     page: int | None = 1,
 ) -> Claim:
@@ -27,10 +30,12 @@ def _claim(
         attribute_raw=attribute_raw,
         claim_kind=claim_kind,
         assertion_class=assertion_class,
+        period_year=period_year,
+        period_kind=period_kind,
         value={
             "raw": raw if raw is not None else str(normalized),
             "normalized": normalized,
-            "unit": "USD" if value_type == "currency" else None,
+            "unit": unit if unit is not None else ("USD" if value_type == "currency" else None),
             "value_type": value_type,
         },
         kind=kind,
@@ -130,3 +135,81 @@ def test_empty_deal_yields_empty_view():
     assert view.commercial == []
     assert view.related_parties == []
     assert view.plans == []
+
+
+def test_a_competitors_identity_fact_is_not_shown_as_the_targets():
+    # Subject filter: a headcount claim about a mentioned competitor must not be
+    # picked as the deal company's own.
+    claims = [
+        _claim(
+            attribute_raw="Total Employees", normalized=1450, value_type="count", entity="AcmeCo"
+        ),
+        _claim(
+            attribute_raw="Total Employees",
+            normalized=50000,
+            value_type="count",
+            entity="BigCorp Competitor",
+        ),
+    ]
+    structure = {"subjects": [{"name": "AcmeCo", "entities": ["AcmeCo"]}]}
+
+    view = build_company_view(claims, filenames={}, dashboard_structure=structure)
+
+    assert [f.value for f in view.facts if f.label == "Headcount"] == ["1,450"]
+
+
+def test_latest_headcount_wins_over_a_stale_larger_one():
+    # Recency, not magnitude: a company that shrank shows its latest headcount.
+    claims = [
+        _claim(
+            attribute_raw="Total Employees", normalized=2000, value_type="count", period_year=2021
+        ),
+        _claim(
+            attribute_raw="Total Employees", normalized=1200, value_type="count", period_year=2024
+        ),
+    ]
+
+    view = build_company_view(claims, filenames={})
+
+    assert [f.value for f in view.facts if f.label == "Headcount"] == ["1,200"]
+
+
+def test_a_percent_metric_is_not_mislabeled_as_headcount():
+    # "Total Employees Turnover %" carries the headcount words but is a percent --
+    # the value_type guard keeps it out; the real count keeps the slot.
+    claims = [
+        _claim(
+            attribute_raw="Total Employees Turnover",
+            normalized=12.5,
+            value_type="percent",
+            unit="%",
+        ),
+        _claim(attribute_raw="Total Employees", normalized=1450, value_type="count"),
+    ]
+
+    view = build_company_view(claims, filenames={})
+
+    assert [f.value for f in view.facts if f.label == "Headcount"] == ["1,450"]
+
+
+def test_a_qualitative_claim_with_no_text_does_not_show_an_empty_row():
+    claims = [
+        _claim(
+            raw="",
+            value_type="text",
+            normalized=None,
+            claim_kind="qualitative",
+            assertion_class="operating_model",
+        ),
+        _claim(
+            raw="Real ops note.",
+            value_type="text",
+            normalized=None,
+            claim_kind="qualitative",
+            assertion_class="operating_model",
+        ),
+    ]
+
+    view = build_company_view(claims, filenames={})
+
+    assert [f.value for f in view.overview] == ["Real ops note."]
