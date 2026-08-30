@@ -167,7 +167,18 @@ def _validate_answers(answers: list[AnswerInput], lookup: dict[str, dict]) -> No
 def _seed_draft(snapshot_questions: list[dict]) -> dict[str, dict]:
     """Every question at answered=False, answer="" -- the first-call seed of
     the read-merge-write draft, keyed by question_key so overlay is a plain
-    dict update."""
+    dict update.
+
+    Load-bearing and easy to break silently: this dict's INSERTION ORDER is
+    what carries display order all the way to the org-side read. The caller
+    passes `questions_snapshot["questions"]`, which P3-01 stored in
+    DealIntakeQuestionRepo.list_active()'s `display_order` sequence; every key
+    the merge later overlays already exists in this seed (_validate_answers
+    rejects unknown keys first), so no merge ever appends and the order
+    survives into `deal_intake_response.answers`, which P3-05 renders in
+    stored order. Anything that rebuilds this dict out of order -- sorting it,
+    or seeding from an unordered source -- silently reorders the questions on
+    Step 3's answers panel with no test on this side to catch it."""
     return {
         q["question_key"]: {
             "question_key": q["question_key"],

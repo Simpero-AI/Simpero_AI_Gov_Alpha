@@ -1,10 +1,12 @@
 import json
+import logging
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,6 +25,7 @@ from app.repo.DealRepo import DealRepo
 from app.repo.EntityResolutionRepo import EntityResolutionRepo
 from app.repo.HumanAuditRepo import HumanAuditRepo
 from app.repo.IntakeLinkRepo import IntakeLinkRepo
+from app.repo.IntakeResponseRepo import IntakeResponseRepo
 from app.repo.ScreeningResultRepo import ScreeningResultRepo
 from app.repo.SessionRepo import SessionRepo
 from app.repo.UserRepo import UserRepo
@@ -58,6 +61,10 @@ from app.schemas.intake_link import (
     IntakeLinkStatus,
     IntakeLinkStatusResponse,
 )
+from app.schemas.intake_response import (
+    IntakeResponseAnswerResponse,
+    IntakeResponseResponse,
+)
 from app.services.dashboard_stats import compute_month_bounds, compute_pipeline_value_delta
 from app.services.entity_resolution import get_resolver
 from app.services.entity_resolution.types import EntityResolutionError
@@ -69,7 +76,36 @@ from app.services.screening.rulebook import load_rulebook
 from app.services.screening_insights import derive_screening_insights
 from app.services.screening_materials import build_screening_materials
 
+logger = logging.getLogger(__name__)
+
 _INTAKE_LINK_TTL_DAYS = 7
+
+
+def _parse_answer(entry: Any, response_id: uuid.UUID) -> IntakeResponseAnswerResponse | None:
+    """One entry of `deal_intake_response.answers -> answers[]`, or None if it
+    does not validate.
+
+    Skipping a malformed entry rather than letting ValidationError escape as a
+    500 is about this table's immutability posture, not about the shape being
+    likely to be wrong. `deal_intake_response` carries a blanket
+    `REVOKE UPDATE, DELETE ... FROM dd_app`, so a row that ever lands malformed
+    can never be repaired through the application -- a single bad entry would
+    500 that deal's Step 3 answers panel permanently, with no operational
+    recovery short of a direct owner-role write. Today's writer (P3-11's
+    submit_intake) cannot produce one, so this is defence against a future
+    writer or a manual fix-up, and it logs the response id loudly so a bad row
+    is noticed rather than silently short-rendered -- same idiom as
+    _org_name_for_link in public_intake.py.
+    """
+    try:
+        return IntakeResponseAnswerResponse.model_validate(entry)
+    except ValidationError:
+        logger.error(
+            "intake response %s carries a malformed answers entry; skipping it",
+            response_id,
+        )
+        return None
+
 
 router = APIRouter(prefix="/deals", tags=["deals"])
 
@@ -1089,3 +1125,58 @@ async def revoke_intake_link(
     )
 
     return SuccessResponse(success=True)
+
+
+@router.get("/{deal_id}/intake-response", response_model=IntakeResponseResponse)
+async def get_intake_response(
+    deal_id: uuid.UUID, db: AsyncSession = Depends(get_db)
+) -> IntakeResponseResponse:
+    """P3-05. The org-side read of what the external party submitted, for
+    Step 3's answers panel (P5-05) and the deal detail page (Q12). 404 until
+    a submit has actually happened -- an intake link merely being pending is
+    not a response.
+
+    The `answers` entries are validated straight out of the stored JSONB by
+    field name: the blob is snake_case (the codebase's convention for stored
+    JSON, see the brief's "Stored shapes"), and CamelModel's
+    populate_by_name=True accepts that while still emitting camelCase on the
+    wire. Anything the blob carries beyond the four documented keys is
+    dropped here rather than passed through, so the wire shape stays exactly
+    what the frontend contract says it is."""
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    response = await IntakeResponseRepo(db).latest_for_deal(deal_id)
+    if response is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No intake response has been submitted for this deal",
+        )
+
+    # isinstance rather than `or {}`: `answers` is typed `dict | None` on the
+    # model, but the column is plain JSONB with no
+    # `jsonb_typeof(answers) = 'object'` CHECK behind it, so a blob stored as a
+    # JSON array or scalar is reachable at the database level. `or {}` would
+    # pass such a value straight through and the `.get` below would raise
+    # AttributeError -- the same permanent 500 on an unrepairable row that
+    # _parse_answer exists to prevent, one level further out.
+    raw = response.answers
+    stored = raw if isinstance(raw, dict) else {}
+    # `or []` rather than a `.get` default: the default only fires on a MISSING
+    # key, so a blob storing `"answers": null` would return None and make this
+    # `for entry in None` -- a 500, same reasoning as the isinstance guard
+    # above. A non-list value here is already safe: a dict or string iterates
+    # into entries that fail validation and are skipped, degrading to an empty
+    # list plus log lines rather than crashing.
+    return IntakeResponseResponse(
+        id=str(response.id),
+        deal_id=str(response.deal_id),
+        respondent_email=response.respondent_email,
+        submitted_at=response.submitted_at,
+        answers=[
+            parsed
+            for entry in (stored.get("answers") or [])
+            if (parsed := _parse_answer(entry, response.id)) is not None
+        ],
+    )
