@@ -131,6 +131,14 @@ async def _run_corroboration(*, analysis_run_id: str, clerk_org_id: str) -> None
 
             org_id, deal_uuid = run.org_id, run.deal_id
 
+            # Mark the run actively running (mirrors start_deal_verification /
+            # start_deal_screening), committed with Phase A before the
+            # transaction-less gather. Without it the run stays `queued` through
+            # Phase A/B/C, so a slow Phase B network gather is indistinguishable
+            # in analysis_run from a run that hasn't started -- the `in_progress`
+            # signal both sibling jobs and any status inspector rely on.
+            await run_repo.update_progress(run_id, status="in_progress")
+
             # The corroboratable claims, read into memory so the gather below can
             # iterate them with no transaction open. expire_on_commit=False (see
             # app/core/database.py) keeps their column values populated after this

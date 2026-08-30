@@ -19,6 +19,8 @@ network call never sits unresolved inside the verify transaction.
 """
 
 import logging
+import os
+import time
 from collections.abc import Awaitable, Callable
 from datetime import date
 from typing import Any
@@ -34,6 +36,11 @@ logger = logging.getLogger(__name__)
 # (the corroboration pass) owns cross-call rate-limiting when this is registered.
 _USER_AGENT = "Simpero corroboration (engineering@simpero.com)"
 _TIMEOUT = 10.0
+# EDGAR's ticker map and a company's facts change rarely, so they are cached --
+# but not for the worker's whole life: a company that IPOs (new in
+# company_tickers.json) or refiles a restated 10-K/A must become visible without a
+# process restart. Cache entries refresh after this TTL. Env-tunable.
+_CACHE_TTL_S = float(os.getenv("SEC_EDGAR_CACHE_TTL_S", "3600") or "3600")
 _COMPANY_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 _COMPANY_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"
 
@@ -173,20 +180,21 @@ class SecEdgarSource:
 
     def __init__(self, fetch: Fetch | None = None) -> None:
         self._fetch = fetch or _default_fetch
-        self._tickers: dict[str, int] | None = (
-            None  # normalized title -> CIK; ambiguous titles dropped
-        )
-        # CIK -> companyfacts (None = fetch failed/absent). run_corroboration calls
-        # check() once PER claim, so a deal's dozen-plus financial claims would each
-        # re-download the same (large) facts file and blow past SEC's fair-access
-        # rate limit -- cache one fetch per CIK for this source's lifetime.
-        self._facts: dict[int, dict[str, Any] | None] = {}
+        self._tickers: dict[str, int] | None = None  # normalized title -> CIK; ambiguous dropped
+        self._tickers_at = 0.0
+        # CIK -> (fetched_at, companyfacts | None). run_corroboration calls check()
+        # once PER claim, so without a cache a deal's dozen-plus financial claims
+        # each re-download the same (large) facts file and blow past SEC's
+        # fair-access limit. The TTL bounds staleness so a refiled/newly-listed
+        # company is picked up without a worker restart; a failed/absent fetch is
+        # cached too, so a bad CIK is attempted once per TTL, not once per claim.
+        self._facts: dict[int, tuple[float, dict[str, Any] | None]] = {}
 
     async def _resolve_cik(self, company_name: str) -> int | None:
         """Exact normalized-title match against company_tickers.json. Returns a
         CIK only on an unambiguous single match -- deterministic, never a guess;
         None when not found or ambiguous (both are no-signal, not a conflict)."""
-        if self._tickers is None:
+        if self._tickers is None or (time.monotonic() - self._tickers_at) > _CACHE_TTL_S:
             try:
                 data = await self._fetch(_COMPANY_TICKERS_URL)
             except Exception:
@@ -202,21 +210,25 @@ class SecEdgarSource:
                 # Mark a title ambiguous (None) the moment a second CIK claims it.
                 seen[title] = None if title in seen and seen[title] != cik else cik
             self._tickers = {t: c for t, c in seen.items() if c is not None}
+            self._tickers_at = time.monotonic()
         return self._tickers.get(_normalize(company_name))
 
     async def _company_facts(self, cik: int) -> dict[str, Any] | None:
-        """This CIK's XBRL company facts, fetched at most once per CIK for this
-        source's lifetime (see self._facts). A failed/absent fetch is cached as
-        None so a bad or unreachable CIK is attempted once, not once per claim --
+        """This CIK's XBRL company facts, fetched at most once per CIK per
+        _CACHE_TTL_S (see self._facts). A failed/absent fetch is cached as None so
+        a bad or unreachable CIK is attempted once per TTL, not once per claim --
         best-effort corroboration, and the bound on SEC requests matters more than
-        retrying a transient blip within a single run."""
-        if cik not in self._facts:
+        retrying a transient blip within a single run; the TTL still lets a
+        refiled company refresh without a worker restart."""
+        cached = self._facts.get(cik)
+        if cached is None or (time.monotonic() - cached[0]) > _CACHE_TTL_S:
             try:
-                self._facts[cik] = await self._fetch(_COMPANY_FACTS_URL.format(cik=cik))
+                facts: dict[str, Any] | None = await self._fetch(_COMPANY_FACTS_URL.format(cik=cik))
             except Exception:
                 logger.exception("EDGAR companyfacts fetch failed for CIK %s; no-signal", cik)
-                self._facts[cik] = None
-        return self._facts[cik]
+                facts = None
+            self._facts[cik] = (time.monotonic(), facts)
+        return self._facts[cik][1]
 
     async def check(self, db: Any, claim: Claim) -> CorroborationVerdict | None:
         concepts = _CONCEPTS.get(claim.attribute)

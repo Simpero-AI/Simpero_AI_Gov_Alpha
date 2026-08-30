@@ -333,3 +333,26 @@ def test_sec_edgar_is_registered():
     from app.services.corroboration import CORROBORATION_SOURCES
 
     assert any(getattr(s, "name", None) == SecEdgarSource.name for s in CORROBORATION_SOURCES)
+
+
+async def test_cache_expires_after_the_ttl(monkeypatch):
+    # With the TTL elapsed, a refiled/newly-listed company is picked up rather
+    # than served stale forever -- each check re-fetches once the entry is stale.
+    import app.services.corroboration_sources.sec_edgar as edgar_mod
+
+    monkeypatch.setattr(edgar_mod, "_CACHE_TTL_S", -1.0)  # every entry immediately stale
+    calls = {"companyfacts": 0}
+
+    async def counting_fetch(url: str):
+        if "company_tickers" in url:
+            return _TICKERS
+        if "companyfacts" in url:
+            calls["companyfacts"] += 1
+            return _facts("Revenues", 2023, 1000.0)
+        raise AssertionError(f"unexpected url {url}")
+
+    src = SecEdgarSource(fetch=counting_fetch)
+    for year in (2021, 2022, 2023):
+        await src.check(None, _claim(period_year=year, normalized=1000.0))
+
+    assert calls["companyfacts"] == 3
