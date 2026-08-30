@@ -284,16 +284,27 @@ class ScreeningCitedFieldResponse(CamelModel):
 
 
 class ScreeningMaterialsResponse(CamelModel):
-    """GET /deals/{id}/screening-materials — the compact, cited snapshot that
-    feeds the Initial Screening tab's three panels, derived from the deal's
-    claims spine (build_screening_materials).
-
-    `extractedFields` are the deal's key canonical metrics (latest actual figure
-    each), straight from the verified claims. `highlights` and `riskFlags` are a
-    later LLM-derived layer over the same claims, empty until that lands -- the
-    panels render their own empty state for an empty list."""
+    """GET /deals/{id}/screening-materials — the deal's key extracted facts,
+    derived deterministically from the claims spine (build_screening_materials):
+    each canonical metric's latest actual figure, straight from the verified
+    claims. Deliberately claims-only and LLM-free, so this response is fast and
+    reliable and never blocked by the insights model call -- the LLM-derived
+    Agent Highlights / Risk Flags live on their own endpoint
+    (GET /deals/{id}/screening-insights) so a slow or failed model call can
+    never take the extracted panel down with it."""
 
     extracted_fields: list[ScreeningCitedFieldResponse]
+
+
+class ScreeningInsightsResponse(CamelModel):
+    """GET /deals/{id}/screening-insights — the LLM-derived Agent Highlights
+    (positive signals) and Risk Flags (concerns) for the deal
+    (derive_screening_insights), over the same trusted claims the extracted panel
+    shows. Its own endpoint, decoupled from the extracted facts on purpose.
+    `highlights`/`riskFlags` come back empty when the pass is unavailable (no
+    key) or fails soft (model/transport error, timeout) -- the panels then render
+    their own empty state."""
+
     highlights: list[str]
     risk_flags: list[str]
 
