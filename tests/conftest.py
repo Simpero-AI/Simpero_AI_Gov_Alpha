@@ -20,6 +20,51 @@ TEST_user_id = "test-user-00000000"
 _INTAKE_LINK_EXPIRES_AT = datetime.now(UTC) + timedelta(days=7)
 
 
+def recreate_real_chunks_table(cur: "psycopg2.extensions.cursor") -> None:
+    """Recreates `chunks` exactly as alembic/versions/6c8bc5907f94_chunks_table.py's
+    upgrade() defines it. Call this at the end of any fixture that drops/replaces
+    `chunks` with a stand-in table, so later tests in the same session/DB volume
+    (test_chunks_rls.py, test_e2e_pipeline.py, test_l2_retrieval_eval.py) still find
+    the real table. Keep this in sync if that migration ever changes.
+    """
+    cur.execute("DROP TABLE IF EXISTS chunks CASCADE")
+    cur.execute(
+        """
+        CREATE TABLE chunks (
+            id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+            org_id            integer NOT NULL REFERENCES organisation(id),
+            document_id       uuid,
+            content           text NOT NULL,
+            embedding         vector(1024),
+            embedding_version text,
+            content_tsv       tsvector GENERATED ALWAYS AS (to_tsvector('english', content)) STORED,
+            element_type      text,
+            page              integer,
+            char_start        integer,
+            char_end          integer,
+            created_at        timestamptz NOT NULL DEFAULT now()
+        )
+        """
+    )
+    cur.execute("CREATE INDEX ix_chunks_org_id ON chunks (org_id)")
+    cur.execute("CREATE INDEX ix_chunks_document_id ON chunks (document_id)")
+    cur.execute(
+        "CREATE INDEX ix_chunks_embedding_hnsw ON chunks USING hnsw (embedding vector_cosine_ops)"
+    )
+    cur.execute("CREATE INDEX ix_chunks_content_tsv_gin ON chunks USING gin (content_tsv)")
+    cur.execute("ALTER TABLE chunks ENABLE ROW LEVEL SECURITY")
+    cur.execute(
+        """
+        CREATE POLICY org_isolation ON chunks
+            FOR ALL TO dd_app
+            USING (org_id IN (
+                SELECT id FROM organisation
+                WHERE clerk_org_id = current_setting('app.org_id', true)
+            ))
+        """
+    )
+
+
 @pytest.fixture(scope="session")
 def test_org_id() -> str:
     return TEST_org_id

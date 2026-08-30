@@ -22,6 +22,7 @@ from sqlalchemy import text
 
 from app.core.database import AsyncSessionLocal
 from app.services.retrieval import hybrid_search
+from tests.conftest import recreate_real_chunks_table
 
 try:
     import psycopg2
@@ -147,7 +148,7 @@ def chunks_table():
 
     conn = _owner_conn()
     cur = conn.cursor()
-    cur.execute("DROP TABLE IF EXISTS chunks CASCADE")
+    recreate_real_chunks_table(cur)
     cur.execute("DELETE FROM organisation WHERE clerk_org_id IN (%s, %s)", (ORG_A, ORG_B))
     conn.close()
 
