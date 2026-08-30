@@ -265,3 +265,58 @@ def test_freq_fallback_anchors_the_lead_on_the_company_excluding_competitors():
     view = build_company_view(claims, filenames={}, company="AcmeCo")
 
     assert [f.value for f in view.facts if f.label == "Headcount"] == ["1,450"]
+
+
+def test_related_party_assertion_about_a_third_party_is_kept():
+    # A related-party assertion's entity is the party it names -- a director or
+    # affiliate (a third party), which folds to "Other". It must still surface in
+    # Related Parties, not be dropped by the lead-subject filter.
+    claims = [
+        _qual(
+            "Mr Smith, a director, also serves on the board of Acme Ltd.",
+            "related_party",
+            entity="Mr Smith",
+        ),
+    ]
+
+    view = build_company_view(claims, filenames={}, company="TargetCo")
+
+    assert [f.value for f in view.related_parties] == [
+        "Mr Smith, a director, also serves on the board of Acme Ltd."
+    ]
+
+
+def test_related_party_assertion_about_a_named_competitor_is_dropped():
+    # A related-party assertion whose entity resolves to a NAMED competitor subject
+    # belongs to that rival, not the target -- still filtered out.
+    claims = [
+        _qual(
+            "Rival Corp is under common control with the group.",
+            "related_party",
+            entity="Rival Corp",
+        ),
+    ]
+    structure = {
+        "subjects": [
+            {"name": "TargetCo", "entities": ["TargetCo"]},
+            {"name": "Rival Corp", "entities": ["Rival Corp"]},
+        ]
+    }
+
+    view = build_company_view(
+        claims, filenames={}, dashboard_structure=structure, company="TargetCo"
+    )
+
+    assert view.related_parties == []
+
+
+def test_a_non_related_party_assertion_about_a_third_party_is_still_dropped():
+    # The related-party exemption is scoped: a non-related-party qualitative claim
+    # about a third party is still filtered out (unchanged behavior).
+    claims = [
+        _qual("Competitor context about a rival.", "operating_model", entity="Rival Corp"),
+    ]
+
+    view = build_company_view(claims, filenames={}, company="TargetCo")
+
+    assert view.overview == []

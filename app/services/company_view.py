@@ -319,7 +319,17 @@ def build_company_view(
     for claim in claims:
         if claim.status not in _TRUSTED:
             continue
-        if _subject_of(entity_subject, claim.entity, lead_subject) != lead_subject:
+        # A related-party assertion's `entity` is the party the relationship names
+        # -- for the disclosures that matter (a director, an affiliate, a connected
+        # company) that's the THIRD PARTY, not the target, so the plain lead-subject
+        # filter would drop exactly the rows this section exists for. Keep such a
+        # claim when its entity is unmapped ("Other"), but still drop one that
+        # resolves to a NAMED competitor subject (that fact belongs to the rival).
+        is_related_party = (
+            claim.claim_kind == "qualitative" and claim.assertion_class == "related_party"
+        )
+        subject = _subject_of(entity_subject, claim.entity, lead_subject)
+        if subject != lead_subject and not (is_related_party and subject == "Other"):
             continue
         if _fmt_value(claim.value) == "—":
             continue
