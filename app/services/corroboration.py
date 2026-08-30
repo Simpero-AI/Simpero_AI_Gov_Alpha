@@ -121,10 +121,23 @@ class CorroborationSource(Protocol):
     async def check(self, db: AsyncSession, claim: Claim) -> CorroborationVerdict | None: ...
 
 
-# The active source registry. Empty until the per-source adapters (SIM-416+)
-# populate it, so run_corroboration is a no-op in production today -- the
-# pipeline seam exists without changing behavior.
-CORROBORATION_SOURCES: list[CorroborationSource] = []
+# The active source registry, consumed by the SIM-416 corroboration job's
+# gather phase (start_deal_corroboration) -- NOT inline in the verify
+# transaction, so a source's HTTP round-trips never sit inside an open txn.
+#
+# SEC EDGAR only, for now: it is keyless (public data.sec.gov, descriptive
+# User-Agent), needs no resolved entity (matches on claim.entity -> CIK), caches
+# one companyfacts fetch per CIK, and is validated against real companyfacts
+# shapes. The Corporations Canada / Federal Register / trademark adapters stay
+# out until their live endpoints/field-mappings are confirmed and (for the
+# entity-lane ones) SIM-420 resolved entities are populated for a deal.
+#
+# Imported here, below CorroborationSource/CorroborationVerdict, not at module
+# top: every adapter imports CorroborationVerdict from this module, so a top
+# import would be a cycle.
+from app.services.corroboration_sources.sec_edgar import SecEdgarSource  # noqa: E402
+
+CORROBORATION_SOURCES: list[CorroborationSource] = [SecEdgarSource()]
 
 
 @dataclass(frozen=True)

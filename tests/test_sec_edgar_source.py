@@ -283,3 +283,53 @@ def test_a_quarterly_datapoint_does_not_stand_in_for_the_annual_figure():
         }
     }
     assert _lookup_annual_fact(facts, ("Revenues",), 2023) is None
+
+
+async def test_companyfacts_is_fetched_once_across_claims_for_a_company():
+    # run_corroboration calls check() once PER claim; the same company's (large)
+    # companyfacts file must be fetched once, not once per claim -- SEC fair-access.
+    calls = {"tickers": 0, "companyfacts": 0}
+
+    async def counting_fetch(url: str):
+        if "company_tickers" in url:
+            calls["tickers"] += 1
+            return _TICKERS
+        if "companyfacts" in url:
+            calls["companyfacts"] += 1
+            return _facts("Revenues", 2023, 1000.0)
+        raise AssertionError(f"unexpected url {url}")
+
+    src = SecEdgarSource(fetch=counting_fetch)
+    for year in (2021, 2022, 2023):
+        await src.check(None, _claim(period_year=year, normalized=1000.0))
+
+    assert calls["tickers"] == 1
+    assert calls["companyfacts"] == 1  # cached per CIK, not re-fetched per claim
+
+
+async def test_a_failed_companyfacts_fetch_is_attempted_once_not_per_claim():
+    # A bad/unreachable CIK must not be re-fetched for every claim -- the failure
+    # is cached (best-effort: no-signal), bounding SEC requests.
+    calls = {"companyfacts": 0}
+
+    async def failing_facts(url: str):
+        if "company_tickers" in url:
+            return _TICKERS
+        if "companyfacts" in url:
+            calls["companyfacts"] += 1
+            raise RuntimeError("boom")
+        raise AssertionError(f"unexpected url {url}")
+
+    src = SecEdgarSource(fetch=failing_facts)
+    for year in (2021, 2022, 2023):
+        assert await src.check(None, _claim(period_year=year)) is None
+
+    assert calls["companyfacts"] == 1
+
+
+def test_sec_edgar_is_registered():
+    # The one source turned on today (keyless, no resolved-entity dependency,
+    # validated shapes). The other adapters keep their own not-registered guards.
+    from app.services.corroboration import CORROBORATION_SOURCES
+
+    assert any(getattr(s, "name", None) == SecEdgarSource.name for s in CORROBORATION_SOURCES)

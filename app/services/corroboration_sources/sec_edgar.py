@@ -176,6 +176,11 @@ class SecEdgarSource:
         self._tickers: dict[str, int] | None = (
             None  # normalized title -> CIK; ambiguous titles dropped
         )
+        # CIK -> companyfacts (None = fetch failed/absent). run_corroboration calls
+        # check() once PER claim, so a deal's dozen-plus financial claims would each
+        # re-download the same (large) facts file and blow past SEC's fair-access
+        # rate limit -- cache one fetch per CIK for this source's lifetime.
+        self._facts: dict[int, dict[str, Any] | None] = {}
 
     async def _resolve_cik(self, company_name: str) -> int | None:
         """Exact normalized-title match against company_tickers.json. Returns a
@@ -199,6 +204,20 @@ class SecEdgarSource:
             self._tickers = {t: c for t, c in seen.items() if c is not None}
         return self._tickers.get(_normalize(company_name))
 
+    async def _company_facts(self, cik: int) -> dict[str, Any] | None:
+        """This CIK's XBRL company facts, fetched at most once per CIK for this
+        source's lifetime (see self._facts). A failed/absent fetch is cached as
+        None so a bad or unreachable CIK is attempted once, not once per claim --
+        best-effort corroboration, and the bound on SEC requests matters more than
+        retrying a transient blip within a single run."""
+        if cik not in self._facts:
+            try:
+                self._facts[cik] = await self._fetch(_COMPANY_FACTS_URL.format(cik=cik))
+            except Exception:
+                logger.exception("EDGAR companyfacts fetch failed for CIK %s; no-signal", cik)
+                self._facts[cik] = None
+        return self._facts[cik]
+
     async def check(self, db: Any, claim: Claim) -> CorroborationVerdict | None:
         concepts = _CONCEPTS.get(claim.attribute)
         if concepts is None or claim.period_year is None:
@@ -211,11 +230,9 @@ class SecEdgarSource:
         if cik is None:
             return None  # not an EDGAR filer, or ambiguous -> no-signal
 
-        try:
-            facts = await self._fetch(_COMPANY_FACTS_URL.format(cik=cik))
-        except Exception:
-            logger.exception("EDGAR companyfacts fetch failed for CIK %s; no-signal", cik)
-            return None
+        facts = await self._company_facts(cik)
+        if facts is None:
+            return None  # fetch failed/absent -> no-signal
 
         found = _lookup_annual_fact(facts, concepts, claim.period_year)
         if found is None:

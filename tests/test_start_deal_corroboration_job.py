@@ -1,10 +1,12 @@
 """app/jobs/tasks/start_deal_corroboration.py -- the corroboration stage (SIM-416).
 
 Runs the job function directly against real Postgres (owner_conn bypasses RLS,
-same idiom as test_start_deal_screening_job.py). CORROBORATION_SOURCES is empty
-in production today, so the gather phase is a no-op here too: these tests pin the
-job's WIRING -- the two-phase transaction shape, the durable-failure guard, the
-idempotency guard, and the chain into screening -- not any external source.
+same idiom as test_start_deal_screening_job.py). These tests pin the job's
+WIRING -- the two-phase transaction shape, the durable-failure guard, the
+idempotency guard, and the chain into screening -- not any external source, so
+the registry is stubbed empty (see _no_registered_sources): the gather phase is
+a guaranteed no-op that never touches the network, independent of what real
+sources are registered (SEC EDGAR is, now) or what claims a deal carries.
 """
 
 import importlib
@@ -15,6 +17,15 @@ from typing import Any
 import pytest
 
 job_module = importlib.import_module("app.jobs.tasks.start_deal_corroboration")
+
+
+@pytest.fixture(autouse=True)
+def _no_registered_sources(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Isolate the wiring tests from the production registry: force the job's
+    gather phase over an empty source list so it makes no external HTTP call
+    regardless of what's registered. A source's own behaviour is covered by its
+    own hermetic test (e.g. test_sec_edgar_source.py)."""
+    monkeypatch.setattr(job_module, "CORROBORATION_SOURCES", [])
 
 
 @pytest.fixture

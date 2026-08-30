@@ -26,11 +26,12 @@ session:
     re-run the deal roll-up so trust statuses reflect the new events. DB-only and
     quick; the network is already done.
 
-CORROBORATION_SOURCES is empty until the per-source adapters register, so today
-Phase B makes zero HTTP calls and this job is a behaviour-preserving pass-through
-that re-rolls-up (a no-op roll-up, since no events were written) and chains into
-screening. The pipeline seam exists without changing behaviour, exactly as the
-in-transaction call it replaces did.
+Phase B runs the registered CORROBORATION_SOURCES (SEC EDGAR today) over the
+deal's corroboratable claims, so it makes HTTP calls only when a deal actually
+has claims a source can speak to; a claim-less deal, or claims no source matches,
+still gathers nothing and this job is a behaviour-preserving pass-through that
+re-rolls-up and chains into screening. Because the network is in Phase B (no txn
+open), a slow or flaky source can never hold the write transaction open.
 
 Same durability posture as the verify/screening jobs: any failure -- an
 exception or the SAQ timeout cancelling this coroutine -- durably records a
@@ -156,8 +157,8 @@ async def _run_corroboration(*, analysis_run_id: str, clerk_org_id: str) -> None
         # The network I/O, held deliberately outside any DB transaction. `session`
         # is passed only so sources can read their primed, in-memory context; a
         # source that issues a real query here breaks the invariant (and would
-        # autobegin a transaction the HTTP round-trips then hold open). Empty
-        # CORROBORATION_SOURCES today -> returns [] without a single HTTP call.
+        # autobegin a transaction the HTTP round-trips then hold open). Returns []
+        # (no HTTP) for a claim-less deal or claims no registered source matches.
         gathered = await gather_corroboration(session, claims, CORROBORATION_SOURCES)
 
         # --- Phase C: write (short transaction) -------------------------------
