@@ -8,6 +8,7 @@ from sqlalchemy.types import DateTime
 
 from app.core.database import Base
 from app.models.deal import Deal
+from app.models.deal_intake_link import DealIntakeLink
 from app.models.organisation import Organisation
 
 # Lifecycle states for a data_source row. One-way pending -> terminal,
@@ -70,6 +71,13 @@ class DataSource(Base):
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    # NULL for org-side uploads (app/api/uploads.py). Set only on rows created
+    # via the public intake flow (app/api/public_uploads.py), to the link that
+    # authorized the upload (P3-10).
+    intake_link_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey(DealIntakeLink.id), nullable=True, index=True
     )
 
     __table_args__ = (

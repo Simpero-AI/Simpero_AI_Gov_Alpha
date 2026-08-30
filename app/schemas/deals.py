@@ -261,6 +261,31 @@ class ScreeningResultResponse(CamelModel):
     created_at: datetime
 
 
+class ScreeningCitedFieldResponse(CamelModel):
+    """One extracted fact for the Initial Screening "Extracted from Materials"
+    panel: a labelled value copied verbatim from a claim, with a human citation
+    string (document · location) so the reviewer can see where it came from."""
+
+    label: str
+    value: str
+    citation: str | None = None
+
+
+class ScreeningMaterialsResponse(CamelModel):
+    """GET /deals/{id}/screening-materials — the compact, cited snapshot that
+    feeds the Initial Screening tab's three panels, derived from the deal's
+    claims spine (build_screening_materials).
+
+    `extractedFields` are the deal's key canonical metrics (latest actual figure
+    each), straight from the verified claims. `highlights` and `riskFlags` are a
+    later LLM-derived layer over the same claims, empty until that lands -- the
+    panels render their own empty state for an empty list."""
+
+    extracted_fields: list[ScreeningCitedFieldResponse]
+    highlights: list[str]
+    risk_flags: list[str]
+
+
 class FormerNameResponse(CamelModel):
     """A previous legal name with the window it applied to.
 
