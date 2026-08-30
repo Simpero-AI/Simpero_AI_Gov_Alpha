@@ -26,9 +26,19 @@ class DealIntakeResponse(Base):
     """
 
     __tablename__ = "deal_intake_response"
+    __table_args__ = {
+        "implicit_returning": False,  # dd_public has INSERT only, no SELECT, on this
+        # table (deliberate -- see this table's migration docstring, same idiom as
+        # human_audit_log's own __table_args__). Postgres requires SELECT on any
+        # column named in RETURNING, so a dd_public-scoped INSERT (P3-11) fails
+        # unless the ORM is told not to ask for it.
+    }
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        server_default=func.gen_random_uuid(),
     )
 
     # Tenant. Integer FK because organisation.id is a serial Integer -- RLS
