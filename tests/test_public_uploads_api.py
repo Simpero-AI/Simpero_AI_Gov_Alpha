@@ -5,7 +5,7 @@ Full app (app.main.app) over httpx.ASGITransport, same pattern as
 tests/test_public_intake_session.py -- session_token is a real, verified
 intake-session JWT (encode_intake_session_jwt), never a stubbed dependency
 override, so RLS is genuinely exercised end to end. The Spaces adapter
-(presign_put, head_object) and the job queue (get_queue) are mocked at their
+(presign_put, head_object_size) and the job queue (get_queue) are mocked at their
 call sites in app.api.public_uploads, mirroring tests/test_uploads_api.py's
 pattern for the authenticated router.
 """
@@ -58,7 +58,10 @@ def mocked_spaces(monkeypatch: pytest.MonkeyPatch):
     build_calls: list[tuple] = []
     presign_calls: list[tuple] = []
     enqueue_calls: list[tuple[str, dict[str, Any]]] = []
-    object_exists = {"value": True}
+    # None => object missing (404 at /complete). A small default size keeps
+    # every existing happy-path test under MAX_UPLOAD_BYTES without having to
+    # know or care about the actual number.
+    object_state: dict[str, int | None] = {"size": 1024}
 
     def fake_build_object_key(org_name, clerk_org_id, deal_id, upload_id, filename):
         build_calls.append((org_name, clerk_org_id, deal_id, upload_id, filename))
@@ -68,8 +71,8 @@ def mocked_spaces(monkeypatch: pytest.MonkeyPatch):
         presign_calls.append((key, ttl_seconds, content_length))
         return f"https://example-spaces.test/{key}?signed=1"
 
-    def fake_head_object(key: str) -> bool:
-        return object_exists["value"]
+    def fake_head_object_size(key: str) -> int | None:
+        return object_state["size"]
 
     class _FakeQueue:
         async def enqueue(self, job_name: str, **kwargs: Any) -> None:
@@ -83,7 +86,7 @@ def mocked_spaces(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr(public_uploads, "build_object_key", fake_build_object_key)
     monkeypatch.setattr(public_uploads, "presign_put", fake_presign_put)
-    monkeypatch.setattr(public_uploads, "head_object", fake_head_object)
+    monkeypatch.setattr(public_uploads, "head_object_size", fake_head_object_size)
     monkeypatch.setattr(public_uploads, "get_queue", lambda: fake_queue)
     monkeypatch.setattr(parse_client, "get_parse_queue", _fail_if_called)
 
@@ -91,7 +94,8 @@ def mocked_spaces(monkeypatch: pytest.MonkeyPatch):
         "build_calls": build_calls,
         "presign_calls": presign_calls,
         "enqueue_calls": enqueue_calls,
-        "set_object_exists": lambda v: object_exists.__setitem__("value", v),
+        "set_object_exists": lambda v: object_state.__setitem__("size", 1024 if v else None),
+        "set_object_size": lambda n: object_state.__setitem__("size", n),
     }
 
 
@@ -182,6 +186,41 @@ async def test_presign_happy_path_under_ceiling(pending_link_with_token, mocked_
     # proof that actually enforces an exact-match ceiling.
     _, _, content_length = mocked_spaces["presign_calls"][0]
     assert content_length == 1024
+
+
+async def test_presign_rejects_oversized_declared_size(pending_link_with_token, mocked_spaces):
+    link = pending_link_with_token
+
+    resp = await _post(
+        "/presigned-url",
+        _session_token(link),
+        {
+            "filename": _ALLOWED_FILENAME,
+            "size": public_uploads.MAX_UPLOAD_BYTES + 1,
+            "declaredSha256": _DECLARED_HASH,
+        },
+    )
+
+    assert resp.status_code == 422
+    assert not mocked_spaces["presign_calls"]
+
+
+async def test_presign_rejects_non_positive_declared_size(pending_link_with_token, mocked_spaces):
+    """P3-15/F9 Fix 2: size is now bound into presign_put's signature, so a
+    zero/negative value would sign a URL no real PUT could ever satisfy --
+    Field(ge=1) rejects it at the schema layer instead of wasting a round
+    trip on an opaque signature-mismatch 403.
+    """
+    link = pending_link_with_token
+
+    resp = await _post(
+        "/presigned-url",
+        _session_token(link),
+        {"filename": _ALLOWED_FILENAME, "size": 0, "declaredSha256": _DECLARED_HASH},
+    )
+
+    assert resp.status_code == 422
+    assert not mocked_spaces["presign_calls"]
 
 
 # --- /complete happy path ---------------------------------------------------
@@ -294,6 +333,33 @@ async def test_complete_without_prior_put_returns_4xx_no_row_no_audit(
     )
 
     assert 400 <= resp.status_code < 500
+    with owner_conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM data_source WHERE id = %s", (upload_id,))
+        assert cur.fetchone()[0] == 0
+    assert not mocked_spaces["enqueue_calls"]
+
+
+async def test_complete_rejects_oversized_stored_object_no_row_no_enqueue(
+    pending_link_with_token, owner_conn, mocked_spaces
+):
+    """P3-15/F9 Fix 1: /complete checks the ACTUAL stored size (what
+    head_object_size reports), not just the client's declared size at
+    /presigned-url -- this is the backstop for whether Spaces (S3-compatible,
+    not S3) actually honoured presign_put's signed content_length. Even if a
+    client uploaded more than it declared and Spaces let it through, this
+    stops a data_source row and ingest job from being created for it.
+    """
+    mocked_spaces["set_object_size"](public_uploads.MAX_UPLOAD_BYTES + 1)
+    link = pending_link_with_token
+    upload_id = str(uuid.uuid4())
+
+    resp = await _post(
+        f"/{upload_id}/complete",
+        _session_token(link),
+        {"filename": _ALLOWED_FILENAME, "declaredSha256": _DECLARED_HASH},
+    )
+
+    assert resp.status_code == 422
     with owner_conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM data_source WHERE id = %s", (upload_id,))
         assert cur.fetchone()[0] == 0

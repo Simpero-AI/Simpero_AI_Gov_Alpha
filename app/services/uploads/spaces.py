@@ -122,6 +122,28 @@ def head_object(key: str) -> bool:
         raise
 
 
+def head_object_size(key: str) -> int | None:
+    """Sibling of head_object -- same HEAD call, but returns the object's
+    actual ContentLength instead of discarding it. None means the object
+    doesn't exist (same 404/NoSuchKey/NotFound treatment as head_object).
+
+    Exists for public_uploads.py's /complete (P3-15/F9): presign_put's
+    signed content_length is only as good as Spaces' SigV4 fidelity, which
+    is an assumption about a third party, not a guarantee. This lets
+    /complete verify what was actually stored, independent of whether the
+    signature was honoured at all.
+    """
+    settings = get_settings()
+    try:
+        response = _client().head_object(Bucket=settings.spaces_bucket, Key=key)
+        return response["ContentLength"]
+    except ClientError as exc:
+        error_code = exc.response.get("Error", {}).get("Code", "")
+        if error_code in ("404", "NoSuchKey", "NotFound"):
+            return None
+        raise
+
+
 def get_json_object(bucket: str, key: str) -> dict:
     """Fetch and parse a JSON object -- the claims envelope
     Simpero_Gov_AI_Services' process_document job writes, per the

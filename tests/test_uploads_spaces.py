@@ -130,6 +130,33 @@ def test_head_object_reraises_non_404_errors(_isolated_client):
         spaces.head_object("forbidden-key")
 
 
+def test_head_object_size_returns_content_length_on_success(_isolated_client):
+    mock_client = _isolated_client
+    mock_client.head_object.return_value = {"ContentLength": 12345}
+
+    assert spaces.head_object_size("some-key") == 12345
+    mock_client.head_object.assert_called_once_with(Bucket=FAKE_BUCKET, Key="some-key")
+
+
+def test_head_object_size_none_on_404(_isolated_client):
+    mock_client = _isolated_client
+    mock_client.head_object.side_effect = ClientError(
+        {"Error": {"Code": "404", "Message": "Not Found"}}, "HeadObject"
+    )
+
+    assert spaces.head_object_size("missing-key") is None
+
+
+def test_head_object_size_reraises_non_404_errors(_isolated_client):
+    mock_client = _isolated_client
+    mock_client.head_object.side_effect = ClientError(
+        {"Error": {"Code": "403", "Message": "Forbidden"}}, "HeadObject"
+    )
+
+    with pytest.raises(ClientError):
+        spaces.head_object_size("forbidden-key")
+
+
 class _FakeStreamingBody:
     """Mimics botocore's StreamingBody: read(n) returns at most n bytes per
     call, never the whole payload in one shot -- exactly what stream_and_hash
