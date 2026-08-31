@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import EmailStr
+from pydantic import EmailStr, field_validator
 
 from app.schemas.common import CamelModel
 
@@ -38,6 +38,17 @@ class AnswerInput(CamelModel):
 
     question_key: str
     answer: str
+
+    @field_validator("answer")
+    @classmethod
+    def _reject_null_bytes(cls, value: str) -> str:
+        # Postgres' jsonb input rejects an embedded null byte outright
+        # (asyncpg raises UntranslatableCharacterError) -- without this, one
+        # in the free-text answer 500s at the DB layer instead of failing
+        # cleanly at the schema boundary, same posture as email's EmailStr.
+        if "\x00" in value:
+            raise ValueError("answer must not contain a null byte")
+        return value
 
 
 class SubmitAnswersRequest(CamelModel):
