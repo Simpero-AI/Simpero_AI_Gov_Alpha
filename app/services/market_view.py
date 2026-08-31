@@ -17,12 +17,62 @@ trust filter are shared with screening_materials so the two surfaces agree.
 """
 
 import uuid
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import Any
 
 from app.models.claim import Claim
 from app.services.entity_resolution.resolved import normalize_name
 from app.services.screening_materials import _STATUS_RANK, _TRUSTED, _citation, _fmt_value
+
+
+def _fold_subjects(
+    claims: Sequence[Claim],
+    dashboard_structure: dict[str, Any] | None,
+    company: str | None,
+) -> tuple[str, dict[str, str]]:
+    """(lead_subject, {casefolded entity: subject}). The parser's grounded
+    organizing pass leads when present; otherwise the most-mentioned entities are
+    their own subjects, and -- when none crosses the threshold -- the deal's own
+    company anchors the lead. Mirrors company_view/screening_materials, kept local
+    (the shared-helper consolidation is a tracked follow-up)."""
+    entity_subject: dict[str, str] = {}
+    order: list[str] = []
+    subjects = (dashboard_structure or {}).get("subjects")
+    if isinstance(subjects, list) and subjects:
+        for subject in subjects:
+            if not isinstance(subject, dict) or not subject.get("name"):
+                continue
+            name = str(subject["name"])
+            order.append(name)
+            for entity in subject.get("entities") or []:
+                if entity and entity.casefold() not in entity_subject:
+                    entity_subject[entity.casefold()] = name
+    else:
+        freq = Counter(c.entity.casefold() for c in claims if c.entity)
+        display: dict[str, str] = {}
+        for claim in claims:
+            if claim.entity:
+                display.setdefault(claim.entity.casefold(), claim.entity)
+        for folded, _count in sorted(
+            ((e, f) for e, f in freq.items() if f >= 2), key=lambda item: (-item[1], item[0])
+        ):
+            entity_subject[folded] = display.get(folded, folded)
+            order.append(entity_subject[folded])
+        if not order and company:
+            entity_subject[company.casefold()] = company
+            order.append(company)
+    lead = order[0] if order else "Other"
+    return lead, entity_subject
+
+
+def _subject_of(entity_subject: dict[str, str], entity: str | None, lead: str) -> str:
+    """The subject a claim folds to. An untagged claim (no entity) is taken to be
+    about the deal's primary subject (the lead)."""
+    if not entity:
+        return lead
+    return entity_subject.get(entity.casefold(), "Other")
 
 
 @dataclass(frozen=True)
@@ -60,7 +110,15 @@ _SIZING_LABELS: tuple[tuple[str, str, frozenset[str], tuple[str, ...]], ...] = (
         frozenset(),
         ("market size", "addressable market", "market value", "industry size"),
     ),
-    ("cagr", "Market Growth (CAGR)", frozenset({"cagr"}), ("market growth rate", "market cagr")),
+    # No bare "cagr" acronym: a standalone "cagr" token fires on "Revenue CAGR"
+    # (a company growth rate, not a market one), so require a market-qualified
+    # phrase for this row.
+    (
+        "cagr",
+        "Market Growth (CAGR)",
+        frozenset(),
+        ("market growth rate", "market cagr", "market growth"),
+    ),
 )
 
 _SIZING_ORDER = {key: i for i, (key, _d, _a, _p) in enumerate(_SIZING_LABELS)}
@@ -81,16 +139,21 @@ def _sizing_label(claim: Claim) -> tuple[str, str] | None:
     return None
 
 
-def _sizing_rank(claim: Claim) -> tuple[int, float]:
-    # Prefer the more corroborated status, then the larger magnitude -- a stable,
-    # deterministic pick when a metric appears several times.
+def _sizing_rank(claim: Claim) -> tuple[int, int, int, float]:
+    # Recency-first, mirroring screening_materials._rank_key: a forecast ranks
+    # below any historical figure (an unmarked period counts as historical), then
+    # a later year, then a more corroborated status, then the larger magnitude
+    # (absolute -- so a market size is never picked by sign). This keeps a stale
+    # larger TAM from beating a more current one.
+    is_historical = 0 if claim.period_kind in ("E", "P") else 1
+    year = claim.period_year if claim.period_year is not None else -1
     normalized = claim.value.get("normalized") if isinstance(claim.value, dict) else None
     magnitude = (
-        normalized
+        abs(normalized)
         if isinstance(normalized, (int, float)) and not isinstance(normalized, bool)
         else float("-inf")
     )
-    return (_STATUS_RANK.get(claim.status, 0), magnitude)
+    return (is_historical, year, _STATUS_RANK.get(claim.status, 0), magnitude)
 
 
 def _qual_fact(claim: Claim, filenames: Mapping[uuid.UUID, str]) -> MarketFact:
@@ -111,9 +174,17 @@ def _qual_sort(fact: MarketFact) -> tuple[int, str]:
     return (-_STATUS_RANK.get(fact.status, 0), fact.value.lower())
 
 
-def build_market_view(claims: Sequence[Claim], *, filenames: Mapping[uuid.UUID, str]) -> MarketView:
+def build_market_view(
+    claims: Sequence[Claim],
+    *,
+    filenames: Mapping[uuid.UUID, str],
+    dashboard_structure: dict[str, Any] | None = None,
+    company: str | None = None,
+) -> MarketView:
     """Curate the deal's claims into the Market tab's view. Only trust-earned
     claims are shown; a section with none comes back empty."""
+    lead_subject, entity_subject = _fold_subjects(claims, dashboard_structure, company)
+
     sizing_best: dict[str, tuple[Claim, str]] = {}
     definition: list[MarketFact] = []
     competition: list[MarketFact] = []
@@ -121,15 +192,26 @@ def build_market_view(claims: Sequence[Claim], *, filenames: Mapping[uuid.UUID, 
     for claim in claims:
         if claim.status not in _TRUSTED:
             continue
+        if _fmt_value(claim.value) == "—":
+            continue
 
         if claim.claim_kind == "qualitative":
+            # Qualitative market facts are deliberately NOT subject-filtered: a
+            # market_definition fact is about the market (its entity is often "the
+            # market", not the target) and a competitive_position fact is ABOUT a
+            # competitor -- scoping either to the target's lead subject would drop
+            # exactly the rows these sections exist to show.
             if claim.assertion_class == "market_definition":
                 definition.append(_qual_fact(claim, filenames))
             elif claim.assertion_class == "competitive_position":
                 competition.append(_qual_fact(claim, filenames))
             continue
 
-        if _fmt_value(claim.value) == "—":
+        # A single sizing figure wins per key, so a competitor's TAM must not
+        # displace the target's. Keep an unmapped ("Other") or lead-subject
+        # figure; drop one whose entity resolves to a NAMED non-lead subject.
+        subject = _subject_of(entity_subject, claim.entity, lead_subject)
+        if subject != lead_subject and subject != "Other":
             continue
         keyed = _sizing_label(claim)
         if keyed is None:

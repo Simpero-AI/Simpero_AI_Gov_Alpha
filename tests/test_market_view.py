@@ -20,6 +20,8 @@ def _claim(
     status: str = "verified",
     claim_kind: str | None = None,
     assertion_class: str | None = None,
+    period_year: int | None = None,
+    period_kind: str | None = None,
     kind: str = "pdf",
     page: int | None = 1,
     data_source_id: uuid.UUID | None = None,
@@ -30,6 +32,8 @@ def _claim(
         attribute_raw=attribute_raw,
         claim_kind=claim_kind,
         assertion_class=assertion_class,
+        period_year=period_year,
+        period_kind=period_kind,
         value={
             "raw": raw if raw is not None else str(normalized),
             "normalized": normalized,
@@ -128,3 +132,90 @@ def test_empty_deal_yields_empty_view():
     assert view.sizing == []
     assert view.market_definition == []
     assert view.competitive_position == []
+
+
+def test_a_competitors_sizing_figure_does_not_win_the_slot():
+    # A named competitor subject's TAM must not displace the target's; the
+    # unmapped/lead figure is kept, the competitor's dropped.
+    claims = [
+        _claim(
+            attribute_raw="Total Addressable Market",
+            normalized=100_000_000,
+            entity="AcmeCo",
+            period_year=2024,
+        ),
+        _claim(
+            attribute_raw="Total Addressable Market",
+            normalized=900_000_000,
+            entity="Rival Corp",
+            period_year=2024,
+        ),
+    ]
+    structure = {
+        "subjects": [
+            {"name": "AcmeCo", "entities": ["AcmeCo"]},
+            {"name": "Rival Corp", "entities": ["Rival Corp"]},
+        ]
+    }
+
+    view = build_market_view(claims, filenames={}, dashboard_structure=structure, company="AcmeCo")
+
+    assert [f.value for f in view.sizing] == ["$100.00M"]
+
+
+def test_a_qualitative_market_fact_with_no_text_does_not_show_an_empty_row():
+    claims = [
+        _qual("", "market_definition"),
+        _qual("The market is highly fragmented.", "market_definition"),
+    ]
+
+    view = build_market_view(claims, filenames={}, company="AcmeCo")
+
+    assert [f.value for f in view.market_definition] == ["The market is highly fragmented."]
+
+
+def test_a_competitive_position_fact_about_a_competitor_is_still_shown():
+    # competitive_position is ABOUT competitors, so the subject filter must not
+    # drop it even though its entity is not the target.
+    claims = [
+        _qual("Rival Corp leads with a 40% share.", "competitive_position", entity="Rival Corp"),
+    ]
+    structure = {"subjects": [{"name": "AcmeCo", "entities": ["AcmeCo"]}]}
+
+    view = build_market_view(claims, filenames={}, dashboard_structure=structure, company="AcmeCo")
+
+    assert [f.value for f in view.competitive_position] == ["Rival Corp leads with a 40% share."]
+
+
+def test_a_bare_revenue_cagr_is_not_classified_as_market_growth():
+    # "Revenue CAGR" is a company growth rate, not a market one; only a
+    # market-qualified label lands in the Market Growth (CAGR) row.
+    claims = [
+        _claim(attribute_raw="Revenue CAGR", normalized=18.0, value_type="percent"),
+    ]
+
+    view = build_market_view(claims, filenames={}, company="AcmeCo")
+
+    assert view.sizing == []
+
+
+def test_market_cagr_is_classified_and_latest_period_wins():
+    claims = [
+        _claim(
+            attribute_raw="Market CAGR",
+            normalized=12.0,
+            value_type="percent",
+            period_year=2021,
+        ),
+        _claim(
+            attribute_raw="Market CAGR",
+            normalized=9.0,
+            value_type="percent",
+            period_year=2024,
+        ),
+    ]
+
+    view = build_market_view(claims, filenames={}, company="AcmeCo")
+
+    # Later year wins the single CAGR slot, not the larger stale figure.
+    assert [(f.label, f.value) for f in view.sizing] == [("Market Growth (CAGR)", "9%")]

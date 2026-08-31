@@ -441,22 +441,27 @@ async def get_deal_market(
     if deal is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
 
-    claims = list((await db.execute(select(Claim).where(Claim.deal_id == deal_id))).scalars().all())
+    # Deterministic row order for the exact-tie sizing tiebreak, same as the
+    # company route.
+    claims = list(
+        (await db.execute(select(Claim).where(Claim.deal_id == deal_id).order_by(Claim.id)))
+        .scalars()
+        .all()
+    )
     filenames = {ds.id: ds.filename for ds in await DataSourceRepo(db).list_for_deal(deal_id)}
 
-    view = build_market_view(claims, filenames=filenames)
+    view = build_market_view(
+        claims,
+        filenames=filenames,
+        dashboard_structure=deal.dashboard_structure,
+        company=deal.name,
+    )
 
     def _facts(facts: list) -> list[MarketFactResponse]:
-        return [
-            MarketFactResponse(
-                label=f.label,
-                value=f.value,
-                citation=f.citation,
-                status=f.status,
-                entity=f.entity,
-            )
-            for f in facts
-        ]
+        # CamelModel sets from_attributes=True and the field names match, so
+        # model_validate copies MarketFact -> MarketFactResponse without a
+        # hand-maintained field list.
+        return [MarketFactResponse.model_validate(f) for f in facts]
 
     return MarketViewResponse(
         sizing=_facts(view.sizing),
