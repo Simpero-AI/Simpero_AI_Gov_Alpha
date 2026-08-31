@@ -92,6 +92,26 @@ class DashboardStatsResponse(CamelModel):
     dd_completion_pct: DdCompletionStat
 
 
+# The three states the Live Pipeline grid routes on (P3-06, F4/D3), NOT the
+# four deal_intake_link statuses. Anything that is not live-and-waiting or
+# actually-submitted -- no link, revoked, expired, or still stored `pending`
+# past its expires_at -- collapses to "none" and routes exactly like a deal
+# that never had a link. See compute_pipeline_intake_status.
+IntakePipelineStatus = Literal["none", "pending", "submitted"]
+# Cross-repo contract, enforced by nothing but this comment: the Web half is
+# `LivePipelineRow` in Simpero_AI_Gov_Web/src/shared/dealsListPipeline.ts,
+# whose member list must stay character-identical to this Literal. As of this
+# change that type stops at `agentStatus` and has no `intakeStatus` at all --
+# on `staging` and on the P4/P5 branch alike -- even though
+# Simpero_AI_Gov_Web/src/api/intakeLink.ts already documents the consumer
+# side ("Callers only enable this query once `intakeStatus === 'submitted'`").
+# Adding a field to a JSON response is non-breaking under TypeScript's
+# structural typing, so nothing in Web breaks when this lands; but P5-07's
+# conditional grid routing cannot be written until that shared type gains
+# `intakeStatus: "none" | "pending" | "submitted";`. Tracked as a Web-side
+# follow-up, not a blocker here.
+
+
 class LivePipelineRowResponse(CamelModel):
     deal_id: str
     name: str
@@ -109,6 +129,7 @@ class LivePipelineRowResponse(CamelModel):
     metric_discrepancy_fields: list[str] | None
 
     agent_status: DealStatusResponse
+    intake_status: IntakePipelineStatus
 
 
 class DealRowResponse(CamelModel):
@@ -303,6 +324,21 @@ class MarketFactResponse(CamelModel):
     entity: str | None = None
 
 
+class CompanyFactResponse(CamelModel):
+    """One Business Overview fact copied from the claims spine (build_company_view):
+    a company-identity value (sector/HQ/headcount/founded) or a qualitative
+    assertion verbatim. `label` is the field name for a fact, or the entity the
+    assertion is about; `status` is the trust status ("verified"/"cited"/... , or
+    "derived" for the deal-profile sector/HQ) so the tab can badge it; `citation`
+    is the human "file · p.N" string, null when unlocatable (or derived)."""
+
+    label: str
+    value: str
+    citation: str | None = None
+    status: str
+    entity: str | None = None
+
+
 class MarketViewResponse(CamelModel):
     """GET /deals/{id}/market — the Market tab's claims-driven content: numeric
     market sizing recovered by label, plus the qualitative market-definition and
@@ -314,6 +350,23 @@ class MarketViewResponse(CamelModel):
     sizing: list[MarketFactResponse]
     market_definition: list[MarketFactResponse]
     competitive_position: list[MarketFactResponse]
+
+
+class CompanyViewResponse(CamelModel):
+    """GET /deals/{id}/company — the Business Overview tab's claims-driven content:
+    company-identity facts (sector/HQ from the deal profile, headcount/founded by
+    label), plus qualitative assertions grouped by kind -- overview
+    (operating_model), risks (risk_or_dependency), commercial (commercial_terms),
+    related_parties (related_party), plans (plan_or_commitment). Each list is
+    empty when the deal has no backing claims (the tab renders "information not
+    available"); never 404s for a claim-less deal."""
+
+    facts: list[CompanyFactResponse]
+    overview: list[CompanyFactResponse]
+    risks: list[CompanyFactResponse]
+    commercial: list[CompanyFactResponse]
+    related_parties: list[CompanyFactResponse]
+    plans: list[CompanyFactResponse]
 
 
 class FormerNameResponse(CamelModel):

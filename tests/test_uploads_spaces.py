@@ -81,9 +81,34 @@ def test_presign_put_calls_generate_presigned_url_with_right_params(_isolated_cl
     )
 
 
+def test_presign_put_with_content_length_adds_it_to_params(_isolated_client):
+    """The authenticated app/api/uploads.py path never passes content_length
+    -- this call shape is exercised only by public_uploads.py (P3-15/F9).
+    See tests/test_presign_content_length.py for proof this actually binds
+    into the signature, not just the call shape.
+    """
+    mock_client = _isolated_client
+    mock_client.generate_presigned_url.return_value = "https://example.com/signed"
+
+    spaces.presign_put("acme-org_abc/deal/upload-file.pdf", ttl_seconds=600, content_length=1024)
+
+    mock_client.generate_presigned_url.assert_called_once_with(
+        "put_object",
+        Params={
+            "Bucket": FAKE_BUCKET,
+            "Key": "acme-org_abc/deal/upload-file.pdf",
+            "ContentLength": 1024,
+        },
+        ExpiresIn=600,
+    )
+
+
 def test_head_object_true_on_success(_isolated_client):
     mock_client = _isolated_client
-    mock_client.head_object.return_value = {}
+    # Real HeadObject responses always include ContentLength; this mock
+    # includes it so it stays realistic now that head_object delegates to
+    # head_object_size, which reads that key.
+    mock_client.head_object.return_value = {"ContentLength": 1024}
 
     assert spaces.head_object("some-key") is True
     mock_client.head_object.assert_called_once_with(Bucket=FAKE_BUCKET, Key="some-key")
@@ -106,6 +131,33 @@ def test_head_object_reraises_non_404_errors(_isolated_client):
 
     with pytest.raises(ClientError):
         spaces.head_object("forbidden-key")
+
+
+def test_head_object_size_returns_content_length_on_success(_isolated_client):
+    mock_client = _isolated_client
+    mock_client.head_object.return_value = {"ContentLength": 12345}
+
+    assert spaces.head_object_size("some-key") == 12345
+    mock_client.head_object.assert_called_once_with(Bucket=FAKE_BUCKET, Key="some-key")
+
+
+def test_head_object_size_none_on_404(_isolated_client):
+    mock_client = _isolated_client
+    mock_client.head_object.side_effect = ClientError(
+        {"Error": {"Code": "404", "Message": "Not Found"}}, "HeadObject"
+    )
+
+    assert spaces.head_object_size("missing-key") is None
+
+
+def test_head_object_size_reraises_non_404_errors(_isolated_client):
+    mock_client = _isolated_client
+    mock_client.head_object.side_effect = ClientError(
+        {"Error": {"Code": "403", "Message": "Forbidden"}}, "HeadObject"
+    )
+
+    with pytest.raises(ClientError):
+        spaces.head_object_size("forbidden-key")
 
 
 class _FakeStreamingBody:

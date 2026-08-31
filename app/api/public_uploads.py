@@ -2,6 +2,7 @@ import logging
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,7 +17,7 @@ from app.repo.DataSourceRepo import DataSourceRepo
 from app.repo.HumanAuditRepo import HumanAuditRepo
 from app.schemas.public_uploads import PublicCompleteRequest, PublicPresignRequest
 from app.schemas.uploads import CompleteResponse, PresignResponse
-from app.services.uploads.spaces import build_object_key, head_object, presign_put
+from app.services.uploads.spaces import build_object_key, head_object_size, presign_put
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +120,9 @@ async def create_presigned_url(
     storage_key = build_object_key(
         org_name, link.clerk_org_id, link.deal_id, upload_id, body.filename
     )
-    presigned_url = presign_put(storage_key, ttl_seconds=_PRESIGN_TTL_SECONDS)
+    presigned_url = presign_put(
+        storage_key, ttl_seconds=_PRESIGN_TTL_SECONDS, content_length=body.size
+    )
 
     return PresignResponse(
         upload_id=upload_id, presigned_url=presigned_url, storage_key=storage_key
@@ -133,7 +136,7 @@ async def complete_upload(
     request: Request,
     session_and_link: tuple[AsyncSession, DealIntakeLink] = Depends(get_public_session_db),
     claims: IntakeSessionClaims = Depends(_decode_claims),
-) -> CompleteResponse:
+) -> CompleteResponse | JSONResponse:
     db, link = session_and_link
     org_name = await _org_name_for_link(db, link)
 
@@ -145,10 +148,57 @@ async def complete_upload(
         org_name, link.clerk_org_id, link.deal_id, upload_id, body.filename
     )
 
-    if not head_object(storage_key):
+    stored_size = head_object_size(storage_key)
+    if stored_size is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Uploaded object not found -- the presigned PUT may not have completed",
+        )
+
+    # Verifies the ACTUAL stored bytes, independent of whether Spaces (S3-
+    # compatible, not S3) honoured presign_put's signed content_length --
+    # that signing is an assumption about a third party's SigV4 fidelity,
+    # not a guarantee (P3-15/F9). Reaching this branch means either a client
+    # bypassed the signature or Spaces isn't enforcing it -- both need a
+    # human to see it, not a silent 422. Checked against MAX_UPLOAD_BYTES
+    # (the invariant that actually matters), not the client-declared size --
+    # PublicCompleteRequest carries no size field, and adding one would just
+    # be another client-supplied number. The oversized object is left
+    # orphaned in the bucket (no delete grant here); stream_and_hash's own
+    # max_bytes remains the ingest-time backstop regardless.
+    if stored_size > MAX_UPLOAD_BYTES:
+        logger.error(
+            "object %s exceeds the %d byte upload limit (actual size: %d)",
+            storage_key,
+            MAX_UPLOAD_BYTES,
+            stored_size,
+        )
+        # Reaching this branch means either a client bypassed presign_put's
+        # signature or Spaces isn't honouring it -- an abuse signal at least
+        # as notable as intake_email_attempt_failed, so it gets its own audit
+        # row (P3-13 will review this surface). Returning a Response directly
+        # here (never raising) for the same reason create_intake_session does
+        # (see that function's own comment): raising would propagate into
+        # get_public_session_db's generator at its `yield`, and
+        # session.begin()'s exception-exit path would roll back this audit
+        # write along with everything else in the transaction.
+        await HumanAuditRepo(db).append(
+            {
+                "org_id": link.org_id,
+                "actor_id": None,
+                "actor_email": claims.email,
+                "event_type": "intake_document_rejected",
+                "deal_id": link.deal_id,
+                "payload": {"storage_key": storage_key, "actual_size": stored_size},
+                "ip_address": ip_address,
+                "user_agent": user_agent,
+            }
+        )
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            content={
+                "detail": f"Uploaded file exceeds the {MAX_UPLOAD_BYTES} byte (10 MB) upload limit"
+            },
         )
 
     # The real ceiling enforcement (advisory-locked) -- /presigned-url's own

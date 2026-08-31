@@ -64,8 +64,8 @@ def mocked_spaces(monkeypatch: pytest.MonkeyPatch):
         build_calls.append((org_name, clerk_org_id, deal_id, upload_id, filename))
         return f"{org_name}-{clerk_org_id}/{deal_id}/{upload_id}-{filename}"
 
-    def fake_presign_put(key, ttl_seconds):
-        presign_calls.append((key, ttl_seconds))
+    def fake_presign_put(key, ttl_seconds, *, content_length=None):
+        presign_calls.append((key, ttl_seconds, content_length))
         return f"https://example-spaces.test/{key}?signed=1"
 
     monkeypatch.setattr(uploads, "build_object_key", fake_build_object_key)
@@ -278,9 +278,13 @@ def test_happy_path_returns_presigned_response_with_matching_key_shape(
     # handler derives the key/URL itself rather than trusting the client.
     assert len(mocked_spaces["build_calls"]) == 1
     assert len(mocked_spaces["presign_calls"]) == 1
-    key_arg, ttl_arg = mocked_spaces["presign_calls"][0]
+    key_arg, ttl_arg, content_length_arg = mocked_spaces["presign_calls"][0]
     assert key_arg == expected_key
     assert ttl_arg == 600
+    # P3-15/F9: the authenticated path stays byte-for-byte unchanged -- it
+    # never binds a content_length into the signature, unlike
+    # public_uploads.py's create_presigned_url.
+    assert content_length_arg is None
 
     # No DB write in this handler.
     with owner_conn.cursor() as cur:

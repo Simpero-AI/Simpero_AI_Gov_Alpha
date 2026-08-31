@@ -1,10 +1,12 @@
 import json
+import logging
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,11 +25,15 @@ from app.repo.DealRepo import DealRepo
 from app.repo.EntityResolutionRepo import EntityResolutionRepo
 from app.repo.HumanAuditRepo import HumanAuditRepo
 from app.repo.IntakeLinkRepo import IntakeLinkRepo
+from app.repo.IntakeResponseRepo import IntakeResponseRepo
 from app.repo.ScreeningResultRepo import ScreeningResultRepo
 from app.repo.SessionRepo import SessionRepo
 from app.repo.UserRepo import UserRepo
+from app.schemas.common import SuccessResponse
 from app.schemas.deals import (
     AvgAiScoreStat,
+    CompanyFactResponse,
+    CompanyViewResponse,
     CreateDealRequest,
     CreateDealResponse,
     DashboardStatsResponse,
@@ -39,6 +45,7 @@ from app.schemas.deals import (
     DealWithLatestMemoResponse,
     EntityResolutionResponse,
     FormerNameResponse,
+    IntakePipelineStatus,
     LatestMemoSessionResponse,
     LivePipelineRowResponse,
     MarketFactResponse,
@@ -53,11 +60,24 @@ from app.schemas.deals import (
     UpdateDealRequest,
     ValueDelta,
 )
-from app.schemas.intake_link import CreateIntakeLinkRequest, CreateIntakeLinkResponse
+from app.schemas.intake_link import (
+    CreateIntakeLinkRequest,
+    CreateIntakeLinkResponse,
+    IntakeLinkStatus,
+    IntakeLinkStatusResponse,
+)
+from app.schemas.intake_response import (
+    IntakeResponseAnswerResponse,
+    IntakeResponseResponse,
+)
+from app.services.company_view import build_company_view
 from app.services.dashboard_stats import compute_month_bounds, compute_pipeline_value_delta
 from app.services.entity_resolution import get_resolver
 from app.services.entity_resolution.types import EntityResolutionError
-from app.services.intake_links import compute_intake_link_effective_status
+from app.services.intake_links import (
+    compute_intake_link_effective_status,
+    compute_pipeline_intake_status,
+)
 from app.services.market_view import build_market_view
 from app.services.memo_summary import derive_pipeline_metrics
 from app.services.pipeline_steps import no_job_steps
@@ -66,7 +86,36 @@ from app.services.screening.rulebook import load_rulebook
 from app.services.screening_insights import derive_screening_insights
 from app.services.screening_materials import build_screening_materials
 
+logger = logging.getLogger(__name__)
+
 _INTAKE_LINK_TTL_DAYS = 7
+
+
+def _parse_answer(entry: Any, response_id: uuid.UUID) -> IntakeResponseAnswerResponse | None:
+    """One entry of `deal_intake_response.answers -> answers[]`, or None if it
+    does not validate.
+
+    Skipping a malformed entry rather than letting ValidationError escape as a
+    500 is about this table's immutability posture, not about the shape being
+    likely to be wrong. `deal_intake_response` carries a blanket
+    `REVOKE UPDATE, DELETE ... FROM dd_app`, so a row that ever lands malformed
+    can never be repaired through the application -- a single bad entry would
+    500 that deal's Step 3 answers panel permanently, with no operational
+    recovery short of a direct owner-role write. Today's writer (P3-11's
+    submit_intake) cannot produce one, so this is defence against a future
+    writer or a manual fix-up, and it logs the response id loudly so a bad row
+    is noticed rather than silently short-rendered -- same idiom as
+    _org_name_for_link in public_intake.py.
+    """
+    try:
+        return IntakeResponseAnswerResponse.model_validate(entry)
+    except ValidationError:
+        logger.error(
+            "intake response %s carries a malformed answers entry; skipping it",
+            response_id,
+        )
+        return None
+
 
 router = APIRouter(prefix="/deals", tags=["deals"])
 
@@ -199,6 +248,11 @@ async def list_pipeline(db: AsyncSession = Depends(get_db)) -> list[LivePipeline
     session_repo = SessionRepo(db)
     deals = await deal_repo.list()
 
+    # One query for the whole grid, not one per row -- see
+    # IntakeLinkRepo.latest_for_deals on why this one is batched while the
+    # two below are not.
+    latest_links = await IntakeLinkRepo(db).latest_for_deals([deal.id for deal in deals])
+
     rows: list[LivePipelineRowResponse] = []
     for deal in deals:
         # ponytail: one query per deal for its latest session, and one more
@@ -216,6 +270,10 @@ async def list_pipeline(db: AsyncSession = Depends(get_db)) -> list[LivePipeline
                 state=deal.status,
                 created_at=deal.created_at,
                 agent_status=await _compute_deal_status(db, deal.id),
+                intake_status=cast(
+                    IntakePipelineStatus,
+                    compute_pipeline_intake_status(latest_links.get(deal.id)),
+                ),
                 **metrics,
             )
         )
@@ -450,23 +508,67 @@ async def get_deal_market(
     )
     filenames = {ds.id: ds.filename for ds in await DataSourceRepo(db).list_for_deal(deal_id)}
 
-    view = build_market_view(
+    market = build_market_view(
         claims,
         filenames=filenames,
         dashboard_structure=deal.dashboard_structure,
         company=deal.name,
     )
 
-    def _facts(facts: list) -> list[MarketFactResponse]:
-        # CamelModel sets from_attributes=True and the field names match, so
-        # model_validate copies MarketFact -> MarketFactResponse without a
-        # hand-maintained field list.
+    def _market_facts(facts: list) -> list[MarketFactResponse]:
         return [MarketFactResponse.model_validate(f) for f in facts]
 
     return MarketViewResponse(
-        sizing=_facts(view.sizing),
-        market_definition=_facts(view.market_definition),
-        competitive_position=_facts(view.competitive_position),
+        sizing=_market_facts(market.sizing),
+        market_definition=_market_facts(market.market_definition),
+        competitive_position=_market_facts(market.competitive_position),
+    )
+
+
+@router.get("/{deal_id}/company", response_model=CompanyViewResponse)
+async def get_deal_company(
+    deal_id: uuid.UUID, db: AsyncSession = Depends(get_db)
+) -> CompanyViewResponse:
+    """The Business Overview tab, derived from the deal's claims spine
+    (build_company_view): company-identity facts (sector/HQ from the deal profile,
+    headcount/founded recovered by label) plus qualitative assertions grouped by
+    kind -- overview (operating_model), risks, commercial terms, related parties,
+    plans -- each with its citation and trust status. Claims-only and LLM-free;
+    RLS-scoped by get_db; returns empty lists (never 404) for a deal with no
+    company claims, so each panel renders its own "information not available"."""
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    # Deterministic row order: build_company_view breaks an exact rank tie between
+    # identity claims by first-seen, so without a stable ORDER BY the displayed
+    # headcount/founded could differ across requests.
+    claims = list(
+        (await db.execute(select(Claim).where(Claim.deal_id == deal_id).order_by(Claim.id)))
+        .scalars()
+        .all()
+    )
+    filenames = {ds.id: ds.filename for ds in await DataSourceRepo(db).list_for_deal(deal_id)}
+
+    company = build_company_view(
+        claims,
+        filenames=filenames,
+        dashboard_structure=deal.dashboard_structure,
+        sector=deal.sector,
+        hq_geography=deal.hq_geography,
+        company=deal.name,
+    )
+
+    def _company_facts(facts: list) -> list[CompanyFactResponse]:
+        return [CompanyFactResponse.model_validate(f) for f in facts]
+
+    return CompanyViewResponse(
+        facts=_company_facts(company.facts),
+        overview=_company_facts(company.overview),
+        risks=_company_facts(company.risks),
+        commercial=_company_facts(company.commercial),
+        related_parties=_company_facts(company.related_parties),
+        plans=_company_facts(company.plans),
     )
 
 
@@ -1007,4 +1109,181 @@ async def create_intake_link(
         token=raw_token,
         status=compute_intake_link_effective_status(link),
         expires_at=link.expires_at,
+    )
+
+
+@router.get("/{deal_id}/intake-link", response_model=IntakeLinkStatusResponse)
+async def get_intake_link(
+    deal_id: uuid.UUID, db: AsyncSession = Depends(get_db)
+) -> IntakeLinkStatusResponse:
+    """P3-02. Status read for the wizard's Step 2 waiting panel (P5-04).
+    Reports the deal's most recent link row via the shared effective-status
+    helper, so a row still stored `pending` past its `expires_at` reads
+    `expired` here even though P3-01's lazy-expire UPDATE has not run yet --
+    this route never performs that write itself. Never returns the token or
+    its hash; see IntakeLinkStatusResponse's field list.
+
+    Deliberately writes NO audit row, decided rather than inherited. The
+    response does carry the external recipient's email, but that address was
+    supplied by this same org when it generated the link (P3-01, which does
+    audit the write) -- reading it back is not a disclosure of anything the
+    caller's org did not already provide. `get_deal`'s `document_access` row
+    exists because that route hands back document content; the read-only
+    neighbours that do not (`get_deal_screening`,
+    `get_deal_screening_materials`, `list_deal_documents`) write nothing, and
+    this follows them. P3-13's audit review covers the unauthenticated public
+    surface, where the actor is not otherwise identified; an org-authenticated
+    status poll behind Clerk is not that surface, and auditing every Step 2
+    waiting-panel poll would bury the intake trail's real entries in noise."""
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    link = await IntakeLinkRepo(db).latest_for_deal(deal_id)
+    if link is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No intake link exists for this deal",
+        )
+
+    return IntakeLinkStatusResponse(
+        status=cast(IntakeLinkStatus, compute_intake_link_effective_status(link)),
+        recipient_email=link.recipient_email,
+        expires_at=link.expires_at,
+        submitted_at=link.submitted_at,
+    )
+
+
+@router.delete("/{deal_id}/intake-link", response_model=SuccessResponse)
+async def revoke_intake_link(
+    deal_id: uuid.UUID,
+    claims: dict[str, Any] = Depends(get_claims),
+    db: AsyncSession = Depends(get_db),
+) -> SuccessResponse:
+    """P3-03. Revokes the deal's live intake link -- `pending` -> `revoked`,
+    the other half of the one legitimate UPDATE path (P3-01's lazy-expire is
+    the first). A revoked row stops satisfying intake_token_lookup's
+    `status = 'pending'` clause, so the recipient's token goes dead at the
+    policy layer on the next request, not merely at this application's.
+
+    Reads through get_pending_for_deal, which locks the row: without the
+    lock, a revoke racing P3-01's lazy-expire (or a second revoke) could
+    both read the same pending row and the loser's UPDATE would hit
+    trg_deal_intake_link_one_way_status's RAISE EXCEPTION as an unhandled
+    500 rather than this handler's clean 409.
+
+    A pending row already past its `expires_at` is deliberately NOT revoked:
+    it is functionally dead already, and flipping it to `revoked` would both
+    write a misleading audit row and take the lazy-expire path away from
+    P3-01, which the plan pins as the only place `status = 'expired'` is ever
+    written. Confirmed in review rather than left open: "dead because nobody
+    acted" and "dead because a human pulled it" are different facts, and the
+    audit trail is the artifact whose whole value is telling them apart. The
+    409 needs a frontend counterpart -- `revokeIntakeLink` in
+    Simpero_AI_Gov_Web/src/api/intakeLink.ts throws a bare `Error` on any
+    non-ok response, so this reaches an org user clicking Revoke on a stale
+    link as a raw JSON detail string. The pattern to copy already exists in
+    that repo (`startDealAnalysis`'s typed `AnalysisApiError` carrying
+    `status`, precisely so callers can branch on documented 409s). Tracked as
+    a Web-side follow-up on P5-04, not a blocker here.
+
+    Documents already uploaded under the link are deliberately left in place:
+    revoking kills the token, not the evidence. Nothing here touches
+    `data_source`, and `list_deal_documents` does not filter on
+    `intake_link_id`, so a file the external party already sent stays visible
+    to the org exactly as before. Recorded as a decision rather than left to
+    be discovered: the recipient's ability to send more is what is being
+    withdrawn, and retracting what they already sent would destroy diligence
+    material the org may have already relied on."""
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    intake_link_repo = IntakeLinkRepo(db)
+    link = await intake_link_repo.get_pending_for_deal(deal_id)
+    if link is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No pending intake link exists for this deal",
+        )
+
+    if compute_intake_link_effective_status(link) != "pending":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This intake link has already expired and cannot be revoked",
+        )
+
+    await intake_link_repo.mark_revoked(link)
+    await db.flush()
+
+    org_id, actor_id, _actor_email, _user_id = await _actor(db, claims)
+    await HumanAuditRepo(db).append(
+        {
+            "org_id": org_id,
+            "actor_id": actor_id,
+            # Deliberately NULL, same call as P3-01's: created_by_user_id on
+            # the link row already identifies the org user (Q4/PO review's
+            # exact event list pins actor_email NULL for this event type).
+            "actor_email": None,
+            "event_type": "intake_link_revoked",
+            "deal_id": deal_id,
+            "payload": {"intake_link_id": str(link.id)},
+        }
+    )
+
+    return SuccessResponse(success=True)
+
+
+@router.get("/{deal_id}/intake-response", response_model=IntakeResponseResponse)
+async def get_intake_response(
+    deal_id: uuid.UUID, db: AsyncSession = Depends(get_db)
+) -> IntakeResponseResponse:
+    """P3-05. The org-side read of what the external party submitted, for
+    Step 3's answers panel (P5-05) and the deal detail page (Q12). 404 until
+    a submit has actually happened -- an intake link merely being pending is
+    not a response.
+
+    The `answers` entries are validated straight out of the stored JSONB by
+    field name: the blob is snake_case (the codebase's convention for stored
+    JSON, see the brief's "Stored shapes"), and CamelModel's
+    populate_by_name=True accepts that while still emitting camelCase on the
+    wire. Anything the blob carries beyond the four documented keys is
+    dropped here rather than passed through, so the wire shape stays exactly
+    what the frontend contract says it is."""
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    response = await IntakeResponseRepo(db).latest_for_deal(deal_id)
+    if response is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No intake response has been submitted for this deal",
+        )
+
+    # isinstance rather than `or {}`: `answers` is typed `dict | None` on the
+    # model, but the column is plain JSONB with no
+    # `jsonb_typeof(answers) = 'object'` CHECK behind it, so a blob stored as a
+    # JSON array or scalar is reachable at the database level. `or {}` would
+    # pass such a value straight through and the `.get` below would raise
+    # AttributeError -- the same permanent 500 on an unrepairable row that
+    # _parse_answer exists to prevent, one level further out.
+    raw = response.answers
+    stored = raw if isinstance(raw, dict) else {}
+    # `or []` rather than a `.get` default: the default only fires on a MISSING
+    # key, so a blob storing `"answers": null` would return None and make this
+    # `for entry in None` -- a 500, same reasoning as the isinstance guard
+    # above. A non-list value here is already safe: a dict or string iterates
+    # into entries that fail validation and are skipped, degrading to an empty
+    # list plus log lines rather than crashing.
+    return IntakeResponseResponse(
+        id=str(response.id),
+        deal_id=str(response.deal_id),
+        respondent_email=response.respondent_email,
+        submitted_at=response.submitted_at,
+        answers=[
+            parsed
+            for entry in (stored.get("answers") or [])
+            if (parsed := _parse_answer(entry, response.id)) is not None
+        ],
     )
