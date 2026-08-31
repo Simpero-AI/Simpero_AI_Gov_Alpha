@@ -126,11 +126,13 @@ class CorroborationSource(Protocol):
 # transaction, so a source's HTTP round-trips never sit inside an open txn.
 #
 # SEC EDGAR only, for now: it is keyless (public data.sec.gov, descriptive
-# User-Agent), needs no resolved entity (matches on claim.entity -> CIK), caches
-# one companyfacts fetch per CIK, and is validated against real companyfacts
-# shapes. The Corporations Canada / Federal Register / trademark adapters stay
-# out until their live endpoints/field-mappings are confirmed and (for the
-# entity-lane ones) SIM-420 resolved entities are populated for a deal.
+# User-Agent) but DOES require a SIM-420 resolved entity -- it keys on the deal's
+# resolved SEC CIK, never on claim.entity (a raw name lookup would common-name
+# match into a sticky false conflict; see sec_edgar's docstring), caches one
+# companyfacts fetch per CIK behind a TTL, and is validated against real
+# companyfacts shapes. The Corporations Canada / Federal Register / trademark
+# adapters stay out until their live endpoints/field-mappings are confirmed and
+# their SIM-420 resolved entities are populated for a deal.
 #
 # Imported here, below CorroborationSource/CorroborationVerdict, not at module
 # top: every adapter imports CorroborationVerdict from this module, so a top
