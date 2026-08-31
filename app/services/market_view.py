@@ -185,7 +185,10 @@ def build_market_view(
     claims are shown; a section with none comes back empty."""
     lead_subject, entity_subject = _fold_subjects(claims, dashboard_structure, company)
 
-    sizing_best: dict[str, tuple[Claim, str]] = {}
+    # key -> (rank, claim, display). The rank leads with a subject priority so the
+    # target's own figure always outranks an "Other" one for the same slot (see
+    # the sizing loop); the remaining elements are _sizing_rank's recency/magnitude.
+    sizing_best: dict[str, tuple[tuple[int, int, int, int, float], Claim, str]] = {}
     definition: list[MarketFact] = []
     competition: list[MarketFact] = []
 
@@ -207,7 +210,7 @@ def build_market_view(
                 competition.append(_qual_fact(claim, filenames))
             continue
 
-        # A single sizing figure wins per key, so a competitor's TAM must not
+        # A single sizing figure wins per key, so a competitor's figure must not
         # displace the target's. Keep an unmapped ("Other") or lead-subject
         # figure; drop one whose entity resolves to a NAMED non-lead subject.
         subject = _subject_of(entity_subject, claim.entity, lead_subject)
@@ -217,9 +220,18 @@ def build_market_view(
         if keyed is None:
             continue
         key, display = keyed
+        # Lead-subject priority leads the rank: the target's own figure always
+        # beats an "Other" one for the same slot. "Other" covers both a legitimate
+        # market-descriptor entity ("the UK market") AND an UNLISTED competitor
+        # that folded to "Other" (one not named in dashboard_structure, so the
+        # filter above can't drop it) -- without this, that competitor's larger or
+        # more recent figure would outrank the target's, since _sizing_rank alone
+        # ignores subject. An "Other" figure still fills a slot the lead lacks.
+        subject_priority = 1 if subject == lead_subject else 0
+        rank = (subject_priority, *_sizing_rank(claim))
         current = sizing_best.get(key)
-        if current is None or _sizing_rank(claim) > _sizing_rank(current[0]):
-            sizing_best[key] = (claim, display)
+        if current is None or rank > current[0]:
+            sizing_best[key] = (rank, claim, display)
 
     sizing = [
         MarketFact(
@@ -229,7 +241,7 @@ def build_market_view(
             status=claim.status,
             entity=claim.entity,
         )
-        for _key, (claim, display) in sorted(
+        for _key, (_rank, claim, display) in sorted(
             sizing_best.items(), key=lambda item: _SIZING_ORDER.get(item[0], 99)
         )
     ]

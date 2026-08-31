@@ -163,6 +163,50 @@ def test_a_competitors_sizing_figure_does_not_win_the_slot():
     assert [f.value for f in view.sizing] == ["$100.00M"]
 
 
+def test_an_unlisted_competitors_sizing_figure_does_not_win_the_slot():
+    # A competitor NOT named in dashboard_structure folds to "Other", so the
+    # named-subject filter can't drop it; its larger, later figure would outrank
+    # the target's if the slot were decided on recency/magnitude alone. The
+    # lead-subject priority must keep the target's own figure in the slot.
+    claims = [
+        _claim(
+            attribute_raw="Total Addressable Market",
+            normalized=100_000_000,
+            entity="AcmeCo",
+            period_year=2023,
+        ),
+        _claim(
+            attribute_raw="Total Addressable Market",
+            normalized=900_000_000,
+            entity="BigRival",  # unlisted -> folds to "Other", not dropped by the filter
+            period_year=2024,
+        ),
+    ]
+    structure = {"subjects": [{"name": "AcmeCo", "entities": ["AcmeCo"]}]}
+
+    view = build_market_view(claims, filenames={}, dashboard_structure=structure, company="AcmeCo")
+
+    assert [f.value for f in view.sizing] == ["$100.00M"]
+
+
+def test_an_unmapped_market_figure_fills_a_slot_the_target_lacks():
+    # The lead-subject priority must not suppress a legitimate "Other" figure
+    # (e.g. a market-descriptor entity) for a slot the target itself never reports.
+    claims = [
+        _claim(
+            attribute_raw="Total Addressable Market",
+            normalized=5_000_000_000,
+            entity="the UK student housing market",  # unmapped -> "Other"
+            period_year=2024,
+        ),
+    ]
+    structure = {"subjects": [{"name": "AcmeCo", "entities": ["AcmeCo"]}]}
+
+    view = build_market_view(claims, filenames={}, dashboard_structure=structure, company="AcmeCo")
+
+    assert [(f.label, f.value) for f in view.sizing] == [("TAM", "$5.00B")]
+
+
 def test_a_qualitative_market_fact_with_no_text_does_not_show_an_empty_row():
     claims = [
         _qual("", "market_definition"),
