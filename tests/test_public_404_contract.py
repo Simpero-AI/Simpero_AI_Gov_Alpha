@@ -101,7 +101,8 @@ async def _get_questions(session_token: str) -> httpx.Response:
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         return await client.get(
-            "/api/public/intake/questions", params={"session_token": session_token}
+            "/api/public/intake/questions",
+            headers={"Authorization": f"Bearer {session_token}"},
         )
 
 
@@ -110,7 +111,7 @@ async def _post_answers(session_token: str) -> httpx.Response:
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         return await client.post(
             "/api/public/intake/answers",
-            params={"session_token": session_token},
+            headers={"Authorization": f"Bearer {session_token}"},
             json={"answers": [{"questionKey": "irrelevant", "answer": "x"}]},
         )
 
@@ -119,7 +120,8 @@ async def _post_submit(session_token: str) -> httpx.Response:
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         return await client.post(
-            "/api/public/intake/submit", params={"session_token": session_token}
+            "/api/public/intake/submit",
+            headers={"Authorization": f"Bearer {session_token}"},
         )
 
 
@@ -128,7 +130,7 @@ async def _post_presigned_url(session_token: str) -> httpx.Response:
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         return await client.post(
             "/api/public/intake/uploads/presigned-url",
-            params={"session_token": session_token},
+            headers={"Authorization": f"Bearer {session_token}"},
             json={"filename": "financials.xlsx", "size": 1024, "declaredSha256": "a" * 64},
         )
 
@@ -138,7 +140,7 @@ async def _post_complete(session_token: str) -> httpx.Response:
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         return await client.post(
             f"/api/public/intake/uploads/{uuid.uuid4()}/complete",
-            params={"session_token": session_token},
+            headers={"Authorization": f"Bearer {session_token}"},
             json={"filename": "financials.xlsx", "declaredSha256": "a" * 64},
         )
 

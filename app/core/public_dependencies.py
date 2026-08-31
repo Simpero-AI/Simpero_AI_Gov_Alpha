@@ -1,6 +1,6 @@
 from collections.abc import AsyncGenerator
 
-from fastapi import HTTPException
+from fastapi import Header, HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -56,11 +56,17 @@ async def get_public_link_db(
 
 
 async def get_public_session_db(
-    session_token: str,
+    authorization: str | None = Header(default=None),
 ) -> AsyncGenerator[tuple[AsyncSession, DealIntakeLink], None]:
     """Used by every route AFTER /session (all P3): /questions, /answers,
     /uploads/*, /submit. The raw link token is never sent again past this
-    point -- only this short-lived, app-signed session token.
+    point -- only this short-lived, app-signed session token, carried as
+    `Authorization: Bearer <token>` (not a query param -- keeps the token
+    out of access logs and referrer headers, and matches what the frontend
+    already sends via publicApiFetch).
+
+    A missing header or one without the `Bearer ` prefix 404s the same as a
+    bad token -- see the AuthenticationError handling below.
 
     decode_intake_session_jwt raising AuthenticationError on a bad token IS
     caught here (self-review follow-up fix, see
@@ -73,6 +79,9 @@ async def get_public_session_db(
     get_public_link_db's own existing pattern of raising HTTPException(404)
     directly, never deferring to the caller.
     """
+    if authorization is None or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=404, detail="Not found")
+    session_token = authorization.removeprefix("Bearer ")
     try:
         claims = decode_intake_session_jwt(session_token)
     except AuthenticationError as exc:

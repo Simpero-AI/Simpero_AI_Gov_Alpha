@@ -54,7 +54,8 @@ async def _get(session_token: str) -> httpx.Response:
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         return await client.get(
-            "/api/public/intake/questions", params={"session_token": session_token}
+            "/api/public/intake/questions",
+            headers={"Authorization": f"Bearer {session_token}"},
         )
 
 

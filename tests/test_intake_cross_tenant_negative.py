@@ -286,7 +286,7 @@ async def test_cross_tenant_via_get_public_link_db(org_a_link, org_b):
 async def test_cross_tenant_via_get_public_session_db(org_a_link, org_b):
     """Same as above, via the session-JWT path."""
     session_token = encode_intake_session_jwt(uuid.UUID(org_a_link["id"]), "respondent@example.com")
-    agen = get_public_session_db(session_token)
+    agen = get_public_session_db(f"Bearer {session_token}")
     session, _link = await agen.__anext__()
     try:
         result = await session.execute(text("SELECT id FROM data_source"))
@@ -326,7 +326,7 @@ async def test_expired_link_404s_via_get_public_session_db(expired_link):
     session_token = encode_intake_session_jwt(
         uuid.UUID(expired_link["id"]), "respondent@example.com"
     )
-    agen = get_public_session_db(session_token)
+    agen = get_public_session_db(f"Bearer {session_token}")
     with pytest.raises(HTTPException) as exc_info:
         await agen.__anext__()
     assert exc_info.value.status_code == 404
@@ -345,7 +345,7 @@ async def test_revoked_link_404s_via_get_public_session_db(revoked_link):
     session_token = encode_intake_session_jwt(
         uuid.UUID(revoked_link["id"]), "respondent@example.com"
     )
-    agen = get_public_session_db(session_token)
+    agen = get_public_session_db(f"Bearer {session_token}")
     with pytest.raises(HTTPException) as exc_info:
         await agen.__anext__()
     assert exc_info.value.status_code == 404
@@ -375,7 +375,7 @@ async def test_submitted_link_asymmetry_through_dependency_functions(submitted_l
     session_token = encode_intake_session_jwt(
         uuid.UUID(submitted_link["id"]), "respondent@example.com"
     )
-    agen = get_public_session_db(session_token)
+    agen = get_public_session_db(f"Bearer {session_token}")
     session, link = await agen.__anext__()
     try:
         assert link.status == "submitted"

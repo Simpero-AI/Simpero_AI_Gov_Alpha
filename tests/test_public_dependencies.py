@@ -119,7 +119,7 @@ async def test_valid_session_jwt_yields_session_and_link_with_gucs_set(
     session_token = encode_intake_session_jwt(
         uuid.UUID(pending_link_with_token["id"]), "respondent@example.com"
     )
-    agen = get_public_session_db(session_token)
+    agen = get_public_session_db(f"Bearer {session_token}")
     session, link = await agen.__anext__()
 
     try:
@@ -145,7 +145,7 @@ async def test_unknown_link_id_in_validly_signed_jwt_404s():
     (phase 1), so get_by_id (not RLS-filtered the same way get_by_token_hash
     is at that exact moment) must still resolve to None correctly."""
     session_token = encode_intake_session_jwt(uuid.uuid4(), "nobody@example.com")
-    agen = get_public_session_db(session_token)
+    agen = get_public_session_db(f"Bearer {session_token}")
     with pytest.raises(HTTPException) as exc_info:
         await agen.__anext__()
     assert exc_info.value.status_code == 404
@@ -161,7 +161,20 @@ async def test_bad_session_token_404s_not_401():
     session token distinguish itself, reopening the enumeration oracle the
     404-only design (brief section 5.2) exists to prevent. Garbage input is
     enough to prove this without depending on real expiry timing."""
-    agen = get_public_session_db("not-a-valid-jwt")
+    agen = get_public_session_db("Bearer not-a-valid-jwt")
+    with pytest.raises(HTTPException) as exc_info:
+        await agen.__anext__()
+    assert exc_info.value.status_code == 404
+
+    await agen.aclose()
+
+
+@pytest.mark.parametrize("authorization", [None, "not-a-bearer-token", "Bearer"])
+async def test_missing_or_malformed_authorization_header_404s(authorization):
+    """No `Authorization` header, or one without the `Bearer ` prefix, must
+    404 the same as any other bad-token path -- never a distinguishable
+    error, per the 404-only design (brief section 5.2)."""
+    agen = get_public_session_db(authorization)
     with pytest.raises(HTTPException) as exc_info:
         await agen.__anext__()
     assert exc_info.value.status_code == 404
@@ -181,7 +194,7 @@ async def test_session_jwt_cannot_read_another_orgs_data_even_by_hand_crafted_gu
     session_token = encode_intake_session_jwt(
         uuid.UUID(pending_link_with_token["id"]), "respondent@example.com"
     )
-    agen = get_public_session_db(session_token)
+    agen = get_public_session_db(f"Bearer {session_token}")
     session, link = await agen.__anext__()
 
     try:
