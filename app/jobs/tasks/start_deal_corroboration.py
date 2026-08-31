@@ -90,7 +90,8 @@ async def start_deal_corroboration(
     timeout cancelling this coroutine -- durably records a terminal `failed`
     status. The write work runs in one transaction (Phase C); when that rolls
     back it takes its own progress markers with it, so without this wrapper the
-    run reverts to `queued` and stays non-terminal, and GET /deals/{id}/status
+    run reverts to the `in_progress` Phase A committed and stays non-terminal,
+    and GET /deals/{id}/status
     reports `processing` forever, leaving the frontend stuck on "loading
     results". Exactly the hang the verify/screening wrappers already prevent.
     CancelledError is caught alongside Exception because SAQ enforces its job
