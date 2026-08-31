@@ -15,6 +15,7 @@ def _claim(
     *,
     attribute: str,
     normalized: float,
+    attribute_raw: str | None = None,
     period_year: int = 2024,
     period_kind: str | None = "A",
     status: str = "verified",
@@ -23,6 +24,7 @@ def _claim(
     return Claim(
         entity=entity,
         attribute=attribute,
+        attribute_raw=attribute_raw,
         period_year=period_year,
         period_kind=period_kind,
         claim_type="numerical",
@@ -90,6 +92,40 @@ def test_render_claim_facts_lists_trusted_canonical_across_years():
         "Revenue (FY2024): $168.00M",
         "Revenue (FY2022): $143.10M",
         "Ebitda (FY2024): $89.40M",
+    ]
+
+
+def test_render_claim_facts_recovers_headline_line_items_from_catchall():
+    # A table-dense CIM whose statement cells never map to a canonical attribute:
+    # the LLM grounding still lists the recovered headline line items across
+    # years, so the insights pass has facts to reason over.
+    claims = [
+        _claim(
+            attribute="operating_metric",
+            attribute_raw="Revenues: | Net Revenues",
+            normalized=300_000_000,
+            period_year=2004,
+        ),
+        _claim(
+            attribute="operating_metric",
+            attribute_raw="Revenues: | Net Revenues",
+            normalized=328_000_000,
+            period_year=2005,
+        ),
+        # No headline label -> stays out of the grounding.
+        _claim(
+            attribute="operating_metric",
+            attribute_raw="Suncoast | Hotel Rooms",
+            normalized=720,
+            period_year=2005,
+        ),
+    ]
+
+    facts = render_claim_facts(claims, dashboard_structure=None)
+
+    assert facts == [
+        "Net Revenue (FY2005): $328.00M",
+        "Net Revenue (FY2004): $300.00M",
     ]
 
 

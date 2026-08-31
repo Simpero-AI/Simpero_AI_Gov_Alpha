@@ -6,13 +6,14 @@ cited."""
 import uuid
 
 from app.models.claim import Claim
-from app.services.screening_materials import build_screening_materials
+from app.services.screening_materials import build_screening_materials, render_claim_facts
 
 
 def _claim(
     *,
     attribute: str,
     normalized: float | None,
+    attribute_raw: str | None = None,
     entity: str = "AcmeCo",
     period_year: int | None = 2023,
     period_kind: str | None = "A",
@@ -29,6 +30,7 @@ def _claim(
     return Claim(
         entity=entity,
         attribute=attribute,
+        attribute_raw=attribute_raw,
         period_year=period_year,
         period_kind=period_kind,
         claim_type="numerical",
@@ -81,11 +83,18 @@ def test_unmarked_historical_year_beats_a_later_estimate():
     assert materials.extracted_fields[0].value == "$70.10M"
 
 
-def test_excludes_untrusted_and_catchall_facts():
+def test_excludes_untrusted_and_unlabelled_catchall_facts():
     claims = [
         _claim(attribute="revenue", normalized=100_000_000, status="proposed"),  # not trusted
-        _claim(attribute="operating_metric", normalized=5, status="verified"),  # catch-all bucket
-        _claim(attribute="core_unmapped", normalized=9, status="verified"),  # catch-all bucket
+        # Catch-all facts whose raw label matches no headline line item -- stay
+        # out of the curated snapshot even though they are verified.
+        _claim(
+            attribute="operating_metric",
+            attribute_raw="Suncoast | Hotel Rooms",
+            normalized=5,
+            status="verified",
+        ),
+        _claim(attribute="core_unmapped", attribute_raw=None, normalized=9, status="verified"),
         _claim(attribute="net_income", normalized=20_700_000, status="cited"),  # trusted, shown
     ]
 
@@ -93,6 +102,185 @@ def test_excludes_untrusted_and_catchall_facts():
 
     assert [f.label for f in materials.extracted_fields] == ["Net Income · FY2023"]
     assert materials.extracted_fields[0].value == "$20.70M"
+
+
+def test_recovers_headline_line_items_from_catchall_buckets():
+    # A table-dense CIM: every statement cell lands in a catch-all bucket with a
+    # verbatim raw label and never a canonical attribute. Headline line items are
+    # recovered by that label, latest ACTUAL per metric, labelled by the clean
+    # display name (not "Operating Metric"), in reading order.
+    claims = [
+        _claim(
+            attribute="operating_metric",
+            attribute_raw="Revenues: | Net Revenues",
+            normalized=300_000_000,
+            period_year=2004,
+        ),
+        _claim(
+            attribute="operating_metric",
+            attribute_raw="Revenues: | Net Revenues",
+            normalized=328_000_000,
+            period_year=2005,
+        ),
+        # A later year, but only an Estimate -- the latest ACTUAL must win.
+        _claim(
+            attribute="operating_metric",
+            attribute_raw="Revenues: | Net Revenues",
+            normalized=385_700_000,
+            period_year=2006,
+            period_kind="E",
+        ),
+        _claim(
+            attribute="core_unmapped",
+            attribute_raw="Adjusted EBITDA",
+            normalized=110_000_000,
+            period_year=2005,
+        ),
+        _claim(
+            attribute="operating_metric",
+            attribute_raw="Net Income",
+            normalized=45_000_000,
+            period_year=2005,
+        ),
+    ]
+
+    materials = build_screening_materials(claims, dashboard_structure=None, filenames={})
+
+    # Net Revenue leads EBITDA leads Net Income (headline reading order); revenue
+    # shows the FY2005 actual, not the FY2006 estimate.
+    assert [f.label for f in materials.extracted_fields] == [
+        "Net Revenue · FY2005",
+        "EBITDA · FY2005",
+        "Net Income · FY2005",
+    ]
+    assert [f.value for f in materials.extracted_fields] == ["$328.00M", "$110.00M", "$45.00M"]
+
+
+def test_a_period_less_fact_still_shows():
+    # A year is NOT required: a CIM whose statement figures carry no
+    # machine-readable year must still populate the panel (labelled by metric
+    # name, no "· FY"). Among several undated values for a metric, the larger
+    # magnitude wins deterministically (see _rank_key).
+    claims = [
+        _claim(
+            attribute="revenue",
+            normalized=300_000_000,
+            period_year=None,
+            period_kind=None,
+        ),
+        _claim(
+            attribute="revenue",
+            normalized=328_000_000,
+            period_year=None,
+            period_kind=None,
+        ),
+    ]
+
+    materials = build_screening_materials(claims, dashboard_structure=None, filenames={})
+
+    assert [f.label for f in materials.extracted_fields] == ["Revenue"]
+    assert materials.extracted_fields[0].value == "$328.00M"
+
+
+def test_subject_folding_is_case_insensitive():
+    # The dashboard names the subject "American Casino"; the claims carry entity
+    # "american casino". They must fold together, or the whole subject's facts
+    # drop to "Other" and the panel comes up empty.
+    claims = [
+        _claim(
+            attribute="revenue", normalized=328_000_000, entity="american casino", period_year=2005
+        ),
+    ]
+    structure = {
+        "subjects": [{"name": "American Casino", "entities": ["American Casino"]}],
+        "metric_order": ["revenue"],
+    }
+
+    materials = build_screening_materials(claims, dashboard_structure=structure, filenames={})
+
+    assert [f.value for f in materials.extracted_fields] == ["$328.00M"]
+
+
+def test_a_recovered_fact_dedupes_against_its_canonical_twin():
+    # The same metric present both canonically (revenue) and as a recovered
+    # catch-all line item ("Net Revenues") keys the same, so it shows ONCE, not as
+    # two near-identical rows.
+    claims = [
+        _claim(attribute="revenue", normalized=168_000_000, period_year=2005),
+        _claim(
+            attribute="operating_metric",
+            attribute_raw="Revenues: | Net Revenues",
+            normalized=168_000_000,
+            period_year=2005,
+        ),
+    ]
+
+    materials = build_screening_materials(claims, dashboard_structure=None, filenames={})
+
+    assert len(materials.extracted_fields) == 1
+    assert materials.extracted_fields[0].value == "$168.00M"
+
+
+def test_a_percent_margin_never_wins_a_dollar_slot():
+    # A catch-all "EBITDA margin" (percent) carries the EBITDA keyword but is not
+    # the dollar figure; it must not be recovered, and the real dollar EBITDA
+    # keeps the slot.
+    claims = [
+        _claim(
+            attribute="core_unmapped",
+            attribute_raw="Adjusted EBITDA margin",
+            normalized=24.5,
+            value_type="percent",
+            unit="%",
+            period_year=2005,
+        ),
+        _claim(
+            attribute="core_unmapped",
+            attribute_raw="Adjusted EBITDA",
+            normalized=110_000_000,
+            period_year=2005,
+        ),
+    ]
+
+    materials = build_screening_materials(claims, dashboard_structure=None, filenames={})
+
+    assert [f.label for f in materials.extracted_fields] == ["EBITDA · FY2005"]
+    assert materials.extracted_fields[0].value == "$110.00M"
+
+
+def test_eps_does_not_masquerade_as_net_income():
+    # Earnings per share is currency-typed too, so value_type can't disqualify it
+    # -- the "per share" phrase must. It is not the Net Income figure.
+    claims = [
+        _claim(
+            attribute="operating_metric",
+            attribute_raw="Net Income Per Share",
+            normalized=2.15,
+            period_year=2005,
+        ),
+    ]
+
+    materials = build_screening_materials(claims, dashboard_structure=None, filenames={})
+
+    assert materials.extracted_fields == []
+
+
+def test_net_income_from_operations_resolves_to_operating_income():
+    # "Net Income from Operations" carries both the Operating Income and Net
+    # Income keywords; exclude phrases resolve it deterministically to Operating
+    # Income (declared first, and Net Income excludes "from operations").
+    claims = [
+        _claim(
+            attribute="operating_metric",
+            attribute_raw="Net Income from Operations",
+            normalized=52_000_000,
+            period_year=2005,
+        ),
+    ]
+
+    materials = build_screening_materials(claims, dashboard_structure=None, filenames={})
+
+    assert [f.label for f in materials.extracted_fields] == ["Operating Income · FY2005"]
 
 
 def test_formats_percent_and_sub_million_currency():
@@ -160,3 +348,248 @@ def test_empty_deal_yields_empty_panels():
     assert materials.extracted_fields == []
     assert materials.highlights == []
     assert materials.risk_flags == []
+
+
+def test_frequency_fallback_folds_mixed_case_entities():
+    # No dashboard structure -> frequency fallback. Two spellings of the same
+    # entity differing only in case must fold to ONE subject, or every claim
+    # lands in "Other" != lead and the panel comes up empty.
+    claims = [
+        _claim(
+            attribute="revenue", normalized=328_000_000, entity="American Casino", period_year=2005
+        ),
+        _claim(
+            attribute="ebitda", normalized=89_000_000, entity="American Casino", period_year=2005
+        ),
+        _claim(
+            attribute="net_income",
+            normalized=45_000_000,
+            entity="american casino",
+            period_year=2005,
+        ),
+        _claim(attribute="ebit", normalized=60_000_000, entity="american casino", period_year=2005),
+    ]
+
+    materials = build_screening_materials(claims, dashboard_structure=None, filenames={})
+
+    labels = [f.label for f in materials.extracted_fields]
+    assert "Revenue · FY2005" in labels
+    assert len(materials.extracted_fields) == 4  # all four fold to the single subject
+
+
+def test_recovers_ampersand_spelled_line_items():
+    # normalize_name collapses "&" to a space, so these "&" renderings must still
+    # match via the ampersand-collapsed include variants.
+    claims = [
+        _claim(
+            attribute="operating_metric",
+            attribute_raw="Total Costs & Expenses",
+            normalized=210_000_000,
+            period_year=2005,
+        ),
+        _claim(
+            attribute="operating_metric",
+            attribute_raw="Selling, general & administrative expenses",
+            normalized=40_000_000,
+            period_year=2005,
+        ),
+        _claim(
+            attribute="operating_metric",
+            attribute_raw="Depreciation & amortization",
+            normalized=25_000_000,
+            period_year=2005,
+        ),
+    ]
+
+    materials = build_screening_materials(claims, dashboard_structure=None, filenames={})
+
+    labels = {f.label for f in materials.extracted_fields}
+    assert "Total Costs & Expenses · FY2005" in labels
+    assert "SG&A · FY2005" in labels
+    assert "D&A · FY2005" in labels
+
+
+def test_undated_canonical_actual_outranks_a_dated_estimate():
+    # period_year is not required, but an undated actual still beats a dated
+    # forecast for the same metric -- a forecast never displaces an actual.
+    claims = [
+        _claim(attribute="revenue", normalized=328_000_000, period_year=None, period_kind=None),
+        _claim(attribute="revenue", normalized=385_000_000, period_year=2006, period_kind="E"),
+    ]
+
+    materials = build_screening_materials(claims, dashboard_structure=None, filenames={})
+
+    assert [f.label for f in materials.extracted_fields] == ["Revenue"]
+    assert materials.extracted_fields[0].value == "$328.00M"
+
+
+def test_non_dollar_typed_and_per_unit_catchall_is_not_recovered():
+    claims = [
+        # A count-typed "Net Revenues" is not the dollar figure -> rejected by type.
+        _claim(
+            attribute="operating_metric",
+            attribute_raw="Net Revenues",
+            normalized=1200,
+            value_type="count",
+            period_year=2005,
+        ),
+        # A per-unit currency metric shares the words but is excluded by "per ".
+        _claim(
+            attribute="operating_metric",
+            attribute_raw="Net Revenue per available room",
+            normalized=180,
+            value_type="currency",
+            period_year=2005,
+        ),
+    ]
+
+    materials = build_screening_materials(claims, dashboard_structure=None, filenames={})
+
+    assert materials.extracted_fields == []
+
+
+def test_magnitude_breaks_ties_for_the_same_metric_and_period():
+    # Two canonical claims for the same metric+year+status: the magnitude tiebreak
+    # picks the larger deterministically (e.g. consolidated over a segment figure).
+    claims = [
+        _claim(attribute="revenue", normalized=100_000_000, period_year=2005),
+        _claim(attribute="revenue", normalized=328_000_000, period_year=2005),
+    ]
+
+    materials = build_screening_materials(claims, dashboard_structure=None, filenames={})
+
+    assert [f.value for f in materials.extracted_fields] == ["$328.00M"]
+
+
+def test_magnitude_tiebreak_uses_absolute_value_for_losses():
+    # Two net-income claims for the same period+status, both losses. "Larger
+    # magnitude" is the bigger ABSOLUTE figure -- the deeper loss -- not the signed
+    # max, which would wrongly prefer the smaller loss.
+    claims = [
+        _claim(attribute="net_income", normalized=-100_000_000, period_year=2005),
+        _claim(attribute="net_income", normalized=-500_000_000, period_year=2005),
+    ]
+
+    materials = build_screening_materials(claims, dashboard_structure=None, filenames={})
+
+    assert [f.value for f in materials.extracted_fields] == ["$-500.00M"]
+
+
+def test_frequency_fallback_counts_case_variants_as_one_entity():
+    # The target is mentioned twice but split across two case spellings (once
+    # each); a competitor is mentioned once. Counting the CASEFOLDED entity lets
+    # the target reach the f>=2 subject threshold and become the lead, so the
+    # competitor's figure is excluded. Counting the raw string would leave every
+    # entity at count 1 -> no subject -> the filter degrades to a no-op and the
+    # competitor's figure leaks into the panel.
+    claims = [
+        _claim(
+            attribute="revenue", normalized=328_000_000, entity="American Casino", period_year=2005
+        ),
+        _claim(
+            attribute="ebitda", normalized=89_000_000, entity="american casino", period_year=2005
+        ),
+        _claim(
+            attribute="net_income", normalized=12_000_000, entity="Rival Corp", period_year=2005
+        ),
+    ]
+
+    materials = build_screening_materials(claims, dashboard_structure=None, filenames={})
+
+    labels = {f.label for f in materials.extracted_fields}
+    assert "Revenue · FY2005" in labels
+    assert "Ebitda · FY2005" in labels
+    # Rival Corp (a single mention) is not the lead subject, so its figure is out.
+    assert len(materials.extracted_fields) == 2
+
+
+def test_recovers_abbreviated_sga_and_dna_line_items():
+    # The raw labels use the bare abbreviations, which normalize to "sg a"/"d a"
+    # and match via whole-token abbreviation matching.
+    claims = [
+        _claim(
+            attribute="operating_metric",
+            attribute_raw="SG&A",
+            normalized=40_000_000,
+            period_year=2005,
+        ),
+        _claim(
+            attribute="operating_metric",
+            attribute_raw="D&A",
+            normalized=25_000_000,
+            period_year=2005,
+        ),
+    ]
+
+    materials = build_screening_materials(claims, dashboard_structure=None, filenames={})
+
+    labels = {f.label for f in materials.extracted_fields}
+    assert "SG&A · FY2005" in labels
+    assert "D&A · FY2005" in labels
+
+
+def test_abbreviation_match_is_token_bounded_not_substring():
+    # "Stand Alone Adjustments" normalizes to "stand alone adjustments", which
+    # CONTAINS the substring "d a" but not the token run ["d", "a"]; it must not be
+    # misclassified as D&A (it is not a headline metric, so it is dropped entirely).
+    claims = [
+        _claim(
+            attribute="operating_metric",
+            attribute_raw="Stand Alone Adjustments",
+            normalized=5_000_000,
+            period_year=2005,
+        ),
+    ]
+
+    materials = build_screening_materials(claims, dashboard_structure=None, filenames={})
+
+    assert materials.extracted_fields == []
+
+
+def test_row_label_is_pinned_to_the_metric_key_not_the_winning_claim():
+    # A canonical revenue claim and a recovered "Net Revenue" catch-all claim both
+    # key on `revenue`. The recovered one is a later year so it wins the figure,
+    # but the row must still read "Revenue" (the metric key's label), not flip to
+    # the winning claim's own "Net Revenue".
+    claims = [
+        _claim(attribute="revenue", normalized=100_000_000, period_year=2022),
+        _claim(
+            attribute="operating_metric",
+            attribute_raw="Net Revenue",
+            normalized=140_000_000,
+            period_year=2023,
+        ),
+    ]
+
+    materials = build_screening_materials(claims, dashboard_structure=None, filenames={})
+
+    assert [f.label for f in materials.extracted_fields] == ["Revenue · FY2023"]
+    assert materials.extracted_fields[0].value == "$140.00M"
+
+
+def test_grounding_dedupes_conflicting_values_for_the_same_metric_and_period():
+    # Two catch-all facts for the same metric AND period but different values must
+    # not both reach the model -- the grounding dedupes on (metric key, period) and
+    # prefers the same figure the panel would (larger magnitude), rather than on
+    # the formatted line (which lets both conflicting values through).
+    claims = [
+        _claim(
+            attribute="operating_metric",
+            attribute_raw="Net Revenue",
+            normalized=328_000_000,
+            period_year=2005,
+        ),
+        _claim(
+            attribute="operating_metric",
+            attribute_raw="Net Revenue",
+            normalized=168_000_000,
+            period_year=2005,
+        ),
+    ]
+
+    lines = render_claim_facts(claims, dashboard_structure=None)
+
+    # Recovered-only facts read under their headline display ("Net Revenue").
+    revenue_lines = [ln for ln in lines if ln.startswith("Net Revenue")]
+    assert len(revenue_lines) == 1
+    assert "$328.00M" in revenue_lines[0]
