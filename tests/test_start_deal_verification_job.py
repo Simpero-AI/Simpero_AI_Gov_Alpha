@@ -237,6 +237,81 @@ async def test_ingests_claims_and_reconciles_same_page_fact(
     assert kwargs["clerk_org_id"] == seeded_org["clerk_org_id"]
 
 
+async def test_reingest_replaces_prior_claims_idempotently(
+    owner_conn, seeded_org, seeded_deal, monkeypatch, mocked_screening_enqueue
+):
+    """SIM-367: a re-analysis re-extracts the same document, so its deterministic
+    claim_refs collide with the first run's on uq_claims_org_data_source_claim_ref.
+    The second verification must REPLACE this data source's prior claims -- tearing
+    down the edge that references them first (FK ondelete=RESTRICT) -- not fail on
+    the collision, which froze the deal's claim count and halted the chain before
+    screening."""
+    org_pk = seeded_org["org_pk"]
+    data_source_id = _seed_data_source(owner_conn, org_pk, seeded_deal, "cim.pdf")
+
+    def parse_jobs() -> list[dict]:
+        return [
+            {
+                "data_source_id": data_source_id,
+                "filename": "cim.pdf",
+                "storage_key": "org/cim.pdf",
+                "job_key": "job-1",
+                "outcome": "parsed",
+                "code": None,
+                "message": None,
+                "bucket": "test-bucket",
+                "key": "claims/cim.json",
+            }
+        ]
+
+    # First analysis: two same-fact claims, so reconcile writes a same_fact edge
+    # between them -- the edge the re-ingest teardown must clear before it can
+    # delete the claims it references.
+    run1 = _seed_parsing_run(owner_conn, org_pk, seeded_deal, parse_jobs())
+    verify1 = _seed_verification_run(owner_conn, org_pk, seeded_deal)
+    envelope1 = {
+        "run_id": run1,
+        "sha256": "a" * 64,
+        "source_file": "cim.pdf",
+        "claims": [_claim_json("c1", page=1), _claim_json("c2", page=5)],
+        "edges": [],
+    }
+    monkeypatch.setattr(job_module, "get_json_object", lambda bucket, key: envelope1)
+    await job_module.start_deal_verification(
+        {}, analysis_run_id=verify1, parsing_run_id=run1, clerk_org_id=seeded_org["clerk_org_id"]
+    )
+    assert _fetch_run(owner_conn, verify1)["status"] == "successful"
+    assert _count_claims(owner_conn, org_pk) == 2
+    assert ("same_fact", "reconciliation") in _fetch_edges(owner_conn, org_pk)
+
+    # Re-analysis: SAME data source, the SAME two claim_refs (deterministic) plus a
+    # third the improved parser now recovers.
+    run2 = _seed_parsing_run(owner_conn, org_pk, seeded_deal, parse_jobs())
+    verify2 = _seed_verification_run(owner_conn, org_pk, seeded_deal)
+    envelope2 = {
+        "run_id": run2,
+        "sha256": "a" * 64,
+        "source_file": "cim.pdf",
+        "claims": [
+            _claim_json("c1", page=1),
+            _claim_json("c2", page=5),
+            _claim_json("c3", page=9, normalized=250.0),
+        ],
+        "edges": [],
+    }
+    monkeypatch.setattr(job_module, "get_json_object", lambda bucket, key: envelope2)
+    await job_module.start_deal_verification(
+        {}, analysis_run_id=verify2, parsing_run_id=run2, clerk_org_id=seeded_org["clerk_org_id"]
+    )
+
+    # The collision no longer fails the run: the prior claims and their edge were
+    # replaced, so the deal reflects the fresh set (3), not a frozen 2 -- and the
+    # chain reaches screening again (a second enqueue), not just the first run's.
+    assert _fetch_run(owner_conn, verify2)["status"] == "successful"
+    assert _count_claims(owner_conn, org_pk) == 3
+    assert len(mocked_screening_enqueue) == 2
+
+
 async def test_promotes_span_resolved_claims_and_holds_the_rest(
     owner_conn, seeded_org, seeded_deal, monkeypatch, mocked_screening_enqueue
 ):

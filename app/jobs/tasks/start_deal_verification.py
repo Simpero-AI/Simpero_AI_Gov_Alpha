@@ -43,7 +43,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from saq.types import Context
-from sqlalchemy import select, text
+from sqlalchemy import delete, or_, select, text
 
 from app.core.database import AsyncSessionLocal
 from app.jobs.queue import get_queue
@@ -289,12 +289,46 @@ async def _run_verification(
             # Inspector renders subjects/metric order instead of hardcoding them.
             dashboard_structures.append(envelope.get("dashboard_structure"))
 
-            # ponytail: insert-only, not idempotent against a redelivered/
-            # retried job (inherits ingest_claims.py's SIM-367 gap -- a crash
-            # mid-ingest followed by a retry will violate
-            # uq_claims_org_data_source_claim_ref on the rows already
-            # inserted). Fix alongside SIM-367's shared ordered-teardown core
-            # if this job's retry behavior ever becomes a real problem.
+            # SIM-367: make re-ingest idempotent. A re-analysis re-extracts the same
+            # document and claim_ref is deterministic, so a plain re-insert collides
+            # on uq_claims_org_data_source_claim_ref and rolls back the ENTIRE
+            # verification -- which froze the deal at the first run's claim count and
+            # halted the chain before screening. Replace this data source's prior
+            # claims instead: delete the edges that reference them first (their FK is
+            # ondelete=RESTRICT), then the claims, then insert the fresh set below --
+            # all inside this one transaction, so a mid-teardown failure re-raises
+            # with nothing half-applied.
+            #
+            # This deliberately does NOT touch corroboration_events: that table is
+            # append-only (REVOKE DELETE) and its claim_id FK RESTRICTs, so a claim a
+            # corroboration pass has attached an event to cannot be torn down.
+            # Harmless today -- corroboration is inert (empty source registry, zero
+            # events) -- but once sources register, this must learn to preserve a
+            # corroborated claim (skip it here and ON CONFLICT DO NOTHING on re-insert)
+            # rather than fail the delete (SIM-367 follow-up).
+            prior_claim_ids = select(Claim.id).where(
+                Claim.org_id == org_id,
+                Claim.deal_id == deal_uuid,
+                Claim.data_source_id == data_source_id,
+            )
+            await session.execute(
+                delete(Edge).where(
+                    Edge.org_id == org_id,
+                    or_(
+                        Edge.from_claim_id.in_(prior_claim_ids),
+                        Edge.to_claim_id.in_(prior_claim_ids),
+                    ),
+                )
+            )
+            await session.execute(
+                delete(Claim).where(
+                    Claim.org_id == org_id,
+                    Claim.deal_id == deal_uuid,
+                    Claim.data_source_id == data_source_id,
+                )
+            )
+            await session.flush()
+
             rows = [
                 _row_from_claim(c, org_id=org_id, deal_id=deal_uuid, data_source_id=data_source_id)
                 for c in claims
