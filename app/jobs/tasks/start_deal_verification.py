@@ -306,14 +306,15 @@ async def _run_verification(
             # events) -- but once sources register, this must learn to preserve a
             # corroborated claim (skip it here and ON CONFLICT DO NOTHING on re-insert)
             # rather than fail the delete (SIM-367 follow-up).
+            # No WHERE org_id -- RLS (SET LOCAL app.org_id above) owns tenant
+            # scoping, same as rollup_stmt below (see CLAUDE.md); deal_id/
+            # data_source_id are the business scoping, not tenant isolation.
             prior_claim_ids = select(Claim.id).where(
-                Claim.org_id == org_id,
                 Claim.deal_id == deal_uuid,
                 Claim.data_source_id == data_source_id,
             )
             await session.execute(
                 delete(Edge).where(
-                    Edge.org_id == org_id,
                     or_(
                         Edge.from_claim_id.in_(prior_claim_ids),
                         Edge.to_claim_id.in_(prior_claim_ids),
@@ -322,7 +323,6 @@ async def _run_verification(
             )
             await session.execute(
                 delete(Claim).where(
-                    Claim.org_id == org_id,
                     Claim.deal_id == deal_uuid,
                     Claim.data_source_id == data_source_id,
                 )
