@@ -127,7 +127,7 @@ async def _post_answers(session_token: str, answer: str) -> httpx.Response:
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         return await client.post(
             "/api/public/intake/answers",
-            params={"session_token": session_token},
+            headers={"Authorization": f"Bearer {session_token}"},
             json={"answers": [{"questionKey": "notes", "answer": answer}]},
         )
 
@@ -136,7 +136,8 @@ async def _post_submit(session_token: str) -> httpx.Response:
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         return await client.post(
-            "/api/public/intake/submit", params={"session_token": session_token}
+            "/api/public/intake/submit",
+            headers={"Authorization": f"Bearer {session_token}"},
         )
 
 
