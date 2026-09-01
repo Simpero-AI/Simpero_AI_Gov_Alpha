@@ -284,6 +284,18 @@ async def test_reingest_replaces_prior_claims_idempotently(
     assert _count_claims(owner_conn, org_pk) == 2
     assert ("same_fact", "reconciliation") in _fetch_edges(owner_conn, org_pk)
 
+    # The first run chained a queued screening run, which stays active. A real
+    # re-analysis only starts once the prior chain is terminal -- uq_analysis_run_active
+    # permits just one active (queued/in_progress) run per deal -- so terminalize it
+    # before seeding the re-analysis's own runs, exactly as the completed prior chain
+    # would have.
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "UPDATE analysis_run SET status = 'successful' "
+            "WHERE deal_id = %s AND status IN ('queued', 'in_progress')",
+            (seeded_deal,),
+        )
+
     # Re-analysis: SAME data source, the SAME two claim_refs (deterministic) plus a
     # third the improved parser now recovers.
     run2 = _seed_parsing_run(owner_conn, org_pk, seeded_deal, parse_jobs())
