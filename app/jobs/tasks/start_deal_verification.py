@@ -43,11 +43,12 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from saq.types import Context
-from sqlalchemy import or_, select, text
+from sqlalchemy import select, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.core.database import AsyncSessionLocal
 from app.jobs.queue import get_queue
-from app.models import Claim, Edge
+from app.models import Claim
 from app.repo.AnalysisRunRepo import AnalysisRunRepo
 from app.repo.DealRepo import DealRepo
 from app.repo.HumanAuditRepo import HumanAuditRepo
@@ -59,6 +60,7 @@ from app.services.corroboration import (
 )
 from app.services.dashboard_structure import merge_dashboard_structures
 from app.services.deal_profile import deal_profile_updates
+from app.services.edge_writer import flush_edges, stage_edge
 from app.services.qualitative_findings import merge_qualitative_findings
 from app.services.reconciliation import reconcile_same_fact
 from app.services.span_promotion import promote_exact_span
@@ -81,6 +83,11 @@ _CONTRACT_PATH = Path(__file__).parents[3] / "contracts" / "claims.schema.json"
 # scripts/ingest_claims.py's _LOCATION_COLUMNS exactly.
 _LOCATION_COLUMNS = ("page", "char_start", "char_end", "bbox", "sheet", "cell_ref", "paragraph")
 
+# Chunk the claim bulk-insert so a single INSERT stays under Postgres' 65535
+# bind-parameter ceiling (~24 columns/row -> 1000 rows leaves generous
+# headroom), mirroring edge_writer._EDGE_INSERT_CHUNK.
+_CLAIM_INSERT_CHUNK = 1000
+
 
 async def _set_org(session, clerk_org_id: str) -> None:
     await session.execute(
@@ -101,47 +108,60 @@ def _validate_claims(claims: list[dict]) -> None:
             raise ValueError(f"claim {i} violates the contract: {errors[0].message}")
 
 
-def _row_from_claim(claim: dict, *, org_id: int, deal_id: UUID, data_source_id: UUID) -> Claim:
-    """One seam-JSON claim -> one Claim ORM row. Same flattening as
-    scripts/ingest_claims.py::_row_from_claim, but deal_id/data_source_id
-    are populated here (the demo script leaves both NULL -- it has no deal
-    or upload to attribute a claim to)."""
+def _claim_values(
+    claim: dict, *, org_id: int, deal_id: UUID, data_source_id: UUID
+) -> dict[str, Any]:
+    """One seam-JSON claim -> a Claim insert-values dict. Same flattening as
+    scripts/ingest_claims.py::_row_from_claim, but deal_id/data_source_id are
+    populated here (the demo script leaves both NULL -- it has no deal or upload
+    to attribute a claim to). Returns a plain dict, not a Claim ORM row, so the
+    ingest can bulk-insert atomically with ON CONFLICT DO NOTHING; the
+    server-generated id/created_at are omitted (not NULLed), so their defaults
+    apply."""
     location = claim["location"]
-    row = Claim(
-        org_id=org_id,
-        deal_id=deal_id,
-        data_source_id=data_source_id,
-        entity=claim["entity"],
-        attribute=claim["attribute"],
-        attribute_raw=claim.get("attribute_raw"),
-        claim_ref=claim.get("claim_ref"),
-        claim_type=claim.get("claim_type", "unknown"),
-        value=claim["value"],
-        period_year=claim.get("period_year"),
-        period_kind=claim.get("period_kind"),
-        status=claim["status"],
-        verification_method=claim.get("verification_method"),
-        section=claim.get("section"),
-        flags=claim.get("flags") or None,
-        claim_kind=claim.get("claim_kind"),
-        assertion_class=claim.get("assertion_class"),
-        kind=location["kind"],
-    )
+    values: dict[str, Any] = {
+        "org_id": org_id,
+        "deal_id": deal_id,
+        "data_source_id": data_source_id,
+        "entity": claim["entity"],
+        "attribute": claim["attribute"],
+        "attribute_raw": claim.get("attribute_raw"),
+        "claim_ref": claim.get("claim_ref"),
+        "claim_type": claim.get("claim_type", "unknown"),
+        "value": claim["value"],
+        "period_year": claim.get("period_year"),
+        "period_kind": claim.get("period_kind"),
+        "status": claim["status"],
+        "verification_method": claim.get("verification_method"),
+        "section": claim.get("section"),
+        "flags": claim.get("flags") or None,
+        "claim_kind": claim.get("claim_kind"),
+        "assertion_class": claim.get("assertion_class"),
+        "kind": location["kind"],
+    }
+    # Always include every location column (None when absent), so a batch of
+    # claims with differing location shapes (a table claim has char offsets, a
+    # missing claim has none) still forms ONE uniform multi-row INSERT --
+    # pg_insert(...).values([...]) requires identical keys across all rows. These
+    # columns are nullable with no server default, so an explicit None is
+    # identical to omitting the column, exactly as the prior ORM add_all did.
     for key in _LOCATION_COLUMNS:
-        if key in location:
-            setattr(row, key, location[key])
-    return row
+        values[key] = location.get(key)
+    return values
 
 
 def _edge_rows_from_envelope(
     envelope: dict, *, org_id: int, ref_to_id: dict[str, UUID], run_id: str
-) -> tuple[list[Edge], list[str]]:
+) -> tuple[list[dict], list[str]]:
     """The parser's own E1-reducer edges (within-page same_fact/contradicts),
-    same validation + canonicalization as scripts/ingest_claims.py."""
+    same validation + canonicalization as scripts/ingest_claims.py. Returns edge
+    insert-values dicts (via edge_writer.stage_edge) so the ingest flushes them
+    through the same idempotent, in-batch-deduped bulk writer the reconcile
+    passes use -- ON CONFLICT DO NOTHING against uq_edges_org_from_to_type."""
     from jsonschema import Draft202012Validator
 
     edge_validator = Draft202012Validator(json.loads(_CONTRACT_PATH.read_text())["$defs"]["edge"])
-    rows: list[Edge] = []
+    rows: list[dict] = []
     skipped: list[str] = []
     for i, e in enumerate(envelope.get("edges", [])):
         errors = sorted(edge_validator.iter_errors(e), key=str)
@@ -162,17 +182,16 @@ def _edge_rows_from_envelope(
         # directional and is NOT reordered.
         if e["type"] == "contradicts" and from_id > to_id:
             from_id, to_id = to_id, from_id
-        rows.append(
-            Edge(
-                org_id=org_id,
-                from_claim_id=from_id,
-                to_claim_id=to_id,
-                type=e["type"],
-                basis=e["basis"],
-                created_by="extraction_reducer",
-                run_id=run_id,
-                metadata_=None,
-            )
+        stage_edge(
+            rows,
+            org_id=org_id,
+            from_claim_id=from_id,
+            to_claim_id=to_id,
+            type_=e["type"],
+            basis=e["basis"],
+            created_by="extraction_reducer",
+            run_id=run_id,
+            metadata_=None,
         )
     return rows, skipped
 
@@ -289,32 +308,48 @@ async def _run_verification(
             # Inspector renders subjects/metric order instead of hardcoding them.
             dashboard_structures.append(envelope.get("dashboard_structure"))
 
-            # SIM-367 (append-only): a re-analysis re-extracts the same document, and
-            # claim_ref is deterministic, so a plain re-insert collides on
-            # uq_claims_org_data_source_claim_ref and rolls back the whole
-            # verification -- which froze the deal's claim count and halted the chain
-            # before screening. Make re-ingest idempotent WITHOUT delete or update:
-            # existing claims keep their rows AND their UUIDs -- which write-once
-            # screening_result evidence_refs cite and corroboration_events RESTRICT-FK
-            # -- so only the newly-recovered claim_refs are inserted. Preserving claim
-            # identity is why this is insert-only rather than a delete-and-replace
-            # teardown. (RLS owns tenant scoping via SET LOCAL app.org_id, same as
-            # rollup_stmt below; deal_id/data_source_id are the business scoping.)
-            rows = [
-                _row_from_claim(c, org_id=org_id, deal_id=deal_uuid, data_source_id=data_source_id)
+            # SIM-367 (append-only + atomic): a re-analysis re-extracts the same
+            # document, and claim_ref is deterministic, so a plain re-insert
+            # collides on uq_claims_org_data_source_claim_ref and rolls back the
+            # whole verification -- which froze the deal's claim count and halted
+            # the chain before screening. Re-ingest is insert-only (never delete
+            # or update): existing claims keep their rows AND their UUIDs -- which
+            # write-once screening_result evidence_refs cite and
+            # corroboration_events RESTRICT-FK -- so only the newly-recovered
+            # claim_refs are inserted. The insert is ATOMIC (ON CONFLICT DO
+            # NOTHING on the unique index, same idiom as
+            # app/services/edge_writer.py): a redelivered or concurrent execution
+            # that reads the same ref as "not present" and races to INSERT is
+            # skipped by the conflict clause rather than aborting the whole
+            # transaction, which a SELECT-then-INSERT guard could not prevent.
+            # RETURNING yields only the rows actually inserted, so the audit count
+            # reflects what was added, not the whole envelope. (RLS owns tenant
+            # scoping via SET LOCAL app.org_id, same as rollup_stmt below;
+            # deal_id/data_source_id are the business scoping.)
+            claim_rows = [
+                _claim_values(c, org_id=org_id, deal_id=deal_uuid, data_source_id=data_source_id)
                 for c in claims
             ]
-            existing_refs = set(
-                await session.scalars(
-                    select(Claim.claim_ref).where(Claim.data_source_id == data_source_id)
+            inserted_count = 0
+            for start in range(0, len(claim_rows), _CLAIM_INSERT_CHUNK):
+                insert_claims = (
+                    pg_insert(Claim)
+                    .values(claim_rows[start : start + _CLAIM_INSERT_CHUNK])
+                    .on_conflict_do_nothing(
+                        index_elements=["org_id", "data_source_id", "claim_ref"]
+                    )
+                    .returning(Claim.id)
                 )
-            )
-            session.add_all([r for r in rows if r.claim_ref not in existing_refs])
-            await session.flush()
+                # RETURNING yields one row per row actually inserted (conflicts are
+                # skipped), so this counts what was added, not the whole envelope.
+                inserted_count += len((await session.scalars(insert_claims)).all())
 
-            # ref_to_id must map every ref this run's edges reference -- both the rows
-            # just inserted and the ones a prior run already ingested (whose ids the
-            # edges point at unchanged).
+            # ref_to_id must map every ref this run's edges reference -- both the
+            # rows just inserted and the ones a prior run already ingested (whose
+            # ids the edges still point at). One query over the data source's
+            # claims covers both; the ON CONFLICT insert above already made the
+            # new rows visible in this transaction, so no separate existence probe
+            # is needed.
             ref_to_id = {
                 ref: cid
                 for ref, cid in (
@@ -329,33 +364,11 @@ async def _run_verification(
             edge_rows, skipped_edges = _edge_rows_from_envelope(
                 envelope, org_id=org_id, ref_to_id=ref_to_id, run_id=parsing_run_id
             )
-            # Parser edges are append-only too: a re-analysis re-derives the same
-            # within-page edges (the kept claims keep their ids), so skip any already
-            # present -- the idempotency reconcile already gets via ON CONFLICT DO
-            # NOTHING (app/services/edge_writer.py).
-            if edge_rows:
-                claim_ids = set(ref_to_id.values())
-                existing_edge_keys = {
-                    (f, t, ty)
-                    for f, t, ty in (
-                        await session.execute(
-                            select(Edge.from_claim_id, Edge.to_claim_id, Edge.type).where(
-                                or_(
-                                    Edge.from_claim_id.in_(claim_ids),
-                                    Edge.to_claim_id.in_(claim_ids),
-                                )
-                            )
-                        )
-                    ).all()
-                }
-                session.add_all(
-                    [
-                        e
-                        for e in edge_rows
-                        if (e.from_claim_id, e.to_claim_id, e.type) not in existing_edge_keys
-                    ]
-                )
-            await session.flush()
+            # Parser edges are idempotent the same way: flush_edges dedupes within
+            # this run's batch (ON CONFLICT resolves a row against committed rows,
+            # not against another row in the same statement) and skips any
+            # (org, from, to, type) a prior run already wrote.
+            await flush_edges(session, edge_rows)
 
             verified_data_source_ids.append(data_source_id)
             job_comments.append(
@@ -363,7 +376,8 @@ async def _run_verification(
                     "dataSourceId": str(data_source_id),
                     "fileName": job.get("filename"),
                     "status": "ingested",
-                    "comment": f"{len(rows)} claim(s) ingested, {len(edge_rows)} edge(s) "
+                    "comment": f"{inserted_count} claim(s) ingested "
+                    f"({len(claim_rows)} in envelope), {len(edge_rows)} edge(s) "
                     f"from extraction, {len(skipped_edges)} edge(s) skipped.",
                 }
             )
