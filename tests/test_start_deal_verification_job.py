@@ -149,6 +149,12 @@ def _fetch_edges(owner_conn, org_pk: int) -> list[tuple[str, str]]:
         return cur.fetchall()
 
 
+def _claim_ids_by_ref(owner_conn, org_pk: int) -> dict[str, str]:
+    with owner_conn.cursor() as cur:
+        cur.execute("SELECT claim_ref, id FROM claims WHERE org_id = %s", (org_pk,))
+        return {ref: str(cid) for ref, cid in cur.fetchall()}
+
+
 async def test_ingests_claims_and_reconciles_same_page_fact(
     owner_conn, seeded_org, seeded_deal, monkeypatch, mocked_screening_enqueue
 ):
@@ -237,15 +243,16 @@ async def test_ingests_claims_and_reconciles_same_page_fact(
     assert kwargs["clerk_org_id"] == seeded_org["clerk_org_id"]
 
 
-async def test_reingest_replaces_prior_claims_idempotently(
+async def test_reingest_appends_new_claims_preserving_ids_idempotently(
     owner_conn, seeded_org, seeded_deal, monkeypatch, mocked_screening_enqueue
 ):
     """SIM-367: a re-analysis re-extracts the same document, so its deterministic
     claim_refs collide with the first run's on uq_claims_org_data_source_claim_ref.
-    The second verification must REPLACE this data source's prior claims -- tearing
-    down the edge that references them first (FK ondelete=RESTRICT) -- not fail on
-    the collision, which froze the deal's claim count and halted the chain before
-    screening."""
+    Re-ingest is APPEND-ONLY: the second verification keeps the prior claims AND
+    their UUIDs (write-once screening_result evidence_refs cite claim.id) and inserts
+    only the newly-recovered ref -- rather than fail on the collision (which froze the
+    deal's claim count and halted the chain before screening) OR churn ids by
+    deleting and re-inserting."""
     org_pk = seeded_org["org_pk"]
     data_source_id = _seed_data_source(owner_conn, org_pk, seeded_deal, "cim.pdf")
 
@@ -265,8 +272,7 @@ async def test_reingest_replaces_prior_claims_idempotently(
         ]
 
     # First analysis: two same-fact claims, so reconcile writes a same_fact edge
-    # between them -- the edge the re-ingest teardown must clear before it can
-    # delete the claims it references.
+    # between them -- which a re-analysis must not duplicate (edges are idempotent).
     run1 = _seed_parsing_run(owner_conn, org_pk, seeded_deal, parse_jobs())
     verify1 = _seed_verification_run(owner_conn, org_pk, seeded_deal)
     envelope1 = {
@@ -283,6 +289,7 @@ async def test_reingest_replaces_prior_claims_idempotently(
     assert _fetch_run(owner_conn, verify1)["status"] == "successful"
     assert _count_claims(owner_conn, org_pk) == 2
     assert ("same_fact", "reconciliation") in _fetch_edges(owner_conn, org_pk)
+    ids_before = _claim_ids_by_ref(owner_conn, org_pk)
 
     # The first run chained a queued screening run, which stays active. A real
     # re-analysis only starts once the prior chain is terminal -- uq_analysis_run_active
@@ -316,12 +323,20 @@ async def test_reingest_replaces_prior_claims_idempotently(
         {}, analysis_run_id=verify2, parsing_run_id=run2, clerk_org_id=seeded_org["clerk_org_id"]
     )
 
-    # The collision no longer fails the run: the prior claims and their edge were
-    # replaced, so the deal reflects the fresh set (3), not a frozen 2 -- and the
-    # chain reaches screening again (a second enqueue), not just the first run's.
+    # The collision no longer fails the run: the two prior refs keep their rows,
+    # only the recovered c3 is inserted, so the deal reflects 3 (not a frozen 2, not
+    # a doubled 5), and the chain reaches screening again (a second enqueue).
     assert _fetch_run(owner_conn, verify2)["status"] == "successful"
     assert _count_claims(owner_conn, org_pk) == 3
     assert len(mocked_screening_enqueue) == 2
+
+    # Append-only preserves claim identity: the kept refs' UUIDs are UNCHANGED, so a
+    # write-once screening_result evidence_ref citing them stays resolvable, and c3
+    # was added.
+    ids_after = _claim_ids_by_ref(owner_conn, org_pk)
+    assert ids_after["c1"] == ids_before["c1"]
+    assert ids_after["c2"] == ids_before["c2"]
+    assert "c3" in ids_after
 
 
 async def test_promotes_span_resolved_claims_and_holds_the_rest(

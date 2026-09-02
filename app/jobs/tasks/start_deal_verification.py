@@ -43,7 +43,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from saq.types import Context
-from sqlalchemy import delete, or_, select, text
+from sqlalchemy import or_, select, text
 
 from app.core.database import AsyncSessionLocal
 from app.jobs.queue import get_queue
@@ -289,58 +289,72 @@ async def _run_verification(
             # Inspector renders subjects/metric order instead of hardcoding them.
             dashboard_structures.append(envelope.get("dashboard_structure"))
 
-            # SIM-367: make re-ingest idempotent. A re-analysis re-extracts the same
-            # document and claim_ref is deterministic, so a plain re-insert collides
-            # on uq_claims_org_data_source_claim_ref and rolls back the ENTIRE
-            # verification -- which froze the deal at the first run's claim count and
-            # halted the chain before screening. Replace this data source's prior
-            # claims instead: delete the edges that reference them first (their FK is
-            # ondelete=RESTRICT), then the claims, then insert the fresh set below --
-            # all inside this one transaction, so a mid-teardown failure re-raises
-            # with nothing half-applied.
-            #
-            # This deliberately does NOT touch corroboration_events: that table is
-            # append-only (REVOKE DELETE) and its claim_id FK RESTRICTs, so a claim a
-            # corroboration pass has attached an event to cannot be torn down.
-            # Harmless today -- corroboration is inert (empty source registry, zero
-            # events) -- but once sources register, this must learn to preserve a
-            # corroborated claim (skip it here and ON CONFLICT DO NOTHING on re-insert)
-            # rather than fail the delete (SIM-367 follow-up).
-            # No WHERE org_id -- RLS (SET LOCAL app.org_id above) owns tenant
-            # scoping, same as rollup_stmt below (see CLAUDE.md); deal_id/
-            # data_source_id are the business scoping, not tenant isolation.
-            prior_claim_ids = select(Claim.id).where(
-                Claim.deal_id == deal_uuid,
-                Claim.data_source_id == data_source_id,
-            )
-            await session.execute(
-                delete(Edge).where(
-                    or_(
-                        Edge.from_claim_id.in_(prior_claim_ids),
-                        Edge.to_claim_id.in_(prior_claim_ids),
-                    ),
-                )
-            )
-            await session.execute(
-                delete(Claim).where(
-                    Claim.deal_id == deal_uuid,
-                    Claim.data_source_id == data_source_id,
-                )
-            )
-            await session.flush()
-
+            # SIM-367 (append-only): a re-analysis re-extracts the same document, and
+            # claim_ref is deterministic, so a plain re-insert collides on
+            # uq_claims_org_data_source_claim_ref and rolls back the whole
+            # verification -- which froze the deal's claim count and halted the chain
+            # before screening. Make re-ingest idempotent WITHOUT delete or update:
+            # existing claims keep their rows AND their UUIDs -- which write-once
+            # screening_result evidence_refs cite and corroboration_events RESTRICT-FK
+            # -- so only the newly-recovered claim_refs are inserted. Preserving claim
+            # identity is why this is insert-only rather than a delete-and-replace
+            # teardown. (RLS owns tenant scoping via SET LOCAL app.org_id, same as
+            # rollup_stmt below; deal_id/data_source_id are the business scoping.)
             rows = [
                 _row_from_claim(c, org_id=org_id, deal_id=deal_uuid, data_source_id=data_source_id)
                 for c in claims
             ]
-            session.add_all(rows)
+            existing_refs = set(
+                await session.scalars(
+                    select(Claim.claim_ref).where(Claim.data_source_id == data_source_id)
+                )
+            )
+            session.add_all([r for r in rows if r.claim_ref not in existing_refs])
             await session.flush()
 
-            ref_to_id = {r.claim_ref: r.id for r in rows if r.claim_ref is not None}
+            # ref_to_id must map every ref this run's edges reference -- both the rows
+            # just inserted and the ones a prior run already ingested (whose ids the
+            # edges point at unchanged).
+            ref_to_id = {
+                ref: cid
+                for ref, cid in (
+                    await session.execute(
+                        select(Claim.claim_ref, Claim.id).where(
+                            Claim.data_source_id == data_source_id
+                        )
+                    )
+                ).all()
+                if ref is not None
+            }
             edge_rows, skipped_edges = _edge_rows_from_envelope(
                 envelope, org_id=org_id, ref_to_id=ref_to_id, run_id=parsing_run_id
             )
-            session.add_all(edge_rows)
+            # Parser edges are append-only too: a re-analysis re-derives the same
+            # within-page edges (the kept claims keep their ids), so skip any already
+            # present -- the idempotency reconcile already gets via ON CONFLICT DO
+            # NOTHING (app/services/edge_writer.py).
+            if edge_rows:
+                claim_ids = set(ref_to_id.values())
+                existing_edge_keys = {
+                    (f, t, ty)
+                    for f, t, ty in (
+                        await session.execute(
+                            select(Edge.from_claim_id, Edge.to_claim_id, Edge.type).where(
+                                or_(
+                                    Edge.from_claim_id.in_(claim_ids),
+                                    Edge.to_claim_id.in_(claim_ids),
+                                )
+                            )
+                        )
+                    ).all()
+                }
+                session.add_all(
+                    [
+                        e
+                        for e in edge_rows
+                        if (e.from_claim_id, e.to_claim_id, e.type) not in existing_edge_keys
+                    ]
+                )
             await session.flush()
 
             verified_data_source_ids.append(data_source_id)
