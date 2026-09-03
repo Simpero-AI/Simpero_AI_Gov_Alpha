@@ -1,32 +1,41 @@
 """SEC EDGAR corroboration source (Epic 12) — the first real CorroborationSource.
 
-Given a financial claim, resolve its company to a CIK and compare the claim's
-figure to EDGAR's XBRL company facts for the same period. It agrees within a
-tight tolerance, disagrees on a material delta (recording both values + the
-delta so the conflict view can show them), and returns no-signal (None) for
-everything it cannot compare -- company not an EDGAR filer, an attribute it does
-not map, no reported fact for that period, or a non-USD unit. Absence is never a
-conflict (handover surfacing rule 9.3.5).
+Given a financial claim, read the deal's SEC CIK from the deal-scoped resolved
+entity (SIM-420) and compare the claim's figure to EDGAR's XBRL company facts for
+the same period. It agrees within a tight tolerance, disagrees on a material delta
+(recording both values + the delta so the conflict view can show them), and
+returns no-signal (None) for everything it cannot compare -- no resolved entity,
+no SEC CIK resolved for the deal, an attribute it does not map, no reported fact
+for that period, or a non-USD unit. Absence is never a conflict (handover
+surfacing rule 9.3.5).
 
-Deterministic by design (handover C-10/C-11): name -> CIK is an exact normalized
-match against EDGAR's company_tickers.json, and the roll-up never sees a
-model-derived value. The fuzzy / name-history AI-propose seam (handover 5.1) and
-former-name resolution are a follow-up, not this first cut.
+Keying on the resolved entity's CIK, NOT on `claim.entity`, is the invariant
+`entity_resolution.resolved` documents: a raw deck string ("Acme", "Acme Inc.")
+looked up by name in a registry produces the common-name false positive that
+would flip a claim to the sticky, unrecoverable `conflicted`. The CIK here is the
+one the SEC resolver already resolved deterministically for the deal; when none
+is resolved, EDGAR simply has nothing to compare and returns None.
 
-NOT registered in app.services.corroboration.CORROBORATION_SOURCES yet: it goes
-live only once the corroboration pass's I/O placement is settled (SIM-253), so a
-network call never sits unresolved inside the verify transaction.
+Registered in app.services.corroboration.CORROBORATION_SOURCES. Because it keys on
+the resolved CIK, a deal with no SEC-resolved entity is a clean no-signal, never a
+name-matched guess.
 """
 
 import logging
+import os
+import time
+import uuid
 from collections.abc import Awaitable, Callable
 from datetime import date
 from typing import Any
 
 import httpx
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.claim import Claim
+from app.models.resolved_entity import REGISTRY_CIK
 from app.services.corroboration import CorroborationVerdict
+from app.services.entity_resolution.resolved import DealEntity, load_resolved_entity
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +43,13 @@ logger = logging.getLogger(__name__)
 # (the corroboration pass) owns cross-call rate-limiting when this is registered.
 _USER_AGENT = "Simpero corroboration (engineering@simpero.com)"
 _TIMEOUT = 10.0
-_COMPANY_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
+# A company's facts change rarely, so they are cached -- but not for the worker's
+# whole life: a company that refiles a restated 10-K/A must become visible without
+# a process restart. Cache entries refresh after this TTL. Env-tunable.
+_CACHE_TTL_S = float(os.getenv("SEC_EDGAR_CACHE_TTL_S", "3600") or "3600")
+# Bound the per-CIK facts cache so a long-running worker screening many deals does
+# not grow it without limit; the oldest entry is evicted past this size. Env-tunable.
+_MAX_CACHED_FACTS = int(os.getenv("SEC_EDGAR_MAX_CACHED_FACTS", "512") or "512")
 _COMPANY_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"
 
 # Canonical claim attribute -> EDGAR us-gaap concept candidates, most-specific
@@ -59,6 +74,7 @@ _CONCEPTS: dict[str, tuple[str, ...]] = {
 _REL_TOLERANCE = 0.005  # 0.5%
 
 Fetch = Callable[[str], Awaitable[Any]]
+Resolve = Callable[[AsyncSession, uuid.UUID], Awaitable["DealEntity | None"]]
 
 
 async def _default_fetch(url: str) -> Any:
@@ -66,10 +82,6 @@ async def _default_fetch(url: str) -> Any:
         resp = await client.get(url)
         resp.raise_for_status()
         return resp.json()
-
-
-def _normalize(name: str) -> str:
-    return " ".join(name.casefold().split())
 
 
 def _claim_usd_value(claim: Claim) -> float | None:
@@ -171,33 +183,41 @@ class SecEdgarSource:
 
     name = "sec_edgar"
 
-    def __init__(self, fetch: Fetch | None = None) -> None:
+    def __init__(self, fetch: Fetch | None = None, resolve: Resolve | None = None) -> None:
         self._fetch = fetch or _default_fetch
-        self._tickers: dict[str, int] | None = (
-            None  # normalized title -> CIK; ambiguous titles dropped
-        )
+        # The deal-scoped resolved entity carries the SEC CIK the resolver already
+        # settled; check() reads the CIK from there, never from claim.entity.
+        # Injectable for tests.
+        self._resolve = resolve or load_resolved_entity
+        # CIK -> (fetched_at, companyfacts | None). run_corroboration calls check()
+        # once PER claim, so without a cache a deal's dozen-plus financial claims
+        # each re-download the same (large) facts file and blow past SEC's
+        # fair-access limit. The TTL bounds staleness so a refiled company is
+        # picked up without a worker restart; a failed/absent fetch is cached too,
+        # so a bad CIK is attempted once per TTL, not once per claim.
+        self._facts: dict[int, tuple[float, dict[str, Any] | None]] = {}
 
-    async def _resolve_cik(self, company_name: str) -> int | None:
-        """Exact normalized-title match against company_tickers.json. Returns a
-        CIK only on an unambiguous single match -- deterministic, never a guess;
-        None when not found or ambiguous (both are no-signal, not a conflict)."""
-        if self._tickers is None:
+    async def _company_facts(self, cik: int) -> dict[str, Any] | None:
+        """This CIK's XBRL company facts, fetched at most once per CIK per
+        _CACHE_TTL_S (see self._facts). A failed/absent fetch is cached as None so
+        a bad or unreachable CIK is attempted once per TTL, not once per claim --
+        best-effort corroboration, and the bound on SEC requests matters more than
+        retrying a transient blip within a single run; the TTL still lets a
+        refiled company refresh without a worker restart."""
+        cached = self._facts.get(cik)
+        if cached is None or (time.monotonic() - cached[0]) > _CACHE_TTL_S:
             try:
-                data = await self._fetch(_COMPANY_TICKERS_URL)
+                facts: dict[str, Any] | None = await self._fetch(_COMPANY_FACTS_URL.format(cik=cik))
             except Exception:
-                logger.exception("EDGAR company_tickers fetch failed; treating as no-signal")
-                return None
-            rows = data.values() if isinstance(data, dict) else (data or [])
-            seen: dict[str, int | None] = {}
-            for row in rows:
-                title = _normalize(str(row.get("title", "")))
-                cik = row.get("cik_str")
-                if not title or not isinstance(cik, int):
-                    continue
-                # Mark a title ambiguous (None) the moment a second CIK claims it.
-                seen[title] = None if title in seen and seen[title] != cik else cik
-            self._tickers = {t: c for t, c in seen.items() if c is not None}
-        return self._tickers.get(_normalize(company_name))
+                logger.exception("EDGAR companyfacts fetch failed for CIK %s; no-signal", cik)
+                facts = None
+            # Bound the cache: evict the oldest entry before adding a new CIK once
+            # at capacity, so a long-running worker cannot grow it without limit.
+            if cik not in self._facts and len(self._facts) >= _MAX_CACHED_FACTS:
+                oldest = min(self._facts, key=lambda c: self._facts[c][0])
+                del self._facts[oldest]
+            self._facts[cik] = (time.monotonic(), facts)
+        return self._facts[cik][1]
 
     async def check(self, db: Any, claim: Claim) -> CorroborationVerdict | None:
         concepts = _CONCEPTS.get(claim.attribute)
@@ -207,15 +227,20 @@ class SecEdgarSource:
         if claim_value is None:
             return None  # nothing comparable (non-USD / non-numeric)
 
-        cik = await self._resolve_cik(claim.entity)
-        if cik is None:
-            return None  # not an EDGAR filer, or ambiguous -> no-signal
-
-        try:
-            facts = await self._fetch(_COMPANY_FACTS_URL.format(cik=cik))
-        except Exception:
-            logger.exception("EDGAR companyfacts fetch failed for CIK %s; no-signal", cik)
+        # Key on the deal's RESOLVED CIK, never on claim.entity (see module
+        # docstring / entity_resolution.resolved): no resolved entity, or no SEC
+        # CIK resolved for it, is a clean no-signal -- never a name-matched guess.
+        resolved = await self._resolve(db, claim.deal_id)
+        if resolved is None:
             return None
+        cik_str = resolved.registry_id(REGISTRY_CIK)
+        if cik_str is None:
+            return None  # SEC has not resolved a CIK for this deal -> no-signal
+        cik = int(cik_str)
+
+        facts = await self._company_facts(cik)
+        if facts is None:
+            return None  # fetch failed/absent -> no-signal
 
         found = _lookup_annual_fact(facts, concepts, claim.period_year)
         if found is None:
