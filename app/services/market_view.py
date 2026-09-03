@@ -107,20 +107,28 @@ class MarketView:
 # "some"/"wholesome" or on a possessive fragment like "Sam's"); a phrase matches
 # only as a contiguous run of whole tokens (so "market size" never fires inside
 # "Supermarket Size"). Ordered by how the sizing funnel reads.
-_SIZING_LABELS: tuple[tuple[str, str, frozenset[str], tuple[str, ...]], ...] = (
-    ("tam", "TAM", frozenset({"tam"}), ("total addressable market",)),
+# Each entry is (key, display, acronyms, phrases, value_type): the value_type a
+# claim must carry to key this slot. A market SIZE is a dollar figure and CAGR is
+# a percent, so the type gates the match -- a "TAM CAGR" percent can never land in
+# the dollar TAM slot (where _sizing_rank, blind to value_type, could otherwise
+# let it overwrite the real dollar TAM). Only a known currency/percent MISMATCH is
+# excluded (see _sizing_label); an untyped or otherwise-typed value still matches.
+_SIZING_LABELS: tuple[tuple[str, str, frozenset[str], tuple[str, ...], str], ...] = (
+    ("tam", "TAM", frozenset({"tam"}), ("total addressable market",), "currency"),
     (
         "sam",
         "SAM",
         frozenset({"sam"}),
         ("serviceable addressable market", "serviceable available market"),
+        "currency",
     ),
-    ("som", "SOM", frozenset({"som"}), ("serviceable obtainable market",)),
+    ("som", "SOM", frozenset({"som"}), ("serviceable obtainable market",), "currency"),
     (
         "market_size",
         "Market Size",
         frozenset(),
         ("market size", "addressable market", "market value", "industry size"),
+        "currency",
     ),
     # No bare "cagr" acronym: a standalone "cagr" token fires on "Revenue CAGR"
     # (a company growth rate, not a market one), so require a market-qualified
@@ -130,10 +138,16 @@ _SIZING_LABELS: tuple[tuple[str, str, frozenset[str], tuple[str, ...]], ...] = (
         "Market Growth (CAGR)",
         frozenset(),
         ("market growth rate", "market cagr", "market growth"),
+        "percent",
     ),
 )
 
-_SIZING_ORDER = {key: i for i, (key, _d, _a, _p) in enumerate(_SIZING_LABELS)}
+_SIZING_ORDER = {key: i for i, (key, _d, _a, _p, _vt) in enumerate(_SIZING_LABELS)}
+
+# value_types that are mutually exclusive for a sizing slot: a dollar figure is
+# never a percent and vice versa. A claim typed one of these that mismatches a
+# label's expected type is skipped; any other type (or none) is allowed through.
+_TYPED_INCOMPATIBLE = frozenset({"currency", "percent"})
 
 # Cap on each qualitative list (market_definition / competitive_position). A
 # claim-dense CIM can surface dozens of competitor/market assertions; the tab
@@ -155,18 +169,28 @@ def _phrase_in(phrase: str, token_list: list[str]) -> bool:
 def _sizing_label(claim: Claim) -> tuple[str, str] | None:
     """The market-size metric a numeric claim names, as (key, display), or None.
     Checks the raw label first (the document's own words), then the canonical
-    attribute."""
+    attribute. A label's expected value_type gates the match (see _SIZING_LABELS),
+    so a percent never keys a dollar-size slot and a dollar never keys CAGR."""
+    claim_vt = claim.value.get("value_type") if isinstance(claim.value, dict) else None
     for source in (claim.attribute_raw, claim.attribute):
         source = source or ""
         norm = normalize_name(source)
         if not norm:
             continue
         token_list = norm.split()
-        # Acronyms must be ALL-CAPS tokens in the ORIGINAL label (TAM/SAM/SOM are
-        # written uppercase); a possessive "Sam's" normalizes to a lowercase "sam"
-        # token, which must NOT be read as SAM.
-        upper_acronyms = {w.casefold() for w in re.findall(r"[A-Za-z]{2,}", source) if w.isupper()}
-        for key, display, acronyms, phrases in _SIZING_LABELS:
+        # Acronyms must be standalone ALL-CAPS tokens in the ORIGINAL label
+        # (TAM/SAM/SOM are written uppercase), EXCLUDING a possessive like "SAM'S"
+        # (a retail comp's revenue line, not Serviceable Addressable Market): the
+        # apostrophe-s marks a possessive noun, not an acronym, in both "Sam's" and
+        # all-caps "SAM'S". The negative lookahead drops the token before that 's.
+        upper_acronyms = {
+            m.group(1).casefold()
+            for m in re.finditer(r"\b([A-Za-z]{2,})\b(?![’'`][sS]\b)", source)
+            if m.group(1).isupper()
+        }
+        for key, display, acronyms, phrases, expected_vt in _SIZING_LABELS:
+            if claim_vt in _TYPED_INCOMPATIBLE and claim_vt != expected_vt:
+                continue
             if (acronyms & upper_acronyms) or any(_phrase_in(p, token_list) for p in phrases):
                 return key, display
     return None

@@ -293,3 +293,45 @@ def test_qualitative_lists_are_capped():
     view = build_market_view(claims, filenames={})
 
     assert len(view.competitive_position) == 12
+
+
+def test_a_percent_tam_cagr_does_not_key_or_displace_the_dollar_tam():
+    """A label pairing a sizing acronym with a growth qualifier ("TAM CAGR",
+    value_type=percent) must not key the dollar TAM slot -- the value_type gate
+    keeps the percent out, so it can never overwrite the real dollar TAM (which
+    _sizing_rank, blind to value_type, would otherwise let it do)."""
+    claims = [
+        _claim(
+            attribute_raw="Total Addressable Market",
+            normalized=5_000_000_000,
+            value_type="currency",
+            period_year=2024,
+        ),
+        _claim(
+            attribute_raw="TAM CAGR ('23-'28E)",
+            normalized=12.0,
+            value_type="percent",
+            period_year=2028,
+            period_kind="E",
+        ),
+    ]
+
+    view = build_market_view(claims, filenames={})
+
+    # The one sizing row is the dollar TAM, not the percent -- the percent never
+    # lands in the TAM slot.
+    assert [f.label for f in view.sizing] == ["TAM"]
+    assert "%" not in view.sizing[0].value
+
+
+def test_all_caps_possessive_acronym_is_not_a_sizing_metric():
+    """An all-caps possessive like "SAM'S CLUB REVENUE" (a retail comp's revenue
+    line) must not false-match the SAM sizing row -- the apostrophe-s marks a
+    possessive noun, not the Serviceable Addressable Market acronym, even all-caps."""
+    claims = [
+        _claim(attribute_raw="SAM'S CLUB REVENUE", normalized=1_000_000, value_type="currency")
+    ]
+
+    view = build_market_view(claims, filenames={})
+
+    assert view.sizing == []
