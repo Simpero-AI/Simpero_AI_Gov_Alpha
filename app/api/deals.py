@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.dependencies import get_claims, get_db
 from app.core.intake_security import sha256_hex
 from app.jobs.queue import get_queue
+from app.jobs.tasks.start_deal_analysis import _PARSE_DEADLINE_PER_DOC_SECONDS
 from app.models.analysis_run import AnalysisRun
 from app.models.claim import Claim
 from app.models.deal import Deal
@@ -932,14 +933,24 @@ async def start_analysis(
     # "simpero" queue -- this app's own SAQ worker, never the "parse" queue
     # (app/jobs/parse_client.py). Explicit timeout/retries/ttl: SAQ's default
     # timeout is 10 seconds, far short of this task's multi-hour fan-out+poll.
+    #
+    # SAQ enforces `timeout` as a hard wall-clock cancel on the whole job
+    # coroutine, independent of the job's own internal poll deadline -- so it MUST
+    # exceed that deadline, or SAQ cancels start_deal_analysis mid-parse,
+    # bypassing its terminal-status write and stranding the run "in_progress"
+    # (the freeze the inner deadline targets, just relocated to the outer cap).
+    # The inner deadline is _PARSE_DEADLINE_PER_DOC_SECONDS per document, so scale
+    # this budget by the document count, with headroom for the job's own
+    # DB/enqueue work; ttl (queue-sit + run lifetime) clears the same worst case.
+    analysis_budget = _PARSE_DEADLINE_PER_DOC_SECONDS * len(usable)
     await get_queue().enqueue(
         "start_deal_analysis",
         analysis_run_id=str(run.id),
         deal_id=str(deal_id),
         clerk_org_id=claims["tenant_id"],
-        timeout=7200,
+        timeout=analysis_budget + 600,
         retries=1,
-        ttl=86400,
+        ttl=max(86400, analysis_budget + 3600),
     )
 
     await HumanAuditRepo(db).append(

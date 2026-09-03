@@ -255,7 +255,14 @@ def test_start_analysis_happy_path(client, owner_conn, seeded_org, seeded_deal, 
     assert job_name == "start_deal_analysis"
     assert kwargs["deal_id"] == seeded_deal
     assert kwargs["clerk_org_id"] == seeded_org["clerk_org_id"]
-    assert kwargs["timeout"] == 7200
+    from app.jobs.tasks.start_deal_analysis import _PARSE_DEADLINE_PER_DOC_SECONDS
+
+    # The SAQ job timeout MUST exceed the job's own inner poll deadline
+    # (_PARSE_DEADLINE_PER_DOC_SECONDS per document, one usable doc here), or SAQ
+    # hard-cancels the job before the deadline fires and strands the run
+    # in_progress -- the freeze the deadline fix targets, relocated to the outer cap.
+    assert kwargs["timeout"] == _PARSE_DEADLINE_PER_DOC_SECONDS + 600
+    assert kwargs["timeout"] > _PARSE_DEADLINE_PER_DOC_SECONDS
     assert kwargs["retries"] == 1
     assert kwargs["ttl"] == 86400
 

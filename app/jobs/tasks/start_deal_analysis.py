@@ -14,7 +14,8 @@ exactly like app/jobs/tasks/ingest_data_source.py (see that module's
 docstring for the full PgBouncer transaction-pooling reasoning).
 
 Unlike that task, this one runs for minutes to hours -- the parser's own
-per-document timeout is 1800s with 2 retries (D8). So this task never holds
+per-document timeout is 7200s with retries=1 (2 attempts, ~14400s worst case;
+see _PARSE_DEADLINE_PER_DOC_SECONDS below). So this task never holds
 one transaction open across the wait: every read/write below opens its own
 short-lived session, commits, and closes *before* the asyncio.sleep, then
 re-issues `SET LOCAL app.org_id` from scratch as the first statement of the
