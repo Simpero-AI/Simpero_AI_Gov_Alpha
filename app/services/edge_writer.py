@@ -36,7 +36,7 @@ def stage_edge(
     basis: str,
     created_by: str,
     run_id: str,
-    metadata_: dict,
+    metadata_: dict | None,
 ) -> None:
     """Accumulate one edge row; the write happens later in flush_edges. Keys
     match Edge's mapped attributes so flush_edges can bulk-insert them as-is."""

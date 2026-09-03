@@ -54,7 +54,7 @@ async def _post(session_token: str, body: dict) -> httpx.Response:
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         return await client.post(
             "/api/public/intake/answers",
-            params={"session_token": session_token},
+            headers={"Authorization": f"Bearer {session_token}"},
             json=body,
         )
 

@@ -149,6 +149,12 @@ def _fetch_edges(owner_conn, org_pk: int) -> list[tuple[str, str]]:
         return cur.fetchall()
 
 
+def _claim_ids_by_ref(owner_conn, org_pk: int) -> dict[str, str]:
+    with owner_conn.cursor() as cur:
+        cur.execute("SELECT claim_ref, id FROM claims WHERE org_id = %s", (org_pk,))
+        return {ref: str(cid) for ref, cid in cur.fetchall()}
+
+
 async def test_ingests_claims_and_reconciles_same_page_fact(
     owner_conn, seeded_org, seeded_deal, monkeypatch, mocked_screening_enqueue
 ):
@@ -235,6 +241,194 @@ async def test_ingests_claims_and_reconciles_same_page_fact(
     assert job_name == "start_deal_screening"
     assert kwargs["analysis_run_id"] == str(screening_run_id)
     assert kwargs["clerk_org_id"] == seeded_org["clerk_org_id"]
+
+
+async def test_reingest_appends_new_claims_preserving_ids_idempotently(
+    owner_conn, seeded_org, seeded_deal, monkeypatch, mocked_screening_enqueue
+):
+    """SIM-367: a re-analysis re-extracts the same document, so its deterministic
+    claim_refs collide with the first run's on uq_claims_org_data_source_claim_ref.
+    Re-ingest is APPEND-ONLY: the second verification keeps the prior claims AND
+    their UUIDs (write-once screening_result evidence_refs cite claim.id) and inserts
+    only the newly-recovered ref -- rather than fail on the collision (which froze the
+    deal's claim count and halted the chain before screening) OR churn ids by
+    deleting and re-inserting."""
+    org_pk = seeded_org["org_pk"]
+    data_source_id = _seed_data_source(owner_conn, org_pk, seeded_deal, "cim.pdf")
+
+    def parse_jobs() -> list[dict]:
+        return [
+            {
+                "data_source_id": data_source_id,
+                "filename": "cim.pdf",
+                "storage_key": "org/cim.pdf",
+                "job_key": "job-1",
+                "outcome": "parsed",
+                "code": None,
+                "message": None,
+                "bucket": "test-bucket",
+                "key": "claims/cim.json",
+            }
+        ]
+
+    # First analysis: two same-fact claims, so reconcile writes a same_fact edge
+    # between them -- which a re-analysis must not duplicate (edges are idempotent).
+    run1 = _seed_parsing_run(owner_conn, org_pk, seeded_deal, parse_jobs())
+    verify1 = _seed_verification_run(owner_conn, org_pk, seeded_deal)
+    envelope1 = {
+        "run_id": run1,
+        "sha256": "a" * 64,
+        "source_file": "cim.pdf",
+        "claims": [_claim_json("c1", page=1), _claim_json("c2", page=5)],
+        "edges": [],
+    }
+    monkeypatch.setattr(job_module, "get_json_object", lambda bucket, key: envelope1)
+    await job_module.start_deal_verification(
+        {}, analysis_run_id=verify1, parsing_run_id=run1, clerk_org_id=seeded_org["clerk_org_id"]
+    )
+    assert _fetch_run(owner_conn, verify1)["status"] == "successful"
+    assert _count_claims(owner_conn, org_pk) == 2
+    assert ("same_fact", "reconciliation") in _fetch_edges(owner_conn, org_pk)
+    ids_before = _claim_ids_by_ref(owner_conn, org_pk)
+
+    # The first run chained a queued screening run, which stays active. A real
+    # re-analysis only starts once the prior chain is terminal -- uq_analysis_run_active
+    # permits just one active (queued/in_progress) run per deal -- so terminalize it
+    # before seeding the re-analysis's own runs, exactly as the completed prior chain
+    # would have.
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "UPDATE analysis_run SET status = 'successful' "
+            "WHERE deal_id = %s AND status IN ('queued', 'in_progress')",
+            (seeded_deal,),
+        )
+
+    # Re-analysis: SAME data source, the SAME two claim_refs (deterministic) plus a
+    # third the improved parser now recovers.
+    run2 = _seed_parsing_run(owner_conn, org_pk, seeded_deal, parse_jobs())
+    verify2 = _seed_verification_run(owner_conn, org_pk, seeded_deal)
+    envelope2 = {
+        "run_id": run2,
+        "sha256": "a" * 64,
+        "source_file": "cim.pdf",
+        "claims": [
+            _claim_json("c1", page=1),
+            _claim_json("c2", page=5),
+            _claim_json("c3", page=9, normalized=250.0),
+        ],
+        "edges": [],
+    }
+    monkeypatch.setattr(job_module, "get_json_object", lambda bucket, key: envelope2)
+    await job_module.start_deal_verification(
+        {}, analysis_run_id=verify2, parsing_run_id=run2, clerk_org_id=seeded_org["clerk_org_id"]
+    )
+
+    # The collision no longer fails the run: the two prior refs keep their rows,
+    # only the recovered c3 is inserted, so the deal reflects 3 (not a frozen 2, not
+    # a doubled 5), and the chain reaches screening again (a second enqueue).
+    assert _fetch_run(owner_conn, verify2)["status"] == "successful"
+    assert _count_claims(owner_conn, org_pk) == 3
+    assert len(mocked_screening_enqueue) == 2
+
+    # Append-only preserves claim identity: the kept refs' UUIDs are UNCHANGED, so a
+    # write-once screening_result evidence_ref citing them stays resolvable, and c3
+    # was added.
+    ids_after = _claim_ids_by_ref(owner_conn, org_pk)
+    assert ids_after["c1"] == ids_before["c1"]
+    assert ids_after["c2"] == ids_before["c2"]
+    assert "c3" in ids_after
+
+
+async def test_reingest_edges_dedupe_within_batch_and_across_runs(
+    owner_conn, seeded_org, seeded_deal, monkeypatch, mocked_screening_enqueue
+):
+    """SIM-367 (edge idempotency): a single parser envelope can stage the SAME
+    within-page edge twice, and a re-analysis re-emits every edge again. Both
+    must collapse onto the one (org, from, to, type) row without tripping
+    uq_edges_org_from_to_type -- which would abort the verification transaction
+    and reproduce the stuck-run freeze, now for edges. flush_edges dedupes within
+    the batch (ON CONFLICT resolves against committed rows, not another row in
+    the same statement) AND skips rows a prior run already committed."""
+    org_pk = seeded_org["org_pk"]
+    data_source_id = _seed_data_source(owner_conn, org_pk, seeded_deal, "cim.pdf")
+
+    def parse_jobs() -> list[dict]:
+        return [
+            {
+                "data_source_id": data_source_id,
+                "filename": "cim.pdf",
+                "storage_key": "org/cim.pdf",
+                "job_key": "job-1",
+                "outcome": "parsed",
+                "code": None,
+                "message": None,
+                "bucket": "test-bucket",
+                "key": "claims/cim.json",
+            }
+        ]
+
+    # Two claims the reconcile passes will not relate on their own (different
+    # entity AND value -- reconcile_same_fact / _consistency never cross
+    # entities), so the only edges written are the envelope's, isolating the
+    # dedup under test.
+    c1 = _claim_json("c1", page=1, normalized=100.0)
+    c2 = _claim_json("c2", page=2, normalized=250.0)
+    c2["entity"] = "Beta Corp"
+    run1 = _seed_parsing_run(owner_conn, org_pk, seeded_deal, parse_jobs())
+    verify1 = _seed_verification_run(owner_conn, org_pk, seeded_deal)
+    # The SAME (from, to, type) staged twice in one envelope: identical dedup key,
+    # different basis -- flush_edges must keep exactly one.
+    envelope = {
+        "run_id": run1,
+        "sha256": "a" * 64,
+        "source_file": "cim.pdf",
+        "claims": [c1, c2],
+        "edges": [
+            {"type": "same_fact", "from": "c1", "to": "c2", "basis": "table tier agrees"},
+            {"type": "same_fact", "from": "c1", "to": "c2", "basis": "prose tier agrees"},
+        ],
+    }
+    monkeypatch.setattr(job_module, "get_json_object", lambda bucket, key: envelope)
+    await job_module.start_deal_verification(
+        {}, analysis_run_id=verify1, parsing_run_id=run1, clerk_org_id=seeded_org["clerk_org_id"]
+    )
+
+    # The duplicate collapsed to one edge and the run committed rather than
+    # aborting on the unique constraint.
+    assert _fetch_run(owner_conn, verify1)["status"] == "successful"
+    assert _fetch_edges(owner_conn, org_pk) == [("same_fact", "extraction_reducer")]
+    # Finding 3: the audit count is the number actually inserted, stated next to
+    # the envelope total.
+    assert (
+        "2 claim(s) ingested (2 in envelope)"
+        in _fetch_run(owner_conn, verify1)["job_comments"][0]["comment"]
+    )
+
+    # A real re-analysis only starts once the prior chain is terminal
+    # (uq_analysis_run_active); terminalize the queued screening run, then re-run
+    # with the SAME envelope.
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "UPDATE analysis_run SET status = 'successful' "
+            "WHERE deal_id = %s AND status IN ('queued', 'in_progress')",
+            (seeded_deal,),
+        )
+    run2 = _seed_parsing_run(owner_conn, org_pk, seeded_deal, parse_jobs())
+    verify2 = _seed_verification_run(owner_conn, org_pk, seeded_deal)
+    await job_module.start_deal_verification(
+        {}, analysis_run_id=verify2, parsing_run_id=run2, clerk_org_id=seeded_org["clerk_org_id"]
+    )
+
+    # Across-run: the re-emitted edges hit the committed row and are skipped -- no
+    # IntegrityError, still exactly one edge, and no new claims.
+    assert _fetch_run(owner_conn, verify2)["status"] == "successful"
+    assert _fetch_edges(owner_conn, org_pk) == [("same_fact", "extraction_reducer")]
+    assert _count_claims(owner_conn, org_pk) == 2
+    # Finding 3 on re-analysis: both refs already exist, so zero newly ingested.
+    assert (
+        "0 claim(s) ingested (2 in envelope)"
+        in _fetch_run(owner_conn, verify2)["job_comments"][0]["comment"]
+    )
 
 
 async def test_promotes_span_resolved_claims_and_holds_the_rest(

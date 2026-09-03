@@ -286,12 +286,13 @@ class ScreeningCitedFieldResponse(CamelModel):
 class ScreeningMaterialsResponse(CamelModel):
     """GET /deals/{id}/screening-materials — the deal's key extracted facts,
     derived deterministically from the claims spine (build_screening_materials):
-    each canonical metric's latest actual figure, straight from the verified
-    claims. Deliberately claims-only and LLM-free, so this response is fast and
-    reliable and never blocked by the insights model call -- the LLM-derived
-    Agent Highlights / Risk Flags live on their own endpoint
-    (GET /deals/{id}/screening-insights) so a slow or failed model call can
-    never take the extracted panel down with it."""
+    each headline metric's latest actual figure, straight from the verified
+    claims -- a metric being a canonical attribute or a line item recovered from
+    a catch-all bucket by its raw label. Deliberately claims-only and LLM-free,
+    so this response is fast and reliable and never blocked by the insights model
+    call -- the LLM-derived Agent Highlights / Risk Flags live on their own
+    endpoint (GET /deals/{id}/screening-insights) so a slow or failed model call
+    can never take the extracted panel down with it."""
 
     extracted_fields: list[ScreeningCitedFieldResponse]
 

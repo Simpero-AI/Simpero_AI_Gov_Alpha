@@ -1,7 +1,7 @@
 import logging
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -69,7 +69,7 @@ async def _org_name_for_link(db: AsyncSession, link: DealIntakeLink) -> str:
     return name
 
 
-async def _decode_claims(session_token: str) -> IntakeSessionClaims:
+async def _decode_claims(authorization: str | None = Header(default=None)) -> IntakeSessionClaims:
     """Re-decodes the same session token get_public_session_db already
     verified, to reach claims.email -- that dependency's yielded shape
     (AsyncSession, DealIntakeLink) is a pinned contract shared by every other
@@ -77,10 +77,15 @@ async def _decode_claims(session_token: str) -> IntakeSessionClaims:
     itself is a cheap local HS256 verify, no network call. AuthenticationError
     is caught the same way get_public_session_db catches it -- letting it
     propagate would surface a distinguishable 401 instead of the uniform 404
-    every other public-route failure mode returns.
+    every other public-route failure mode returns. Same `Authorization:
+    Bearer <token>` extraction as get_public_session_db -- see that
+    function's docstring (app/core/public_dependencies.py) for why it isn't
+    a query param.
     """
+    if authorization is None or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=404, detail="Not found")
     try:
-        return decode_intake_session_jwt(session_token)
+        return decode_intake_session_jwt(authorization.removeprefix("Bearer "))
     except AuthenticationError as exc:
         raise HTTPException(status_code=404, detail="Not found") from exc
 

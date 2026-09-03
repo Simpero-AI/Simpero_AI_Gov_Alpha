@@ -1,7 +1,7 @@
 import hmac
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -190,13 +190,15 @@ def _seed_draft(snapshot_questions: list[dict]) -> dict[str, dict]:
     }
 
 
-async def _decode_claims(session_token: str) -> IntakeSessionClaims:
+async def _decode_claims(authorization: str | None = Header(default=None)) -> IntakeSessionClaims:
     """Duplicated from app/api/public_uploads.py -- see that file's own
     docstring for why this is copied rather than imported across router
     files (this codebase's existing precedent for small router-local
     helpers, e.g. _org_name_for_link above)."""
+    if authorization is None or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=404, detail="Not found")
     try:
-        return decode_intake_session_jwt(session_token)
+        return decode_intake_session_jwt(authorization.removeprefix("Bearer "))
     except AuthenticationError as exc:
         raise HTTPException(status_code=404, detail="Not found") from exc
 
