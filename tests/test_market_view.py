@@ -263,3 +263,33 @@ def test_market_cagr_is_classified_and_latest_period_wins():
 
     # Later year wins the single CAGR slot, not the larger stale figure.
     assert [(f.label, f.value) for f in view.sizing] == [("Market Growth (CAGR)", "9%")]
+
+
+def test_qual_fact_falls_back_to_a_class_label_when_entity_is_blank():
+    """F5: a market_definition / competitive_position assertion with no entity
+    must not render a blank row header -- it falls back to a class-appropriate
+    label, never an empty string (MarketFactResponse.label is required)."""
+    claims = [
+        _qual("The market is $5B and growing.", "market_definition", entity=""),
+        _qual("Holds ~15% share.", "competitive_position", entity="  "),
+    ]
+
+    view = build_market_view(claims, filenames={})
+
+    assert view.market_definition[0].label == "The market"
+    assert view.competitive_position[0].label == "Competitor"
+    # The raw (blank) entity is still preserved on the fact for downstream use.
+    assert view.market_definition[0].entity == ""
+
+
+def test_qualitative_lists_are_capped():
+    """F7: a claim-dense CIM can surface dozens of competitor/market assertions;
+    each qualitative list is capped so an unbounded list can't swamp the tab."""
+    claims = [
+        _qual(f"Competitor {i} note.", "competitive_position", entity=f"Rival {i:02d}")
+        for i in range(20)
+    ]
+
+    view = build_market_view(claims, filenames={})
+
+    assert len(view.competitive_position) == 12

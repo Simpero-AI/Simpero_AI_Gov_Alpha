@@ -16,6 +16,7 @@ tab renders "information not available". Formatting, the citation string and the
 trust filter are shared with screening_materials so the two surfaces agree.
 """
 
+import re
 import uuid
 from collections import Counter
 from collections.abc import Mapping, Sequence
@@ -40,7 +41,7 @@ def _fold_subjects(
     entity_subject: dict[str, str] = {}
     order: list[str] = []
     subjects = (dashboard_structure or {}).get("subjects")
-    if isinstance(subjects, list) and subjects:
+    if isinstance(subjects, list):
         for subject in subjects:
             if not isinstance(subject, dict) or not subject.get("name"):
                 continue
@@ -49,12 +50,21 @@ def _fold_subjects(
             for entity in subject.get("entities") or []:
                 if entity and entity.casefold() not in entity_subject:
                     entity_subject[entity.casefold()] = name
-    else:
-        freq = Counter(c.entity.casefold() for c in claims if c.entity)
+    # Fall back whenever the dashboard yielded no usable subject -- absent, an
+    # empty list, OR a non-empty list whose every entry was malformed (not a dict /
+    # no name). Otherwise a malformed structure would leave lead="Other" and
+    # silently pass every claim (including a competitor's) through the sizing filter.
+    if not order:
+        # Elect the most-mentioned entities, then the deal's company. QUALITATIVE
+        # claims are excluded from the election: a competitive_position claim's
+        # entity is a COMPETITOR and a market_definition's is "the market", so
+        # counting them could crown a non-target as the lead subject and let its
+        # sizing figures win the slot.
+        quantitative = [c for c in claims if c.entity and c.claim_kind != "qualitative"]
+        freq = Counter(c.entity.casefold() for c in quantitative)
         display: dict[str, str] = {}
-        for claim in claims:
-            if claim.entity:
-                display.setdefault(claim.entity.casefold(), claim.entity)
+        for claim in quantitative:
+            display.setdefault(claim.entity.casefold(), claim.entity)  # type: ignore[union-attr]
         for folded, _count in sorted(
             ((e, f) for e, f in freq.items() if f >= 2), key=lambda item: (-item[1], item[0])
         ):
@@ -93,8 +103,10 @@ class MarketView:
 
 # Market-size line items, recovered from a claim's raw label (matched over
 # normalize_name, reused from entity resolution). An acronym matches only as a
-# standalone token so "SOM" never fires on "some"/"wholesome"; a full phrase
-# matches as a substring. Ordered by how the sizing funnel reads.
+# standalone ALL-CAPS token in the original label (so "SOM" never fires on
+# "some"/"wholesome" or on a possessive fragment like "Sam's"); a phrase matches
+# only as a contiguous run of whole tokens (so "market size" never fires inside
+# "Supermarket Size"). Ordered by how the sizing funnel reads.
 _SIZING_LABELS: tuple[tuple[str, str, frozenset[str], tuple[str, ...]], ...] = (
     ("tam", "TAM", frozenset({"tam"}), ("total addressable market",)),
     (
@@ -123,18 +135,39 @@ _SIZING_LABELS: tuple[tuple[str, str, frozenset[str], tuple[str, ...]], ...] = (
 
 _SIZING_ORDER = {key: i for i, (key, _d, _a, _p) in enumerate(_SIZING_LABELS)}
 
+# Cap on each qualitative list (market_definition / competitive_position). A
+# claim-dense CIM can surface dozens of competitor/market assertions; the tab
+# shows the most-corroborated first (see _qual_sort), so the cap keeps the
+# strongest rows and never lets an unbounded list swamp the view. Mirrors the
+# bounded screening panels.
+_QUAL_LIMIT = 12
+
+
+def _phrase_in(phrase: str, token_list: list[str]) -> bool:
+    """Whether `phrase` (space-separated) appears as a contiguous run of WHOLE
+    tokens in `token_list` -- a word-boundary match, so "market size" fires on
+    "estimated market size" but NOT inside "supermarket size"."""
+    ptoks = phrase.split()
+    n = len(ptoks)
+    return any(token_list[i : i + n] == ptoks for i in range(len(token_list) - n + 1))
+
 
 def _sizing_label(claim: Claim) -> tuple[str, str] | None:
     """The market-size metric a numeric claim names, as (key, display), or None.
     Checks the raw label first (the document's own words), then the canonical
     attribute."""
     for source in (claim.attribute_raw, claim.attribute):
-        norm = normalize_name(source or "")
+        source = source or ""
+        norm = normalize_name(source)
         if not norm:
             continue
-        tokens = set(norm.split())
+        token_list = norm.split()
+        # Acronyms must be ALL-CAPS tokens in the ORIGINAL label (TAM/SAM/SOM are
+        # written uppercase); a possessive "Sam's" normalizes to a lowercase "sam"
+        # token, which must NOT be read as SAM.
+        upper_acronyms = {w.casefold() for w in re.findall(r"[A-Za-z]{2,}", source) if w.isupper()}
         for key, display, acronyms, phrases in _SIZING_LABELS:
-            if (acronyms & tokens) or any(phrase in norm for phrase in phrases):
+            if (acronyms & upper_acronyms) or any(_phrase_in(p, token_list) for p in phrases):
                 return key, display
     return None
 
@@ -156,12 +189,26 @@ def _sizing_rank(claim: Claim) -> tuple[int, int, int, float]:
     return (is_historical, year, _STATUS_RANK.get(claim.status, 0), magnitude)
 
 
+# A qualitative fact whose entity is blank still needs a non-empty label
+# (MarketFactResponse.label is required, and a blank renders as an empty row
+# header): a market_definition assertion is about the market itself, a
+# competitive_position one about an unnamed competitor.
+_QUAL_LABEL_FALLBACK = {
+    "market_definition": "The market",
+    "competitive_position": "Competitor",
+}
+
+
 def _qual_fact(claim: Claim, filenames: Mapping[uuid.UUID, str]) -> MarketFact:
     """A qualitative assertion as a MarketFact: the entity it is about as the
     label, the assertion text (value.raw, via _fmt_value) as the value, plus its
-    citation and trust status."""
+    citation and trust status. Falls back to a class-appropriate label when the
+    claim carries no entity, so the row is never headed by a blank."""
+    label = (claim.entity or "").strip() or _QUAL_LABEL_FALLBACK.get(
+        claim.assertion_class or "", "—"
+    )
     return MarketFact(
-        label=claim.entity or "",
+        label=label,
         value=_fmt_value(claim.value),
         citation=_citation(claim, filenames),
         status=claim.status,
@@ -247,4 +294,8 @@ def build_market_view(
     ]
     definition.sort(key=_qual_sort)
     competition.sort(key=_qual_sort)
-    return MarketView(sizing=sizing, market_definition=definition, competitive_position=competition)
+    return MarketView(
+        sizing=sizing,
+        market_definition=definition[:_QUAL_LIMIT],
+        competitive_position=competition[:_QUAL_LIMIT],
+    )
