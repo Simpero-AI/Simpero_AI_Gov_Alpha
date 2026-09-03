@@ -46,10 +46,19 @@ def _fold_subjects(
             if not isinstance(subject, dict) or not subject.get("name"):
                 continue
             name = str(subject["name"])
-            order.append(name)
+            registered_any = False
             for entity in subject.get("entities") or []:
                 if entity and entity.casefold() not in entity_subject:
                     entity_subject[entity.casefold()] = name
+                    registered_any = True
+            # Only a subject that actually owns an entity can scope a claim. A
+            # name-only subject (empty or all-duplicate entities) would otherwise
+            # become a lead no claim can map to -- silently disabling the
+            # lead-subject filter and letting a competitor's figure win a slot --
+            # so it must not enter `order` (and, if it's the only one, the
+            # frequency fallback below takes over).
+            if registered_any:
+                order.append(name)
     # Fall back whenever the dashboard yielded no usable subject -- absent, an
     # empty list, OR a non-empty list whose every entry was malformed (not a dict /
     # no name). Otherwise a malformed structure would leave lead="Other" and
@@ -111,8 +120,8 @@ class MarketView:
 # claim must carry to key this slot. A market SIZE is a dollar figure and CAGR is
 # a percent, so the type gates the match -- a "TAM CAGR" percent can never land in
 # the dollar TAM slot (where _sizing_rank, blind to value_type, could otherwise
-# let it overwrite the real dollar TAM). Only a known currency/percent MISMATCH is
-# excluded (see _sizing_label); an untyped or otherwise-typed value still matches.
+# let it overwrite the real dollar TAM). Any TYPED value that isn't the slot's
+# expected type is excluded (see _sizing_label); only an untyped value matches.
 _SIZING_LABELS: tuple[tuple[str, str, frozenset[str], tuple[str, ...], str], ...] = (
     ("tam", "TAM", frozenset({"tam"}), ("total addressable market",), "currency"),
     (
@@ -143,11 +152,6 @@ _SIZING_LABELS: tuple[tuple[str, str, frozenset[str], tuple[str, ...], str], ...
 )
 
 _SIZING_ORDER = {key: i for i, (key, _d, _a, _p, _vt) in enumerate(_SIZING_LABELS)}
-
-# value_types that are mutually exclusive for a sizing slot: a dollar figure is
-# never a percent and vice versa. A claim typed one of these that mismatches a
-# label's expected type is skipped; any other type (or none) is allowed through.
-_TYPED_INCOMPATIBLE = frozenset({"currency", "percent"})
 
 # Cap on each qualitative list (market_definition / competitive_position). A
 # claim-dense CIM can surface dozens of competitor/market assertions; the tab
@@ -189,7 +193,13 @@ def _sizing_label(claim: Claim) -> tuple[str, str] | None:
             if m.group(1).isupper()
         }
         for key, display, acronyms, phrases, expected_vt in _SIZING_LABELS:
-            if claim_vt in _TYPED_INCOMPATIBLE and claim_vt != expected_vt:
+            # A claim's TYPED value gates the slot: any known value_type that is
+            # not the slot's expected one is excluded -- a "count"/"ratio"/percent
+            # can't be a dollar market size, and a currency can't be CAGR. Only an
+            # untyped value (None) is let through, so a legitimately untyped size
+            # is not dropped. (A denylist of just currency/percent let "count" and
+            # "ratio" claims silently overwrite the real dollar TAM.)
+            if claim_vt is not None and claim_vt != expected_vt:
                 continue
             if (acronyms & upper_acronyms) or any(_phrase_in(p, token_list) for p in phrases):
                 return key, display

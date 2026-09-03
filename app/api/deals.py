@@ -3,10 +3,10 @@ import logging
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Any, cast
+from typing import Any, TypeVar, cast
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -115,6 +115,19 @@ def _parse_answer(entry: Any, response_id: uuid.UUID) -> IntakeResponseAnswerRes
             response_id,
         )
         return None
+
+
+_FactResponse = TypeVar("_FactResponse", bound=BaseModel)
+
+
+def _to_responses(facts: list[Any], model_cls: type[_FactResponse]) -> list[_FactResponse]:
+    """Copy each claims-view dataclass fact onto its camelCase response model.
+    Safe because every *FactResponse is a CamelModel with from_attributes=True and
+    field names matching the view dataclass -- there is no hand-maintained field
+    list to drift. The hazard to know when editing either side: a field added to a
+    view dataclass with no matching (identically named) field on the response
+    model is silently DROPPED here by model_validate at runtime, with no error."""
+    return [model_cls.model_validate(f) for f in facts]
 
 
 router = APIRouter(prefix="/deals", tags=["deals"])
@@ -517,13 +530,10 @@ async def get_deal_market(
         company=deal.name,
     )
 
-    def _market_facts(facts: list) -> list[MarketFactResponse]:
-        return [MarketFactResponse.model_validate(f) for f in facts]
-
     return MarketViewResponse(
-        sizing=_market_facts(market.sizing),
-        market_definition=_market_facts(market.market_definition),
-        competitive_position=_market_facts(market.competitive_position),
+        sizing=_to_responses(market.sizing, MarketFactResponse),
+        market_definition=_to_responses(market.market_definition, MarketFactResponse),
+        competitive_position=_to_responses(market.competitive_position, MarketFactResponse),
     )
 
 
@@ -561,16 +571,13 @@ async def get_deal_company(
         company=deal.name,
     )
 
-    def _company_facts(facts: list) -> list[CompanyFactResponse]:
-        return [CompanyFactResponse.model_validate(f) for f in facts]
-
     return CompanyViewResponse(
-        facts=_company_facts(company.facts),
-        overview=_company_facts(company.overview),
-        risks=_company_facts(company.risks),
-        commercial=_company_facts(company.commercial),
-        related_parties=_company_facts(company.related_parties),
-        plans=_company_facts(company.plans),
+        facts=_to_responses(company.facts, CompanyFactResponse),
+        overview=_to_responses(company.overview, CompanyFactResponse),
+        risks=_to_responses(company.risks, CompanyFactResponse),
+        commercial=_to_responses(company.commercial, CompanyFactResponse),
+        related_parties=_to_responses(company.related_parties, CompanyFactResponse),
+        plans=_to_responses(company.plans, CompanyFactResponse),
     )
 
 

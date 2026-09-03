@@ -335,3 +335,54 @@ def test_all_caps_possessive_acronym_is_not_a_sizing_metric():
     view = build_market_view(claims, filenames={})
 
     assert view.sizing == []
+
+
+def test_a_non_currency_typed_claim_does_not_displace_a_dollar_size():
+    """A claim typed anything other than the slot's expected type (e.g. a "count"
+    whose label carries a sizing acronym, "TAM Customer Count") must not key the
+    dollar TAM slot -- the value_type gate excludes ANY typed mismatch, not just
+    currency/percent, so the count can't overwrite the real dollar TAM."""
+    claims = [
+        _claim(
+            attribute_raw="Total Addressable Market",
+            normalized=5_000_000_000,
+            value_type="currency",
+            period_year=2023,
+        ),
+        _claim(
+            attribute_raw="TAM Customer Count",
+            normalized=9_000_000_000,
+            value_type="count",
+            period_year=2024,
+        ),
+    ]
+
+    view = build_market_view(claims, filenames={})
+
+    assert [(f.label, f.value) for f in view.sizing] == [("TAM", "$5.00B")]
+
+
+def test_dashboard_subject_with_no_entities_does_not_disable_scoping():
+    """A dashboard subject with a name but an empty entities list must not become
+    an unusable lead (one no claim maps to), which would silently drop lead-subject
+    scoping and let a competitor's larger figure win a slot. It falls through to
+    the frequency election instead, so the target's own figure still wins."""
+    dashboard = {"subjects": [{"name": "TargetCo", "entities": []}]}
+    claims = [
+        # TargetCo mentioned twice -> elected lead by frequency.
+        _claim(
+            attribute_raw="Total Addressable Market", normalized=5_000_000_000, entity="TargetCo"
+        ),
+        _claim(attribute="revenue", normalized=1_000_000, entity="TargetCo"),
+        # A competitor whose larger TAM must NOT win the slot over the lead's.
+        _claim(
+            attribute_raw="Total Addressable Market", normalized=9_000_000_000, entity="RivalCo"
+        ),
+    ]
+
+    view = build_market_view(
+        claims, filenames={}, dashboard_structure=dashboard, company="TargetCo"
+    )
+
+    assert [(f.label, f.value) for f in view.sizing] == [("TAM", "$5.00B")]
+    assert view.sizing[0].entity == "TargetCo"
