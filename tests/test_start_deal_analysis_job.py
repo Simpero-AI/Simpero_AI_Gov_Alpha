@@ -196,6 +196,17 @@ async def test_all_documents_parsed_marks_run_successful(
     assert kwargs["timeout"] == 7200
 
 
+def test_parse_deadline_covers_the_parser_per_document_ceiling():
+    """Regression guard for the 'parsing took too long' freeze: the backend's
+    per-document parse-wait budget must stay >= the parser's own enqueued ceiling,
+    or a slow-but-succeeding parse trips the deadline mid-run, the analysis is
+    falsely marked timed out, and verification never runs. The parser enqueues
+    process_document with timeout=7200s and retries=1 (2 attempts); keep this in
+    sync if that ceiling changes (Simpero_Gov_AI_Services worker.py)."""
+    parser_worst_case_s = 7200 * 2  # process_document timeout=7200s, retries=1 (2 attempts)
+    assert parser_worst_case_s <= job_module._PARSE_DEADLINE_PER_DOC_SECONDS
+
+
 async def test_enqueue_receives_the_orgs_approved_mandate_options(
     owner_conn, seeded_org, seeded_deal, monkeypatch, mocked_verification_enqueue
 ):

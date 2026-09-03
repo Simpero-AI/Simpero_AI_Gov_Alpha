@@ -41,10 +41,20 @@ from app.services.screening.mandate_rules import selected_rule_ids
 from app.services.screening.rulebook import load_rulebook
 from app.services.screening.workspace_config import load_workspace_config
 
-# D8/D9: worst case is N documents x (1800s parser timeout x 2 parser
-# retries), serialized on the parser's own concurrency:1 worker. Picked, not
-# derived -- see the plan's Open Question 5.
-_DEADLINE_SECONDS = 7200
+# The backend must wait at least as long as the parser can legitimately take,
+# or a slow-but-succeeding parse trips this deadline mid-run and the whole
+# analysis is falsely marked "timed out" -- so verification never runs and the
+# deal freezes on its last partial result. The parser enqueues process_document
+# with timeout=7200s and retries=1 (worst case 2 attempts = 14400s PER DOCUMENT;
+# see Simpero_Gov_AI_Services parser_service/worker.py::_normalize_job_policy)
+# and runs concurrency:1, so N documents serialize -- hence a per-document budget
+# scaled by the document count where the deadline is set. This budget MUST stay
+# >= the parser's enqueued timeout x attempts. The poll loop still exits the
+# instant every parse job reaches a terminal status, so a genuine failure
+# surfaces immediately; this only bounds the wait on parses still legitimately
+# running. (Was a flat 7200s -- one attempt's worth -- which the #59 qualitative
+# tier's longer parses began exceeding, the "parsing took too long" freeze.)
+_PARSE_DEADLINE_PER_DOC_SECONDS = 15000
 _POLL_INTERVAL_SECONDS = 15
 
 
@@ -233,7 +243,7 @@ async def start_deal_analysis(
     # outcomes as they land, without holding a transaction open across the
     # wait (D10).
     loop = asyncio.get_event_loop()
-    deadline = loop.time() + _DEADLINE_SECONDS
+    deadline = loop.time() + _PARSE_DEADLINE_PER_DOC_SECONDS * max(1, len(parse_jobs))
     verification_run_id: UUID | None = None
     while True:
         async with AsyncSessionLocal() as session, session.begin():
