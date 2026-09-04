@@ -437,3 +437,21 @@ def test_a_dashboard_subject_named_other_does_not_collide_with_unmatched():
 
     assert [(f.label, f.value) for f in view.sizing] == [("TAM", "$5.00B")]
     assert view.sizing[0].entity == "OtherCo"
+
+
+def test_company_leads_even_when_a_competitor_has_more_claims():
+    """The deal's own company is the target: when it appears among the trusted
+    quantitative claims it leads outright, so a competitor with MORE claims can't
+    win the election and completely replace the target's own sizing figure (sizing
+    keeps a single winner per slot)."""
+    claims = [
+        _claim(attribute_raw="Total Addressable Market", normalized=100_000_000, entity="TargetCo"),
+        # Competitor with more trusted quantitative claims (crosses f>=2 first).
+        _claim(attribute_raw="Total Addressable Market", normalized=900_000_000, entity="RivalCo"),
+        _claim(attribute="revenue", normalized=1, entity="RivalCo"),
+    ]
+
+    view = build_market_view(claims, filenames={}, company="TargetCo")
+
+    assert [(f.label, f.value) for f in view.sizing] == [("TAM", "$100.00M")]
+    assert view.sizing[0].entity == "TargetCo"
