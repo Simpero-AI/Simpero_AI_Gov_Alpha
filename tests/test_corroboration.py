@@ -142,10 +142,17 @@ async def test_agrees_is_persisted_on_the_event(db_session, cited_claim):
         agrees=False,
     )
     await db_session.flush()
+
+    # Capture the ids before expiring: after expire_all() a synchronous
+    # attribute access (e.g. claim.id) would trigger a lazy refresh outside the
+    # greenlet and raise MissingGreenlet. list_for_claim then re-SELECTs the
+    # expired events, so their `agrees` is loaded from the row, not memory.
+    cited_id = cited_claim.id
+    disagreeing_id = disagreeing.id
     db_session.expire_all()
 
-    (agreeing_event,) = await CorroborationEventRepo(db_session).list_for_claim(cited_claim.id)
-    (disagreeing_event,) = await CorroborationEventRepo(db_session).list_for_claim(disagreeing.id)
+    (agreeing_event,) = await CorroborationEventRepo(db_session).list_for_claim(cited_id)
+    (disagreeing_event,) = await CorroborationEventRepo(db_session).list_for_claim(disagreeing_id)
     assert agreeing_event.agrees is True
     assert disagreeing_event.agrees is False
 
