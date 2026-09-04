@@ -267,6 +267,30 @@ def test_start_analysis_happy_path(client, owner_conn, seeded_org, seeded_deal, 
     assert kwargs["ttl"] == 86400
 
 
+def test_start_analysis_scales_the_saq_timeout_by_document_count(
+    client, owner_conn, seeded_org, seeded_deal, mocked_queue
+):
+    """The SAQ job timeout/ttl scale with the document count, not a single-doc
+    budget -- so the outer cap stays above the job's inner per-doc poll deadline
+    (also * doc count) for a multi-document deal, not just a one-doc one."""
+    from app.jobs.tasks.start_deal_analysis import _PARSE_DEADLINE_PER_DOC_SECONDS
+
+    _seed_data_source(owner_conn, seeded_org["org_pk"], seeded_deal, "verified")
+    _seed_data_source(owner_conn, seeded_org["org_pk"], seeded_deal, "verified")
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    resp = client.post(f"/deals/{seeded_deal}/analysis", json={})
+    assert resp.status_code == 202
+
+    assert len(mocked_queue) == 1
+    _job_name, kwargs = mocked_queue[0]
+    # Two usable docs -> the multiplier is exercised: budget = per-doc * 2, still
+    # strictly above the inner deadline's own per-doc * 2 for the same count.
+    assert kwargs["timeout"] == _PARSE_DEADLINE_PER_DOC_SECONDS * 2 + 600
+    assert kwargs["timeout"] > _PARSE_DEADLINE_PER_DOC_SECONDS * 2
+    assert kwargs["ttl"] == max(86400, _PARSE_DEADLINE_PER_DOC_SECONDS * 2 + 3600)
+
+
 def test_start_analysis_409_when_a_run_is_already_active(
     client, owner_conn, seeded_org, seeded_deal, mocked_queue
 ):
