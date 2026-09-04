@@ -112,6 +112,44 @@ async def test_agreeing_result_does_not_change_status(db_session, cited_claim):
     assert cited_claim.status == "cited"
 
 
+async def test_agrees_is_persisted_on_the_event(db_session, cited_claim):
+    """The per-event verdict is stored on the row, not only applied as the
+    claim-status side effect — the corroboration display reads it back to badge
+    each check confirmed/conflicting. Re-read from the DB (expire_all) so this
+    proves persistence, not just the in-memory attribute."""
+    await record_corroboration_result(
+        db_session,
+        claim=cited_claim,
+        outside_source="sec_edgar",
+        result={"cik": 320193},
+        agrees=True,
+    )
+    disagreeing = Claim(
+        **_claim_kwargs(
+            cited_claim.org_id,
+            str(cited_claim.deal_id),
+            status="cited",
+            verification_method="exact_span",
+        )
+    )
+    db_session.add(disagreeing)
+    await db_session.flush()
+    await record_corroboration_result(
+        db_session,
+        claim=disagreeing,
+        outside_source="sec_edgar",
+        result={"cik": 320193, "discrepancy_delta": 0.9},
+        agrees=False,
+    )
+    await db_session.flush()
+    db_session.expire_all()
+
+    (agreeing_event,) = await CorroborationEventRepo(db_session).list_for_claim(cited_claim.id)
+    (disagreeing_event,) = await CorroborationEventRepo(db_session).list_for_claim(disagreeing.id)
+    assert agreeing_event.agrees is True
+    assert disagreeing_event.agrees is False
+
+
 async def test_disagreement_never_overwrites_claims_document_sourced_value(db_session, cited_claim):
     """The whole point of `conflicted` is that both sides stay visible — the
     claim's own value must never be silently replaced by the external

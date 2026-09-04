@@ -78,6 +78,7 @@ async def record_corroboration_result(
             "claim_id": claim.id,
             "outside_source": outside_source,
             "result": result,
+            "agrees": agrees,
         }
     )
 
