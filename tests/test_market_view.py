@@ -314,6 +314,37 @@ def test_market_cagr_is_classified_and_latest_period_wins():
     assert [(f.label, f.value) for f in view.sizing] == [("Market Growth (CAGR)", "9%")]
 
 
+def test_market_cagr_ranks_by_signed_value_not_absolute_magnitude():
+    # Same period + status, differing only in sign. An abs() magnitude tiebreak
+    # would wrongly prefer the larger-magnitude shrinking figure (-20%) over real
+    # growth (+5%); the CAGR (percent) slot ranks by the signed value, so +5% wins.
+    claims = [
+        _claim(
+            attribute_raw="Market CAGR", normalized=-20.0, value_type="percent", period_year=2024
+        ),
+        _claim(attribute_raw="Market CAGR", normalized=5.0, value_type="percent", period_year=2024),
+    ]
+
+    view = build_market_view(claims, filenames={}, company="AcmeCo")
+
+    assert [(f.label, f.value) for f in view.sizing] == [("Market Growth (CAGR)", "5%")]
+
+
+def test_a_negative_market_cagr_is_kept_when_it_is_the_only_figure():
+    # A shrinking market is a legitimate CAGR, not an extraction error to discard
+    # by sign -- with one figure the slot shows it as-is.
+    view = build_market_view(
+        [
+            _claim(
+                attribute_raw="Market CAGR", normalized=-3.0, value_type="percent", period_year=2024
+            )
+        ],
+        filenames={},
+        company="AcmeCo",
+    )
+    assert [(f.label, f.value) for f in view.sizing] == [("Market Growth (CAGR)", "-3%")]
+
+
 def test_qual_fact_falls_back_to_a_class_label_when_entity_is_blank():
     """F5: a market_definition / competitive_position assertion with no entity
     must not render a blank row header -- it falls back to a class-appropriate

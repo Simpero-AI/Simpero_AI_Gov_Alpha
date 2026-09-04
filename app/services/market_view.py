@@ -199,6 +199,11 @@ _SIZING_LABELS: tuple[tuple[str, str, frozenset[str], tuple[str, ...], str], ...
 
 _SIZING_ORDER = {key: i for i, (key, _d, _a, _p, _vt) in enumerate(_SIZING_LABELS)}
 
+# The value_type each slot expects, so _sizing_rank knows whether a negative
+# figure is an extraction error (currency: rank by absolute magnitude) or a
+# legitimate value (percent CAGR: a shrinking market -- rank by the signed value).
+_SIZING_VT = {key: vt for key, _d, _a, _p, vt in _SIZING_LABELS}
+
 # Cap on each qualitative list (market_definition / competitive_position). A
 # claim-dense CIM can surface dozens of competitor/market assertions; the tab
 # shows the most-corroborated first (see _qual_sort), so the cap keeps the
@@ -252,20 +257,22 @@ def _sizing_label(claim: Claim) -> tuple[str, str] | None:
     return None
 
 
-def _sizing_rank(claim: Claim) -> tuple[int, int, int, float]:
+def _sizing_rank(claim: Claim, expected_vt: str) -> tuple[int, int, int, float]:
     # Recency-first, mirroring screening_materials._rank_key: a forecast ranks
     # below any historical figure (an unmarked period counts as historical), then
-    # a later year, then a more corroborated status, then the larger magnitude
-    # (absolute -- so a market size is never picked by sign). This keeps a stale
-    # larger TAM from beating a more current one.
+    # a later year, then a more corroborated status, then the value magnitude.
+    # This keeps a stale larger TAM from beating a more current one.
     is_historical = 0 if claim.period_kind in ("E", "P") else 1
     year = claim.period_year if claim.period_year is not None else -1
     normalized = claim.value.get("normalized") if isinstance(claim.value, dict) else None
-    magnitude = (
-        abs(normalized)
-        if isinstance(normalized, (int, float)) and not isinstance(normalized, bool)
-        else float("-inf")
-    )
+    if isinstance(normalized, (int, float)) and not isinstance(normalized, bool):
+        # For a currency size a negative is an extraction error, so rank by
+        # absolute magnitude -- a real market size is never picked by sign. For a
+        # percent CAGR a negative is a legitimate figure (a shrinking market), so
+        # rank by the SIGNED value: abs() would wrongly prefer -20% over +5%.
+        magnitude = float(normalized) if expected_vt == "percent" else abs(normalized)
+    else:
+        magnitude = float("-inf")
     return (is_historical, year, _STATUS_RANK.get(claim.status, 0), magnitude)
 
 
@@ -362,7 +369,7 @@ def build_market_view(
         # still fills a slot the lead lacks (subject_priority 0), but can no longer
         # outrank the target's own.
         subject_priority = 1 if is_lead else 0
-        rank = (subject_priority, *_sizing_rank(claim))
+        rank = (subject_priority, *_sizing_rank(claim, _SIZING_VT[key]))
         current = sizing_best.get(key)
         if current is None or rank > current[0]:
             sizing_best[key] = (rank, claim, display)
