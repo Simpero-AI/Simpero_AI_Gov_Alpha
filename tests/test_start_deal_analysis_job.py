@@ -196,6 +196,51 @@ async def test_all_documents_parsed_marks_run_successful(
     assert kwargs["timeout"] == 7200
 
 
+async def test_deadline_reached_marks_run_timed_out_without_chaining_verification(
+    owner_conn, seeded_org, seeded_deal, monkeypatch, mocked_verification_enqueue
+):
+    """Drive the poll loop's actual timed_out branch: a parse job that never reaches
+    a terminal status, plus a zeroed deadline budget so the deadline is `now`, must
+    mark the run failed with the timeout message and NOT chain into verification.
+    Guards the timed_out path itself, not just the arithmetic between the constants."""
+    _seed_verified_data_source(owner_conn, seeded_org["org_pk"], seeded_deal, "org/a.pdf")
+    run_id = _seed_run(owner_conn, seeded_org["org_pk"], seeded_deal)
+
+    async def fake_enqueue(
+        storage_key: str,
+        *,
+        entity: str,
+        known_sha256s=None,
+        sector_options=None,
+        geo_options=None,
+        screen_criteria=None,
+    ) -> str:
+        return "job-key-1"
+
+    async def fake_get_job(job_key: str) -> _FakeSaqJob:
+        return _FakeSaqJob(Status.ACTIVE)  # never terminal -- only the deadline ends the loop
+
+    monkeypatch.setattr(job_module, "enqueue_process_document_job", fake_enqueue)
+    monkeypatch.setattr(job_module, "get_parse_job", fake_get_job)
+    # Zero the per-doc budget and the ceiling so the deadline is `now`; the first
+    # `loop.time() >= deadline` check trips timed_out (no wall-clock wait, and the
+    # loop breaks before reaching asyncio.sleep).
+    monkeypatch.setattr(job_module, "_PARSE_DEADLINE_PER_DOC_SECONDS", 0)
+    monkeypatch.setattr(job_module, "_MAX_PARSE_WAIT_SECONDS", 0)
+
+    await job_module.start_deal_analysis(
+        {}, analysis_run_id=run_id, deal_id=seeded_deal, clerk_org_id=seeded_org["clerk_org_id"]
+    )
+
+    run = _fetch_run(owner_conn, run_id)
+    assert run["status"] == "failed"
+    assert run["error_message"] == "Analysis timed out waiting for documents to finish parsing."
+    assert run["parse_jobs"][0]["outcome"] is None  # the parse never resolved
+    # A timeout must NOT chain into verification.
+    assert _count_analysis_runs(owner_conn, seeded_deal, "verification") == 0
+    assert len(mocked_verification_enqueue) == 0
+
+
 _PARSER_PER_DOC_WORST_CASE_S = 7200  # process_document timeout=7200s, retries=1 => 1 attempt
 
 
