@@ -9,9 +9,10 @@ also not this module.
 """
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
+from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -126,29 +127,24 @@ class CorroborationSource(Protocol):
 CORROBORATION_SOURCES: list[CorroborationSource] = []
 
 
-async def run_corroboration(
+async def gather_corroboration(
     db: AsyncSession,
     claims: Sequence[Claim],
     sources: Sequence[CorroborationSource],
-) -> None:
-    """Run every source over every corroboratable claim, recording each
-    agree/disagree via record_corroboration_result. Meant to run AFTER internal
-    verification (claims at `cited`+) and BEFORE the deal-level status roll-up,
-    so the roll-up reads the events this writes.
+) -> list[tuple[UUID, str, CorroborationVerdict]]:
+    """Run every source over every corroboratable claim and COLLECT the verdicts,
+    writing NOTHING. Split out of run_corroboration so the external HTTP each
+    source.check performs can run with NO DB transaction held -- a network call
+    pinning the verify transaction is exactly the I/O-placement problem the
+    start_deal_corroboration job exists to avoid. Returns (claim_id, source_name,
+    verdict) tuples for later persistence.
 
-    Contracts:
-    - No-signal (source returns None) records nothing -- absence is never a
-      conflict.
-    - A source that RAISES is treated as no-signal for that claim, logged, and
-      never allowed to fail the pass: one flaky source must not sink a deal's
-      verification (same durability posture as the verify/screening jobs).
-    - Claims outside CORROBORATABLE_STATUSES are skipped rather than handed to
-      record_corroboration_result (which would raise) -- defence in depth behind
-      the caller's own status filter.
-
-    `db` must already be RLS-scoped by the caller, same contract as the rest of
-    app/services/. Does not flush or commit; the caller flushes before the
-    roll-up so the events are visible to its SELECT."""
+    Same durability posture as run_corroboration: a source that RAISES is no-signal
+    (logged, never fails the pass), a None verdict records nothing, and claims
+    outside CORROBORATABLE_STATUSES are skipped. `db` is passed to each check per
+    the protocol, but the built-in adapters use it only for the session-memoized
+    load_resolved_entity (primed once by the caller), so no query fires here."""
+    results: list[tuple[UUID, str, CorroborationVerdict]] = []
     for claim in claims:
         if claim.status not in CORROBORATABLE_STATUSES:
             continue
@@ -164,10 +160,44 @@ async def run_corroboration(
                 continue
             if verdict is None:
                 continue
-            await record_corroboration_result(
-                db,
-                claim=claim,
-                outside_source=source.name,
-                result=verdict.result,
-                agrees=verdict.agrees,
-            )
+            results.append((claim.id, source.name, verdict))
+    return results
+
+
+async def persist_corroboration(
+    db: AsyncSession,
+    results: Sequence[tuple[UUID, str, CorroborationVerdict]],
+    claims_by_id: Mapping[UUID, Claim],
+) -> None:
+    """Record gathered verdicts (append the event, mark a disagreement conflicted)
+    via record_corroboration_result. Runs in the caller's WRITE transaction, AFTER
+    the network pass -- no HTTP here. Does not flush or commit; the caller flushes
+    before the roll-up so the events are visible to its SELECT (autoflush=False)."""
+    for claim_id, outside_source, verdict in results:
+        claim = claims_by_id.get(claim_id)
+        if claim is None:
+            continue
+        await record_corroboration_result(
+            db,
+            claim=claim,
+            outside_source=outside_source,
+            result=verdict.result,
+            agrees=verdict.agrees,
+        )
+
+
+async def run_corroboration(
+    db: AsyncSession,
+    claims: Sequence[Claim],
+    sources: Sequence[CorroborationSource],
+) -> None:
+    """Gather + persist in one held transaction. Retained for callers/tests that
+    run over a small in-memory set; the deal pipeline instead uses gather_corroboration
+    (outside any transaction) then persist_corroboration (in a short write txn) so the
+    HTTP never sits inside a DB transaction (start_deal_corroboration).
+
+    Contracts (see gather_corroboration/persist_corroboration): no-signal records
+    nothing, a raising source is no-signal, claims outside CORROBORATABLE_STATUSES are
+    skipped. `db` must already be RLS-scoped; does not flush or commit."""
+    results = await gather_corroboration(db, claims, sources)
+    await persist_corroboration(db, results, {claim.id: claim for claim in claims})

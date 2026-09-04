@@ -236,10 +236,13 @@ async def test_ingests_claims_and_reconciles_same_page_fact(
     screening_run_id, screening_status = screening_rows[0]
     assert screening_status == "queued"
 
+    # Verify now chains into CORROBORATION (which hands off to screening), not
+    # screening directly -- the screening row is still created here (queued) as the
+    # token corroboration keys off; corroboration enqueues start_deal_screening for it.
     assert len(mocked_screening_enqueue) == 1
     job_name, kwargs = mocked_screening_enqueue[0]
-    assert job_name == "start_deal_screening"
-    assert kwargs["analysis_run_id"] == str(screening_run_id)
+    assert job_name == "start_deal_corroboration"
+    assert kwargs["screening_run_id"] == str(screening_run_id)
     assert kwargs["clerk_org_id"] == seeded_org["clerk_org_id"]
 
 

@@ -424,9 +424,9 @@ async def test_a_malformed_response_is_no_signal(payload: Any) -> None:
     )
 
 
-def test_the_source_is_not_registered_yet() -> None:
-    """Registration attaches once SIM-416 settles the corroboration pass's I/O
-    placement."""
+def test_the_source_is_registered() -> None:
+    """Registered into CORROBORATION_SOURCES now that the corroboration pass runs in
+    its own chained job (start_deal_corroboration)."""
     from app.services.corroboration import CORROBORATION_SOURCES
 
-    assert not any(getattr(s, "name", None) == TrademarkSource.name for s in CORROBORATION_SOURCES)
+    assert any(getattr(s, "name", None) == TrademarkSource.name for s in CORROBORATION_SOURCES)
