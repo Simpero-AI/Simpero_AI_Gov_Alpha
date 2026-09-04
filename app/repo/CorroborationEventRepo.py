@@ -1,6 +1,7 @@
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.claim import Claim
 from app.models.corroboration_event import CorroborationEvent
 from app.repo.BaseRepo import BaseRepo
 
@@ -40,3 +41,19 @@ class CorroborationEventRepo(BaseRepo[CorroborationEvent, dict]):
             .order_by(CorroborationEvent.created_at.asc())
         )
         return list(result.scalars().all())
+
+    async def list_for_deal(self, deal_id: object) -> list[tuple[CorroborationEvent, Claim]]:
+        """Every outside-source check run against any of a deal's claims, each
+        paired with the claim it targeted, newest first. corroboration_events
+        has no deal_id column by design (it links to a claim, not a deal), so
+        this joins through claims -- the deal-scoped read the
+        /deals/{id}/corroboration endpoint serves. RLS on both tables keeps it
+        org-scoped; newest-first lets the caller keep the latest check per
+        (claim, source) across re-analysis generations."""
+        result = await self.session.execute(
+            select(CorroborationEvent, Claim)
+            .join(Claim, CorroborationEvent.claim_id == Claim.id)
+            .where(Claim.deal_id == deal_id)
+            .order_by(CorroborationEvent.created_at.desc())
+        )
+        return [(event, claim) for event, claim in result.all()]

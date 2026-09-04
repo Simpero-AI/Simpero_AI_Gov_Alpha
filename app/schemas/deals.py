@@ -342,6 +342,44 @@ class CompanyViewResponse(CamelModel):
     plans: list[CompanyFactResponse]
 
 
+class CorroborationEventResponse(CamelModel):
+    """One outside-source check against one claim, for the corroboration display
+    ("show the result, cite the cite"). `agrees` is the source's judgment
+    (True = confirmed, False = conflicts with the deck's value, null =
+    presence-only / no binary verdict). `sourceUrl` links to the external record
+    the check used, null when the source exposes no stable per-record URL (the
+    identifier then lives in `result`). `result` is the source's raw finding kept
+    verbatim -- its keys vary by source, so it stays an open dict, same
+    convention as ScreeningRuleResultResponse.evidenceRef. The claim* fields are
+    the document-sourced half the check ran against, so both sides sit together."""
+
+    id: str
+    claim_id: str
+    outside_source: str
+    agrees: bool | None
+    source_url: str | None
+    result: dict
+    created_at: datetime
+    claim_entity: str | None
+    claim_attribute: str | None
+    claim_value: dict
+    claim_status: str
+
+
+class CorroborationViewResponse(CamelModel):
+    """GET /deals/{id}/corroboration -- every outside-source check run against
+    the deal's claims (newest first, deduped to the latest check per
+    claim+source), with per-verdict counts for the panel header. Empty `events`
+    (never a 404 for a claim-less or un-corroborated deal) renders the tab's own
+    "no external corroboration yet" state, expected until the corroboration pass
+    has run against the deal."""
+
+    events: list[CorroborationEventResponse]
+    confirmed_count: int
+    conflicting_count: int
+    total_count: int
+
+
 class FormerNameResponse(CamelModel):
     """A previous legal name with the window it applied to.
 

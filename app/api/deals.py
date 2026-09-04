@@ -19,6 +19,7 @@ from app.models.claim import Claim
 from app.models.deal import Deal
 from app.models.entity_resolution import EntityResolution
 from app.repo.AnalysisRunRepo import AnalysisRunRepo
+from app.repo.CorroborationEventRepo import CorroborationEventRepo
 from app.repo.DataSourceRepo import DataSourceRepo
 from app.repo.DealIntakeQuestionRepo import DealIntakeQuestionRepo
 from app.repo.DealRepo import DealRepo
@@ -34,6 +35,8 @@ from app.schemas.deals import (
     AvgAiScoreStat,
     CompanyFactResponse,
     CompanyViewResponse,
+    CorroborationEventResponse,
+    CorroborationViewResponse,
     CreateDealRequest,
     CreateDealResponse,
     DashboardStatsResponse,
@@ -69,6 +72,7 @@ from app.schemas.intake_response import (
     IntakeResponseResponse,
 )
 from app.services.company_view import build_company_view
+from app.services.corroboration_citation import corroboration_source_url
 from app.services.dashboard_stats import compute_month_bounds, compute_pipeline_value_delta
 from app.services.entity_resolution import get_resolver
 from app.services.entity_resolution.types import EntityResolutionError
@@ -842,6 +846,63 @@ async def list_deal_documents(
         )
         for document in documents
     ]
+
+
+@router.get("/{deal_id}/corroboration", response_model=CorroborationViewResponse)
+async def get_deal_corroboration(
+    deal_id: uuid.UUID, db: AsyncSession = Depends(get_db)
+) -> CorroborationViewResponse:
+    """Every outside-source corroboration check run against this deal's claims
+    (SEC EDGAR, ISED/OrgBook, US Federal Register, CIPO/USPTO trademarks), each
+    with its agree/disagree verdict and a link to the external record it checked
+    -- the "cite the cite" of the corroboration display. corroboration_events is
+    append-only and a re-analysis appends a fresh generation, so this keeps only
+    the latest check per (claim, source). RLS-scoped by get_db; returns an empty
+    list (never 404) for a deal the corroboration pass has produced no events
+    for yet, so the tab renders its own empty state."""
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    pairs = await CorroborationEventRepo(db).list_for_deal(deal_id)
+
+    # list_for_deal returns newest-first, so the first event seen for a
+    # (claim, source) is the latest generation; keep it and drop older ones.
+    seen: set[tuple[uuid.UUID, str]] = set()
+    events: list[CorroborationEventResponse] = []
+    confirmed = 0
+    conflicting = 0
+    for event, claim in pairs:
+        key = (event.claim_id, event.outside_source)
+        if key in seen:
+            continue
+        seen.add(key)
+        if event.agrees is True:
+            confirmed += 1
+        elif event.agrees is False:
+            conflicting += 1
+        events.append(
+            CorroborationEventResponse(
+                id=str(event.id),
+                claim_id=str(event.claim_id),
+                outside_source=event.outside_source,
+                agrees=event.agrees,
+                source_url=corroboration_source_url(event.outside_source, event.result),
+                result=event.result,
+                created_at=event.created_at,
+                claim_entity=claim.entity,
+                claim_attribute=claim.attribute,
+                claim_value=claim.value,
+                claim_status=claim.status,
+            )
+        )
+
+    return CorroborationViewResponse(
+        events=events,
+        confirmed_count=confirmed,
+        conflicting_count=conflicting,
+        total_count=len(events),
+    )
 
 
 @router.get("/{deal_id}/status", response_model=DealStatusResponse)

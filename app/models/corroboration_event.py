@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import ForeignKey, Integer, Text, func
+from sqlalchemy import Boolean, ForeignKey, Integer, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import DateTime
@@ -15,10 +15,10 @@ from app.models.organisation import Organisation
 # (see the migration that creates this table). Do NOT add application-level
 # guards here — see human_audit_log.py for why.
 #
-# Table only, no writer yet: nothing in this codebase performs an outside-
-# source check (OFAC screen, entity lookup, ...) yet, so nothing appends here
-# until that lands. This model exists now so the schema is locked in ahead of
-# that work, same situation as ai_audit_log.py before its LLM wrapper landed.
+# The outside-source adapters (SEC EDGAR, ISED/OrgBook, US Federal Register,
+# CIPO/USPTO trademarks) append here via record_corroboration_result during the
+# start_deal_corroboration pass. They are registered but a no-op until the pass
+# runs against a deal post-deploy, so an environment can hold zero rows.
 
 
 class CorroborationEvent(Base):
@@ -54,6 +54,14 @@ class CorroborationEvent(Base):
     # this is what a claim's status change (e.g. to `conflicted`) is based on,
     # never a replacement for the claim's own document-sourced value.
     result: Mapped[dict] = mapped_column(JSONB, nullable=False)
+
+    # The source adapter's agree/disagree judgment for this check (the `agrees`
+    # passed to record_corroboration_result): True confirms the claim, False
+    # conflicts with its document-sourced value (and is what flips the claim to
+    # `conflicted`). Nullable because a presence-only source can record a finding
+    # without a binary verdict. Read back by the corroboration display; the
+    # side effect on claims.status stays the deal-wide roll-up signal.
+    agrees: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
     # No updated_at — audit log rows are write-once by definition.
     created_at: Mapped[datetime] = mapped_column(
