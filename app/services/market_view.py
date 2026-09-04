@@ -54,8 +54,12 @@ def _fold_subjects(
             name = str(subject["name"])
             registered_any = False
             for entity in subject.get("entities") or []:
-                if entity and entity.casefold() not in entity_subject:
-                    entity_subject[entity.casefold()] = name
+                # normalize_name (not bare casefold) so a claim's raw entity string
+                # -- which can carry trailing/leading whitespace or punctuation noise
+                # from extraction -- still folds to the registered subject.
+                folded = normalize_name(entity) if entity else ""
+                if folded and folded not in entity_subject:
+                    entity_subject[folded] = name
                     registered_any = True
             # Only a subject that actually owns an entity can scope a claim. A
             # name-only subject (empty or all-duplicate entities) would otherwise
@@ -80,19 +84,19 @@ def _fold_subjects(
         quantitative = [
             c for c in claims if c.entity and c.claim_kind != "qualitative" and c.status in _TRUSTED
         ]
-        freq = Counter(c.entity.casefold() for c in quantitative)
+        freq = Counter(normalize_name(c.entity) for c in quantitative)  # type: ignore[arg-type]
         display: dict[str, str] = {}
         for claim in quantitative:
-            display.setdefault(claim.entity.casefold(), claim.entity)  # type: ignore[union-attr]
-        if company and company.casefold() in freq:
+            display.setdefault(normalize_name(claim.entity), claim.entity)  # type: ignore[arg-type]
+        if company and normalize_name(company) in freq:
             # The deal's own company IS the target: if it appears among the trusted
             # quantitative claims at all, it leads OUTRIGHT. Otherwise a competitor
             # with MORE trusted claims wins the election and, since sizing keeps one
             # winner per slot, replaces the target's own figure entirely. Threshold/
             # most-mentioned only decides the lead when deal.name matches no claim
             # entity (the else branch).
-            entity_subject[company.casefold()] = display.get(company.casefold(), company)
-            order.append(entity_subject[company.casefold()])
+            entity_subject[normalize_name(company)] = display.get(normalize_name(company), company)
+            order.append(entity_subject[normalize_name(company)])
         else:
             for folded, _count in sorted(
                 ((e, f) for e, f in freq.items() if f >= 2), key=lambda item: (-item[1], item[0])
@@ -100,7 +104,7 @@ def _fold_subjects(
                 entity_subject[folded] = display.get(folded, folded)
                 order.append(entity_subject[folded])
         if not order and company:
-            entity_subject[company.casefold()] = company
+            entity_subject[normalize_name(company)] = company
             order.append(company)
     lead = order[0] if order else _UNMATCHED
     return lead, entity_subject
@@ -112,7 +116,7 @@ def _subject_of(entity_subject: dict[str, str], entity: str | None, lead: str) -
     the _UNMATCHED sentinel -- never a real subject name."""
     if not entity:
         return lead
-    return entity_subject.get(entity.casefold(), _UNMATCHED)
+    return entity_subject.get(normalize_name(entity), _UNMATCHED)
 
 
 # An _UNMATCHED sizing entity is either a legitimate market descriptor ("the UK
@@ -340,9 +344,14 @@ def build_market_view(
         # NAMED non-lead subject OR an unlisted competitor (an unmapped bare company
         # name), so a rival's figure never surfaces as the deal's own market size.
         subject = _subject_of(entity_subject, claim.entity, lead_subject)
-        if subject != lead_subject and not (
-            subject == _UNMATCHED and _is_market_descriptor(claim.entity)
-        ):
+        # A real lead is never the _UNMATCHED sentinel. When the deal has no dashboard
+        # subject, nothing crosses the frequency threshold, and no company name (e.g.
+        # deal.name==""), lead_subject is itself _UNMATCHED -- and a named competitor
+        # also folds to _UNMATCHED, so a bare `subject == lead_subject` would treat it
+        # as the lead and let its figure through. Require lead_subject != _UNMATCHED so
+        # such a claim falls to the market-descriptor gate instead of passing unchecked.
+        is_lead = subject == lead_subject and lead_subject != _UNMATCHED
+        if not (is_lead or (subject == _UNMATCHED and _is_market_descriptor(claim.entity))):
             continue
         keyed = _sizing_label(claim)
         if keyed is None:
@@ -352,7 +361,7 @@ def build_market_view(
         # an unmapped market-descriptor figure for the same slot. A descriptor figure
         # still fills a slot the lead lacks (subject_priority 0), but can no longer
         # outrank the target's own.
-        subject_priority = 1 if subject == lead_subject else 0
+        subject_priority = 1 if is_lead else 0
         rank = (subject_priority, *_sizing_rank(claim))
         current = sizing_best.get(key)
         if current is None or rank > current[0]:

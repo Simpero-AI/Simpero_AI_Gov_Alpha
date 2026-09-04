@@ -227,6 +227,35 @@ def test_an_unlisted_competitors_sizing_figure_does_not_fill_an_empty_slot():
     assert view.sizing == []
 
 
+def test_a_bare_competitor_is_dropped_even_when_the_deal_has_no_lead():
+    # No dashboard subject, no company name (deal.name==""), and a single sizing
+    # claim that never crosses the frequency threshold -> lead_subject is _UNMATCHED.
+    # A named competitor also folds to _UNMATCHED, so without the `lead != _UNMATCHED`
+    # guard it would pass the filter as if it were the lead. It is not a market
+    # descriptor, so it must still be dropped.
+    claims = [
+        _claim(attribute_raw="Total Addressable Market", normalized=900_000_000, entity="BigRival"),
+    ]
+
+    view = build_market_view(claims, filenames={}, company="")
+
+    assert view.sizing == []
+
+
+def test_entity_with_whitespace_noise_still_folds_to_its_subject():
+    # A claim whose entity carries trailing whitespace (plausible extraction noise)
+    # must still fold to the registered subject: normalize_name absorbs it where a
+    # bare casefold would not, so the target's own figure is kept rather than dropped.
+    claims = [
+        _claim(attribute_raw="Total Addressable Market", normalized=100_000_000, entity="AcmeCo "),
+    ]
+    structure = {"subjects": [{"name": "AcmeCo", "entities": ["AcmeCo"]}]}
+
+    view = build_market_view(claims, filenames={}, dashboard_structure=structure, company="AcmeCo")
+
+    assert [(f.label, f.value) for f in view.sizing] == [("TAM", "$100.00M")]
+
+
 def test_a_qualitative_market_fact_with_no_text_does_not_show_an_empty_row():
     claims = [
         _qual("", "market_definition"),
