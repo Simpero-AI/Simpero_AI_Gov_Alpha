@@ -91,10 +91,13 @@ def _seed_claim(
         }
     )
     with owner_conn.cursor() as cur:
+        # A checked status (cited/conflicted/...) requires verification_method
+        # to be non-null (ck_claims_checked_requires_method); all seeds here are
+        # corroboratable (already internally checked), so set it.
         cur.execute(
             "INSERT INTO claims (org_id, deal_id, entity, attribute, value, kind, page, "
-            "char_start, char_end, status) "
-            "VALUES (%s, %s, %s, %s, %s::jsonb, 'pdf', 3, 100, 120, %s) RETURNING id",
+            "char_start, char_end, status, verification_method) "
+            "VALUES (%s, %s, %s, %s, %s::jsonb, 'pdf', 3, 100, 120, %s, 'exact_span') RETURNING id",
             (org_pk, deal_id, entity, attribute, json.dumps(value), status),
         )
         return str(cur.fetchone()[0])
