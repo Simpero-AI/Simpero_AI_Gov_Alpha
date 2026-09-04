@@ -234,10 +234,11 @@ def _fold_subjects(
     company: str | None = None,
 ) -> tuple[str, dict[str, str]]:
     """(lead_subject, {casefolded entity: subject}). The parser's grounded
-    organizing pass leads when present; otherwise the most-mentioned entities are
-    their own subjects, and -- when none crosses the threshold -- the deal's own
-    company anchors the lead so the subject filter is never a no-op. Keyed
-    casefolded so "American Casino" and "american casino" fold to one subject."""
+    organizing pass leads when present; otherwise the deal's own company leads
+    whenever its name is known, and only when it is not do the most-mentioned
+    entities elect the lead -- so a competitor never wins the lead and surfaces its
+    facts as the target's. Keyed casefolded so "American Casino" and "american
+    casino" fold to one subject."""
     entity_subject: dict[str, str] = {}
     order: list[str] = []
     subjects = (dashboard_structure or {}).get("subjects")
@@ -259,11 +260,11 @@ def _fold_subjects(
             if registered_any:
                 order.append(name)
     if not order:
-        # Elect the most-mentioned entities, then the deal's company as anchor.
-        # Vote only with TRUSTED, QUANTITATIVE claims: an untrusted mention, or a
-        # competitor named across qualitative risk/related-party assertions, must
-        # not crown a non-target as lead and surface its facts as the target's.
-        # (Count by the CASEFOLDED entity so case-variant spellings accumulate.)
+        # No grounded subjects. Count the most-mentioned entities, voting only with
+        # TRUSTED, QUANTITATIVE claims: an untrusted mention, or a competitor named
+        # across qualitative risk/related-party assertions, must not crown a
+        # non-target as lead. (Count by the CASEFOLDED entity so case-variant
+        # spellings accumulate.)
         quantitative = [
             c for c in claims if c.entity and c.claim_kind != "qualitative" and c.status in _TRUSTED
         ]
@@ -271,12 +272,18 @@ def _fold_subjects(
         display: dict[str, str] = {}
         for claim in quantitative:
             display.setdefault(claim.entity.casefold(), claim.entity)  # type: ignore[union-attr]
-        if company and company.casefold() in freq:
-            # The deal's own company IS the target: if it appears among the trusted
-            # quantitative claims at all, it leads OUTRIGHT -- a competitor with more
-            # claims must not win the frequency election and have its facts surface
-            # as the target's. Threshold/most-mentioned only decides the lead when
-            # deal.name matches no claim entity (the else branch).
+        if company:
+            # The deal's own company IS the target, so it leads OUTRIGHT whenever we
+            # know its name -- whether or not it appears among the trusted
+            # quantitative claims. A competitor with more claims must never win the
+            # frequency election and surface its facts as the target's; and a target
+            # carrying only qualitative disclosures (no trusted quantitative claim)
+            # must still lead, or those disclosures fold to _UNMATCHED and are
+            # dropped, blanking the Business Overview tab. The frequency election
+            # decides the lead ONLY when the deal has no company name (the else
+            # branch); an untagged fact (see _subject_of) or one whose entity IS the
+            # company is then kept, and any other named entity folds to _UNMATCHED
+            # and is dropped.
             entity_subject[company.casefold()] = display.get(company.casefold(), company)
             order.append(entity_subject[company.casefold()])
         else:
@@ -285,13 +292,6 @@ def _fold_subjects(
             ):
                 entity_subject[folded] = display.get(folded, folded)
                 order.append(entity_subject[folded])
-        if not order and company:
-            # deal.name matched no claim entity and nothing crossed the threshold;
-            # anchor on the company so the subject filter isn't a no-op: an untagged
-            # fact (see _subject_of) or one whose entity IS the company is kept; any
-            # other named entity folds to _UNMATCHED and is dropped.
-            entity_subject[company.casefold()] = company
-            order.append(company)
     lead = order[0] if order else _UNMATCHED
     return lead, entity_subject
 

@@ -267,6 +267,30 @@ def test_freq_fallback_anchors_the_lead_on_the_company_excluding_competitors():
     assert [f.value for f in view.facts if f.label == "Headcount"] == ["1,450"]
 
 
+def test_qualitative_only_target_still_leads_over_a_quantitative_competitor():
+    # The target carries only a qualitative disclosure -- no trusted quantitative
+    # claim, so it is absent from the frequency vote -- while a competitor has two
+    # trusted quantitative claims. The deal's company must still lead: otherwise the
+    # competitor wins the election, the target's disclosure folds to _UNMATCHED and
+    # is dropped, and the rival's qualitative note surfaces as the target's overview.
+    claims = [
+        _qual(
+            "Revenue is highly concentrated in one key customer.",
+            "risk_or_dependency",
+            entity="TargetCo",
+        ),
+        _qual("Runs an aggressive franchise model.", "operating_model", entity="RivalCo"),
+        _claim(attribute="revenue", normalized=100_000_000, entity="RivalCo"),
+        _claim(attribute="cogs", normalized=60_000_000, entity="RivalCo"),
+    ]
+
+    view = build_company_view(claims, filenames={}, company="TargetCo")
+
+    assert [f.value for f in view.risks] == ["Revenue is highly concentrated in one key customer."]
+    # The rival's operating-model note did not surface as the target's overview.
+    assert [f.value for f in view.overview] == []
+
+
 def test_related_party_assertion_about_a_third_party_is_kept():
     # A related-party assertion's entity is the party it names -- a director or
     # affiliate (a third party), which folds to "Other". It must still surface in
