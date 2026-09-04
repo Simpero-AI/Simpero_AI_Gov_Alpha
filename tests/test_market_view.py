@@ -207,6 +207,26 @@ def test_an_unmapped_market_figure_fills_a_slot_the_target_lacks():
     assert [(f.label, f.value) for f in view.sizing] == [("TAM", "$5.00B")]
 
 
+def test_an_unlisted_competitors_sizing_figure_does_not_fill_an_empty_slot():
+    # The target reports NO TAM. An unlisted competitor's TAM folds to _UNMATCHED
+    # and would fill the empty TAM slot, surfacing as the deal's own market size.
+    # A bare company name is not a market descriptor, so the figure must be dropped
+    # -- distinct from the market-descriptor case above, which legitimately fills it.
+    claims = [
+        _claim(
+            attribute_raw="Total Addressable Market",
+            normalized=900_000_000,
+            entity="BigRival",
+            period_year=2024,
+        ),
+    ]
+    structure = {"subjects": [{"name": "AcmeCo", "entities": ["AcmeCo"]}]}
+
+    view = build_market_view(claims, filenames={}, dashboard_structure=structure, company="AcmeCo")
+
+    assert view.sizing == []
+
+
 def test_a_qualitative_market_fact_with_no_text_does_not_show_an_empty_row():
     claims = [
         _qual("", "market_definition"),

@@ -115,6 +115,27 @@ def _subject_of(entity_subject: dict[str, str], entity: str | None, lead: str) -
     return entity_subject.get(entity.casefold(), _UNMATCHED)
 
 
+# An _UNMATCHED sizing entity is either a legitimate market descriptor ("the UK
+# student housing market") -- whose figure IS the deal's market and may fill an
+# empty slot -- or an unlisted competitor ("BigRival") whose figure must not
+# masquerade as the deal's own market size. Subject-folding can't separate them, so
+# a market/industry/sector token in the entity name is the discriminator. Precision
+# over recall: a rare descriptor without one of these words is conservatively
+# dropped (the section reads "not available") rather than risk surfacing a rival's
+# figure as the deal's.
+_MARKET_DESCRIPTOR_TOKENS = frozenset(
+    {"market", "markets", "industry", "industries", "sector", "sectors"}
+)
+
+
+def _is_market_descriptor(entity: str | None) -> bool:
+    """Whether an _UNMATCHED sizing entity reads as a market/industry descriptor
+    rather than a company name."""
+    if not entity:
+        return True
+    return bool(_MARKET_DESCRIPTOR_TOKENS.intersection(normalize_name(entity).split()))
+
+
 @dataclass(frozen=True)
 class MarketFact:
     label: str
@@ -313,22 +334,24 @@ def build_market_view(
             continue
 
         # A single sizing figure wins per key, so a competitor's figure must not
-        # displace the target's. Keep an unmapped ("Other") or lead-subject
-        # figure; drop one whose entity resolves to a NAMED non-lead subject.
+        # displace the target's. Keep the lead-subject figure, or an unmapped one
+        # ONLY when its entity reads as a market descriptor (a market/industry figure
+        # legitimately fills a slot the target lacks); drop one whose entity is a
+        # NAMED non-lead subject OR an unlisted competitor (an unmapped bare company
+        # name), so a rival's figure never surfaces as the deal's own market size.
         subject = _subject_of(entity_subject, claim.entity, lead_subject)
-        if subject != lead_subject and subject != _UNMATCHED:
+        if subject != lead_subject and not (
+            subject == _UNMATCHED and _is_market_descriptor(claim.entity)
+        ):
             continue
         keyed = _sizing_label(claim)
         if keyed is None:
             continue
         key, display = keyed
-        # Lead-subject priority leads the rank: the target's own figure always
-        # beats an "Other" one for the same slot. "Other" covers both a legitimate
-        # market-descriptor entity ("the UK market") AND an UNLISTED competitor
-        # that folded to "Other" (one not named in dashboard_structure, so the
-        # filter above can't drop it) -- without this, that competitor's larger or
-        # more recent figure would outrank the target's, since _sizing_rank alone
-        # ignores subject. An "Other" figure still fills a slot the lead lacks.
+        # Lead-subject priority leads the rank: the target's own figure always beats
+        # an unmapped market-descriptor figure for the same slot. A descriptor figure
+        # still fills a slot the lead lacks (subject_priority 0), but can no longer
+        # outrank the target's own.
         subject_priority = 1 if subject == lead_subject else 0
         rank = (subject_priority, *_sizing_rank(claim))
         current = sizing_best.get(key)
