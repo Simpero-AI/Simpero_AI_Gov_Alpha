@@ -52,6 +52,13 @@ class DataSource(Base):
     storage_key: Mapped[str] = mapped_column(Text, nullable=False)
     filename: Mapped[str] = mapped_column(Text, nullable=False)
 
+    # The external URL a web-collected source came from (the web-search deep
+    # search pass). Null for ordinary uploaded documents; set for the synthetic
+    # per-source rows the collect pass creates, so a web claim's citation is a
+    # real external link rather than a filename. Identity/append-only like the
+    # other non-lifecycle columns.
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     # Client-computed hash at presign time -- the pre-flight dedupe key.
     # Never treated as proof of the uploaded bytes.
     declared_sha256: Mapped[str] = mapped_column(String(64), nullable=False, index=True)

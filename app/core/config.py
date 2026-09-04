@@ -30,6 +30,11 @@ class Settings(BaseSettings):
     # Small, fast model for the screening-insights summarisation. Proven
     # available to this account (the parser uses it for attribute classification).
     screening_insights_model: str = "claude-haiku-4-5-20251001"
+    # Model for the web-search deep-search collect pass (web_search server tool).
+    # Defaults to the same fast model; tune up to a stronger one if source
+    # selection/adjudication quality needs it. The pass is a no-op without
+    # anthropic_api_key, so this is only consulted when a key is set.
+    web_search_model: str = "claude-haiku-4-5-20251001"
     embedding_model: str = "voyage-4-large"
     # Must match the chunks.embedding column dim (Vector(1024)); changing it
     # needs a matching migration. voyage-4 serves 2048/1024/512/256.
