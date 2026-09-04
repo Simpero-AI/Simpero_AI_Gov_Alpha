@@ -271,16 +271,25 @@ def _fold_subjects(
         display: dict[str, str] = {}
         for claim in quantitative:
             display.setdefault(claim.entity.casefold(), claim.entity)  # type: ignore[union-attr]
-        for folded, _count in sorted(
-            ((e, f) for e, f in freq.items() if f >= 2), key=lambda item: (-item[1], item[0])
-        ):
-            entity_subject[folded] = display.get(folded, folded)
-            order.append(entity_subject[folded])
+        if company and company.casefold() in freq:
+            # The deal's own company IS the target: if it appears among the trusted
+            # quantitative claims at all, it leads OUTRIGHT -- a competitor with more
+            # claims must not win the frequency election and have its facts surface
+            # as the target's. Threshold/most-mentioned only decides the lead when
+            # deal.name matches no claim entity (the else branch).
+            entity_subject[company.casefold()] = display.get(company.casefold(), company)
+            order.append(entity_subject[company.casefold()])
+        else:
+            for folded, _count in sorted(
+                ((e, f) for e, f in freq.items() if f >= 2), key=lambda item: (-item[1], item[0])
+            ):
+                entity_subject[folded] = display.get(folded, folded)
+                order.append(entity_subject[folded])
         if not order and company:
-            # No entity crossed the threshold. Anchor the lead on the deal's own
-            # company so the subject filter isn't a no-op: an untagged fact (see
-            # _subject_of) or one whose entity IS the company is kept; any other
-            # named entity folds to _UNMATCHED and is dropped.
+            # deal.name matched no claim entity and nothing crossed the threshold;
+            # anchor on the company so the subject filter isn't a no-op: an untagged
+            # fact (see _subject_of) or one whose entity IS the company is kept; any
+            # other named entity folds to _UNMATCHED and is dropped.
             entity_subject[company.casefold()] = company
             order.append(company)
     lead = order[0] if order else _UNMATCHED

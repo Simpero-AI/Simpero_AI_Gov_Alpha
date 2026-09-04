@@ -365,3 +365,25 @@ def test_untrusted_claims_do_not_crown_a_bogus_company_lead():
 
     assert [f.label for f in view.facts] == ["Headcount"]
     assert [f.value for f in view.overview] == ["Revenue is 70% recurring subscription."]
+
+
+def test_company_leads_even_when_a_competitor_has_more_claims():
+    """The deal's own company is the target: when it appears among the trusted
+    quantitative claims it leads outright, so a competitor with MORE claims can't
+    win the frequency election and surface its facts as the target's."""
+    claims = [
+        _claim(
+            attribute_raw="Total Employees", normalized=1_000, value_type="count", entity="TargetCo"
+        ),
+        # Competitor with more trusted quantitative claims than the target.
+        _claim(
+            attribute_raw="Total Employees", normalized=9_000, value_type="count", entity="RivalCo"
+        ),
+        _claim(attribute="revenue", normalized=1, entity="RivalCo"),
+        _qual("The target's model is subscription.", "operating_model", entity="TargetCo"),
+    ]
+
+    view = build_company_view(claims, filenames={}, company="TargetCo")
+
+    assert [(f.label, f.value) for f in view.facts] == [("Headcount", "1,000")]
+    assert [f.value for f in view.overview] == ["The target's model is subscription."]
