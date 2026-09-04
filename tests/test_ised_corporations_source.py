@@ -702,12 +702,12 @@ async def test_a_claim_with_no_readable_value_is_no_signal() -> None:
     assert await src.check(_FakeSession(_entity()), _claim(raw=None)) is None
 
 
-def test_the_source_is_not_registered_yet() -> None:
-    """Registration attaches once SIM-416 settles the corroboration pass's I/O
-    placement -- until then a network call must not sit inside the verify
-    transaction."""
+def test_the_source_is_registered() -> None:
+    """Registered into CORROBORATION_SOURCES now that the corroboration pass runs in
+    its own chained job (start_deal_corroboration), where the network no longer sits
+    inside the verify transaction."""
     from app.services.corroboration import CORROBORATION_SOURCES
 
-    assert not any(
+    assert any(
         getattr(s, "name", None) == IsedCorporationsSource.name for s in CORROBORATION_SOURCES
     )
