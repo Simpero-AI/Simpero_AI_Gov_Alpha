@@ -320,3 +320,48 @@ def test_a_non_related_party_assertion_about_a_third_party_is_still_dropped():
     view = build_company_view(claims, filenames={}, company="TargetCo")
 
     assert view.overview == []
+
+
+def test_dashboard_subject_with_no_entities_does_not_empty_the_whole_view():
+    """The serious bug: a dashboard subject named but with an empty entities list
+    became an unusable lead, folding EVERY entity-tagged claim to _UNMATCHED and
+    rendering the entire Business Overview blank for a deal with perfectly good
+    claims. It must fall through to the frequency election instead, so the target's
+    identity + qualitative facts still surface."""
+    dashboard = {"subjects": [{"name": "TargetCo", "entities": []}]}
+    claims = [
+        _claim(
+            attribute_raw="Total Employees", normalized=1_450, value_type="count", entity="TargetCo"
+        ),
+        _claim(attribute="revenue", normalized=5_000_000, entity="TargetCo"),
+        _qual("Revenue is 70% recurring subscription.", "operating_model", entity="TargetCo"),
+        _qual("Heavily dependent on a single supplier.", "risk_or_dependency", entity="TargetCo"),
+    ]
+
+    view = build_company_view(
+        claims, filenames={}, dashboard_structure=dashboard, company="TargetCo"
+    )
+
+    assert [f.label for f in view.facts] == ["Headcount"]
+    assert [f.value for f in view.overview] == ["Revenue is 70% recurring subscription."]
+    assert [f.value for f in view.risks] == ["Heavily dependent on a single supplier."]
+
+
+def test_untrusted_claims_do_not_crown_a_bogus_company_lead():
+    """The frequency election votes only with trusted, quantitative claims, so two
+    untrusted mentions of a bogus entity can't be elected lead over the real target
+    and surface the wrong company's facts."""
+    claims = [
+        _claim(attribute="revenue", normalized=1, entity="BogusCo", status="proposed"),
+        _claim(attribute="cogs", normalized=1, entity="BogusCo", status="proposed"),
+        _claim(
+            attribute_raw="Total Employees", normalized=1_450, value_type="count", entity="TargetCo"
+        ),
+        _claim(attribute="revenue", normalized=5_000_000, entity="TargetCo"),
+        _qual("Revenue is 70% recurring subscription.", "operating_model", entity="TargetCo"),
+    ]
+
+    view = build_company_view(claims, filenames={})
+
+    assert [f.label for f in view.facts] == ["Headcount"]
+    assert [f.value for f in view.overview] == ["Revenue is 70% recurring subscription."]
