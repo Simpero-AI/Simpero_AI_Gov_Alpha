@@ -205,6 +205,9 @@ def test_parse_deadline_covers_the_parser_per_document_ceiling():
     sync if that ceiling changes (Simpero_Gov_AI_Services worker.py)."""
     parser_worst_case_s = 7200 * 2  # process_document timeout=7200s, retries=1 (2 attempts)
     assert parser_worst_case_s <= job_module._PARSE_DEADLINE_PER_DOC_SECONDS
+    # The wait ceiling must be >= one doc's budget, or a single-doc deal would be
+    # capped below the parser's own worst case and falsely time out.
+    assert job_module._PARSE_DEADLINE_PER_DOC_SECONDS <= job_module._MAX_PARSE_WAIT_SECONDS
 
 
 async def test_enqueue_receives_the_orgs_approved_mandate_options(

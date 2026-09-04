@@ -255,25 +255,27 @@ def test_start_analysis_happy_path(client, owner_conn, seeded_org, seeded_deal, 
     assert job_name == "start_deal_analysis"
     assert kwargs["deal_id"] == seeded_deal
     assert kwargs["clerk_org_id"] == seeded_org["clerk_org_id"]
-    from app.jobs.tasks.start_deal_analysis import _PARSE_DEADLINE_PER_DOC_SECONDS
+    from app.jobs.tasks.start_deal_analysis import _MAX_PARSE_WAIT_SECONDS
 
-    # The SAQ job timeout MUST exceed the job's own inner poll deadline
-    # (_PARSE_DEADLINE_PER_DOC_SECONDS per document, one usable doc here), or SAQ
-    # hard-cancels the job before the deadline fires and strands the run
-    # in_progress -- the freeze the deadline fix targets, relocated to the outer cap.
-    assert kwargs["timeout"] == _PARSE_DEADLINE_PER_DOC_SECONDS + 600
-    assert kwargs["timeout"] > _PARSE_DEADLINE_PER_DOC_SECONDS
+    # The SAQ job timeout is a flat ceiling (_MAX_PARSE_WAIT_SECONDS + headroom),
+    # NOT sized from this request's doc count: the job caps its own inner poll
+    # deadline at that same ceiling, so a flat outer timeout stays above the inner
+    # one even if the count drifts up before the worker runs -- otherwise SAQ would
+    # cancel mid-parse and strand the run in_progress.
+    assert kwargs["timeout"] == _MAX_PARSE_WAIT_SECONDS + 600
+    assert kwargs["timeout"] > _MAX_PARSE_WAIT_SECONDS
     assert kwargs["retries"] == 1
-    assert kwargs["ttl"] == 86400
+    assert kwargs["ttl"] == max(86400, _MAX_PARSE_WAIT_SECONDS + 3600)
 
 
-def test_start_analysis_scales_the_saq_timeout_by_document_count(
+def test_start_analysis_saq_timeout_is_a_flat_drift_proof_ceiling(
     client, owner_conn, seeded_org, seeded_deal, mocked_queue
 ):
-    """The SAQ job timeout/ttl scale with the document count, not a single-doc
-    budget -- so the outer cap stays above the job's inner per-doc poll deadline
-    (also * doc count) for a multi-document deal, not just a one-doc one."""
-    from app.jobs.tasks.start_deal_analysis import _PARSE_DEADLINE_PER_DOC_SECONDS
+    """The SAQ job timeout is a flat ceiling, independent of the request-time doc
+    count -- so it can't be undersized when the count drifts up (pending docs
+    finishing verification) before the worker dequeues and computes a larger inner
+    deadline. Two usable docs yields the same flat timeout as one."""
+    from app.jobs.tasks.start_deal_analysis import _MAX_PARSE_WAIT_SECONDS
 
     _seed_data_source(owner_conn, seeded_org["org_pk"], seeded_deal, "verified")
     _seed_data_source(owner_conn, seeded_org["org_pk"], seeded_deal, "verified")
@@ -284,11 +286,11 @@ def test_start_analysis_scales_the_saq_timeout_by_document_count(
 
     assert len(mocked_queue) == 1
     _job_name, kwargs = mocked_queue[0]
-    # Two usable docs -> the multiplier is exercised: budget = per-doc * 2, still
-    # strictly above the inner deadline's own per-doc * 2 for the same count.
-    assert kwargs["timeout"] == _PARSE_DEADLINE_PER_DOC_SECONDS * 2 + 600
-    assert kwargs["timeout"] > _PARSE_DEADLINE_PER_DOC_SECONDS * 2
-    assert kwargs["ttl"] == max(86400, _PARSE_DEADLINE_PER_DOC_SECONDS * 2 + 3600)
+    # Flat: per-doc count does NOT scale the outer timeout (that's what keeps it
+    # above the job's capped inner deadline regardless of count drift), and it is
+    # bounded (no unbounded multi-day cap for a large batch).
+    assert kwargs["timeout"] == _MAX_PARSE_WAIT_SECONDS + 600
+    assert kwargs["ttl"] == max(86400, _MAX_PARSE_WAIT_SECONDS + 3600)
 
 
 def test_start_analysis_409_when_a_run_is_already_active(

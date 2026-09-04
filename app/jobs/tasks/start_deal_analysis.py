@@ -49,13 +49,21 @@ from app.services.screening.workspace_config import load_workspace_config
 # with timeout=7200s and retries=1 (worst case 2 attempts = 14400s PER DOCUMENT;
 # see Simpero_Gov_AI_Services parser_service/worker.py::_normalize_job_policy)
 # and runs concurrency:1, so N documents serialize -- hence a per-document budget
-# scaled by the document count where the deadline is set. This budget MUST stay
-# >= the parser's enqueued timeout x attempts. The poll loop still exits the
+# scaled by the document count where the deadline is set. This per-doc budget MUST
+# stay >= the parser's enqueued timeout x attempts. The poll loop still exits the
 # instant every parse job reaches a terminal status, so a genuine failure
 # surfaces immediately; this only bounds the wait on parses still legitimately
 # running. (Was a flat 7200s -- one attempt's worth -- which the #59 qualitative
 # tier's longer parses began exceeding, the "parsing took too long" freeze.)
 _PARSE_DEADLINE_PER_DOC_SECONDS = 15000
+# Absolute ceiling on the scaled wait, so a large batch can't (a) pin a worker
+# slot for days on a genuinely stuck job, nor (b) let this job's inner deadline
+# outgrow the enqueue-time SAQ timeout when the document count drifts up between
+# request and execution (pending docs finishing verification). The enqueue sizes
+# the outer SAQ timeout from THIS flat ceiling, not the request-time count, so the
+# outer cap always exceeds the inner deadline regardless of drift. ~5 documents'
+# worth; a realistic multi-doc deal finishes well under it via the early exit.
+_MAX_PARSE_WAIT_SECONDS = _PARSE_DEADLINE_PER_DOC_SECONDS * 5
 _POLL_INTERVAL_SECONDS = 15
 
 
@@ -244,7 +252,9 @@ async def start_deal_analysis(
     # outcomes as they land, without holding a transaction open across the
     # wait (D10).
     loop = asyncio.get_event_loop()
-    deadline = loop.time() + _PARSE_DEADLINE_PER_DOC_SECONDS * max(1, len(parse_jobs))
+    deadline = loop.time() + min(
+        _PARSE_DEADLINE_PER_DOC_SECONDS * max(1, len(parse_jobs)), _MAX_PARSE_WAIT_SECONDS
+    )
     verification_run_id: UUID | None = None
     while True:
         async with AsyncSessionLocal() as session, session.begin():
