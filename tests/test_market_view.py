@@ -386,3 +386,54 @@ def test_dashboard_subject_with_no_entities_does_not_disable_scoping():
 
     assert [(f.label, f.value) for f in view.sizing] == [("TAM", "$5.00B")]
     assert view.sizing[0].entity == "TargetCo"
+
+
+def test_untrusted_claims_do_not_inflate_the_lead_election():
+    """Only trusted, quantitative claims vote for the lead subject. Two untrusted
+    (proposed) mentions of a bogus entity must not crown it lead over the real
+    target and let its sizing figure win the slot."""
+    claims = [
+        # Bogus entity: two untrusted mentions (which would cross the freq>=2 vote
+        # threshold if they counted) plus a trusted TAM that must not win.
+        _claim(attribute="revenue", normalized=1, entity="BogusCo", status="proposed"),
+        _claim(attribute="cogs", normalized=1, entity="BogusCo", status="proposed"),
+        _claim(
+            attribute_raw="Total Addressable Market", normalized=9_000_000_000, entity="BogusCo"
+        ),
+        # Real target: two trusted quantitative claims -> wins the election.
+        _claim(attribute="revenue", normalized=1, entity="TargetCo"),
+        _claim(
+            attribute_raw="Total Addressable Market", normalized=5_000_000_000, entity="TargetCo"
+        ),
+    ]
+
+    view = build_market_view(claims, filenames={})
+
+    assert [(f.label, f.value) for f in view.sizing] == [("TAM", "$5.00B")]
+    assert view.sizing[0].entity == "TargetCo"
+
+
+def test_a_dashboard_subject_named_other_does_not_collide_with_unmatched():
+    """A dashboard subject literally named "Other" must not share the lead's sizing
+    priority with unmatched entities: an unlisted competitor folds to the internal
+    _UNMATCHED sentinel, not to the real "Other" subject, so it can't win the slot."""
+    dashboard = {"subjects": [{"name": "Other", "entities": ["OtherCo"]}]}
+    claims = [
+        _claim(
+            attribute_raw="Total Addressable Market",
+            normalized=5_000_000_000,
+            entity="OtherCo",  # belongs to the real lead subject "Other"
+            period_year=2024,
+        ),
+        _claim(
+            attribute_raw="Total Addressable Market",
+            normalized=9_000_000_000,
+            entity="RivalCo",  # unlisted -> _UNMATCHED, must not inherit lead priority
+            period_year=2024,
+        ),
+    ]
+
+    view = build_market_view(claims, filenames={}, dashboard_structure=dashboard, company="OtherCo")
+
+    assert [(f.label, f.value) for f in view.sizing] == [("TAM", "$5.00B")]
+    assert view.sizing[0].entity == "OtherCo"

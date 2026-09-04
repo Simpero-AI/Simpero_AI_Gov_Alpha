@@ -27,6 +27,12 @@ from app.models.claim import Claim
 from app.services.entity_resolution.resolved import normalize_name
 from app.services.screening_materials import _STATUS_RANK, _TRUSTED, _citation, _fmt_value
 
+# Sentinel subject for a claim whose entity matched no dashboard subject. A
+# distinct string no dashboard/parser emits as a subject name (a NUL byte), so an
+# unmatched entity never collides with a real lead subject literally named "Other"
+# -- which would otherwise hand the unmatched claim the lead's sizing priority.
+_UNMATCHED = "\x00unmatched"
+
 
 def _fold_subjects(
     claims: Sequence[Claim],
@@ -64,12 +70,16 @@ def _fold_subjects(
     # no name). Otherwise a malformed structure would leave lead="Other" and
     # silently pass every claim (including a competitor's) through the sizing filter.
     if not order:
-        # Elect the most-mentioned entities, then the deal's company. QUALITATIVE
-        # claims are excluded from the election: a competitive_position claim's
-        # entity is a COMPETITOR and a market_definition's is "the market", so
-        # counting them could crown a non-target as the lead subject and let its
-        # sizing figures win the slot.
-        quantitative = [c for c in claims if c.entity and c.claim_kind != "qualitative"]
+        # Elect the most-mentioned entities, then the deal's company. Only
+        # TRUSTED, QUANTITATIVE claims vote: a competitive_position/market_definition
+        # entity is a competitor or "the market", and an UNTRUSTED claim
+        # (proposed/rejected/conflicted) is unverified -- counting either could
+        # crown a non-target as lead on unearned mentions and let its sizing figure
+        # win the slot. (The main loop already gates on _TRUSTED; this mirrors it so
+        # the vote can't be inflated by claims that will never surface anyway.)
+        quantitative = [
+            c for c in claims if c.entity and c.claim_kind != "qualitative" and c.status in _TRUSTED
+        ]
         freq = Counter(c.entity.casefold() for c in quantitative)
         display: dict[str, str] = {}
         for claim in quantitative:
@@ -82,16 +92,17 @@ def _fold_subjects(
         if not order and company:
             entity_subject[company.casefold()] = company
             order.append(company)
-    lead = order[0] if order else "Other"
+    lead = order[0] if order else _UNMATCHED
     return lead, entity_subject
 
 
 def _subject_of(entity_subject: dict[str, str], entity: str | None, lead: str) -> str:
     """The subject a claim folds to. An untagged claim (no entity) is taken to be
-    about the deal's primary subject (the lead)."""
+    about the deal's primary subject (the lead). An entity in no subject folds to
+    the _UNMATCHED sentinel -- never a real subject name."""
     if not entity:
         return lead
-    return entity_subject.get(entity.casefold(), "Other")
+    return entity_subject.get(entity.casefold(), _UNMATCHED)
 
 
 @dataclass(frozen=True)
@@ -295,7 +306,7 @@ def build_market_view(
         # displace the target's. Keep an unmapped ("Other") or lead-subject
         # figure; drop one whose entity resolves to a NAMED non-lead subject.
         subject = _subject_of(entity_subject, claim.entity, lead_subject)
-        if subject != lead_subject and subject != "Other":
+        if subject != lead_subject and subject != _UNMATCHED:
             continue
         keyed = _sizing_label(claim)
         if keyed is None:
