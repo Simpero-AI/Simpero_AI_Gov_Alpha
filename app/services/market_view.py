@@ -51,7 +51,16 @@ def _is_market_descriptor(entity: str | None) -> bool:
     head noun ("the UK student housing MARKET") and reject any name carrying a
     legal suffix (which marks a named entity, not a market). Precision over
     recall: a rare descriptor without a trailing market/industry/sector word is
-    still dropped rather than risk surfacing a rival's figure as the deal's."""
+    still dropped rather than risk surfacing a rival's figure as the deal's.
+
+    Known residual: an UNSUFFIXED trade name whose trailing token IS a market
+    word ("Whole Foods Market", or "The Fresh Market" without its ", Inc.") is
+    lexically indistinguishable from a real descriptor ("the fresh produce
+    market") after normalization, so it is accepted here. It only leaks when the
+    company is also unmatched by the fold (which scopes named competitors out
+    first) AND carries a mis-extracted sizing-labelled claim. Separating the two
+    needs the resolved-entity signal, not more lexical rules -- tracked for the
+    shared-helper follow-up, not a fourth ad-hoc guard in this module."""
     if not entity:
         return True
     normalized = normalize_name(entity)
@@ -101,11 +110,17 @@ _SIZING_LABELS: tuple[tuple[str, str, frozenset[str], tuple[str, ...], str], ...
         "currency",
     ),
     ("som", "SOM", frozenset({"som"}), ("serviceable obtainable market",), "currency"),
+    # No bare "market value": it is a weak market-size synonym but a strong
+    # appraisal false positive -- "Fair Market Value", "Real Estate Market Value",
+    # "Used Equipment Market Value" are all currency and would key this dollar
+    # slot, surfacing a CIM's asset-appraisal figure (often the deal's OWN, via
+    # the lead-subject path) as its market size. Precision over recall: drop the
+    # ambiguous phrase rather than leak an appraisal into the sizing funnel.
     (
         "market_size",
         "Market Size",
         frozenset(),
-        ("market size", "addressable market", "market value", "industry size"),
+        ("market size", "addressable market", "industry size"),
         "currency",
     ),
     # No bare "cagr" acronym: a standalone "cagr" token fires on "Revenue CAGR"

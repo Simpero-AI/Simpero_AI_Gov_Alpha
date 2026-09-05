@@ -292,6 +292,25 @@ def test_a_bare_revenue_cagr_is_not_classified_as_market_growth():
     assert view.sizing == []
 
 
+def test_fair_market_value_is_not_classified_as_market_size():
+    # "Fair Market Value" (and kin like "Real Estate Market Value") are appraisal
+    # figures, not market sizing -- and they carry the deal's OWN company entity,
+    # so they reach the sizing funnel via the lead-subject path, not just as an
+    # unmapped descriptor. A bare "market value" phrase must NOT key the dollar
+    # Market Size slot, or a CIM's asset appraisal surfaces as the deal's TAM.
+    claims = [
+        _claim(attribute_raw="Fair Market Value", normalized=8_500_000, entity="AcmeCo"),
+        _claim(attribute_raw="Real Estate Market Value", normalized=12_000_000, entity="AcmeCo"),
+        # A genuine market-size label on the same company still classifies, so the
+        # fix drops only the ambiguous phrase, not the slot.
+        _claim(attribute_raw="Estimated Market Size", normalized=3_000_000_000, entity="AcmeCo"),
+    ]
+
+    view = build_market_view(claims, filenames={}, company="AcmeCo")
+
+    assert [(f.label, f.value) for f in view.sizing] == [("Market Size", "$3.00B")]
+
+
 def test_market_cagr_is_classified_and_latest_period_wins():
     claims = [
         _claim(
