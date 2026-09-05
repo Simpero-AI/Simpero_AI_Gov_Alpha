@@ -15,8 +15,13 @@ from sqlalchemy import select, text
 
 from app.core.database import AsyncSessionLocal
 from app.models import Claim, Deal, Edge, Organisation
+from app.models.data_source import DataSource
 from app.models.organisation import OrgType
-from app.services.reconciliation import ReconciliationSummary, reconcile_same_fact
+from app.services.reconciliation import (
+    ReconciliationSummary,
+    reconcile_across_documents,
+    reconcile_same_fact,
+)
 
 ORG = "sim371-reconciliation-org"
 OTHER = "sim371-reconciliation-other"
@@ -51,7 +56,7 @@ def _delete_org(org_key: str) -> None:
     conn = psycopg2.connect(_owner_dsn())
     conn.autocommit = True
     cur = conn.cursor()
-    for table in ("edges", "claims", "deals"):
+    for table in ("edges", "claims", "data_source", "deals"):
         cur.execute(
             f"DELETE FROM {table} WHERE org_id IN "
             "(SELECT id FROM organisation WHERE clerk_org_id = %s)",
@@ -379,3 +384,178 @@ async def test_catch_all_attributes_are_never_reconciled_as_same_fact() -> None:
         assert {edges[0].from_claim_id, edges[0].to_claim_id} == {ids["rev_a"], ids["rev_b"]}
     finally:
         _delete_org(ORG)
+
+
+# --------------------------------------------------------------------------
+# SIM-428: deal-wide cross-DOCUMENT reconciliation (deck vs model vs data room).
+# --------------------------------------------------------------------------
+
+XDOC = "sim428-xdoc-org"
+
+
+async def _seed_docs(
+    org_key: str, docs: dict[str, dict[str, Claim]]
+) -> tuple[uuid.UUID, dict[str, uuid.UUID]]:
+    """Insert an org + one deal + one data_source per doc label, each doc's
+    labelled claims pointing at it. Returns (deal_id, label -> claim_id)."""
+    async with AsyncSessionLocal() as session, session.begin():
+        await session.execute(text("SET LOCAL ROLE dd_app"))
+        await session.execute(text("SELECT set_config('app.org_id', :k, true)"), {"k": org_key})
+        org = Organisation(
+            clerk_org_id=org_key, name=f"xdoc test ({org_key})", type=OrgType.PE_FIRM
+        )
+        session.add(org)
+        await session.flush()
+        deal = Deal(org_id=org.id, name=f"xdoc test deal ({org_key})")
+        session.add(deal)
+        await session.flush()
+        by_label: dict[str, Claim] = {}
+        for i, (doc_label, claims) in enumerate(docs.items()):
+            ds = DataSource(
+                org_id=org.id,
+                deal_id=deal.id,
+                storage_key=f"k/{doc_label}",
+                filename=f"{doc_label}.pdf",
+                declared_sha256=f"{i:064d}",
+            )
+            session.add(ds)
+            await session.flush()
+            for label, c in claims.items():
+                c.org_id = org.id
+                c.deal_id = deal.id
+                c.data_source_id = ds.id
+                session.add(c)
+                by_label[label] = c
+        await session.flush()
+        return deal.id, {label: c.id for label, c in by_label.items()}
+
+
+async def _run_cross_document(
+    org_key: str, deal_id: uuid.UUID, run_id: str
+) -> ReconciliationSummary:
+    async with AsyncSessionLocal() as session, session.begin():
+        await session.execute(text("SET LOCAL ROLE dd_app"))
+        await session.execute(text("SELECT set_config('app.org_id', :k, true)"), {"k": org_key})
+        summary = await reconcile_across_documents(session, deal_id=deal_id, run_id=run_id)
+        await session.flush()
+    return summary
+
+
+@requires_db
+async def test_cross_document_agreement_creates_a_same_fact_edge() -> None:
+    """The deck and the model both report the same revenue for the deal: a
+    cross-document same_fact edge -- the deck-vs-model corroboration SIM-428 adds
+    on top of the per-document passes."""
+    _delete_org(XDOC)
+    try:
+        deal_id, ids = await _seed_docs(
+            XDOC,
+            {
+                "deck": {"deck_rev": _claim(normalized=15_000_000, page=1)},
+                "model": {"model_rev": _claim(normalized=15_000_000, page=1)},
+            },
+        )
+        summary = await _run_cross_document(XDOC, deal_id, "run-1")
+        assert summary.same_fact_edges == 1
+        assert summary.contradicts_edges == 0
+        edges, _ = await _edges_and_claims(XDOC)
+        assert len(edges) == 1 and edges[0].type == "same_fact"
+        assert {edges[0].from_claim_id, edges[0].to_claim_id} == {ids["deck_rev"], ids["model_rev"]}
+    finally:
+        _delete_org(XDOC)
+
+
+@requires_db
+async def test_cross_document_disagreement_creates_a_contradicts_edge() -> None:
+    """The deck says 15M, the model says 12M for the same fact: a cross-document
+    contradicts edge -- which the roll-up demotes to inconclusive, never
+    conflicted (that is reserved for an outside source)."""
+    _delete_org(XDOC)
+    try:
+        deal_id, ids = await _seed_docs(
+            XDOC,
+            {
+                "deck": {"deck_rev": _claim(normalized=15_000_000, page=1)},
+                "model": {"model_rev": _claim(normalized=12_000_000, page=1)},
+            },
+        )
+        summary = await _run_cross_document(XDOC, deal_id, "run-1")
+        assert summary.same_fact_edges == 0
+        assert summary.contradicts_edges == 1
+        edges, _ = await _edges_and_claims(XDOC)
+        assert len(edges) == 1 and edges[0].type == "contradicts"
+        assert edges[0].from_claim_id < edges[0].to_claim_id  # symmetric canonicalization
+        assert {edges[0].from_claim_id, edges[0].to_claim_id} == {ids["deck_rev"], ids["model_rev"]}
+    finally:
+        _delete_org(XDOC)
+
+
+@requires_db
+async def test_a_single_document_deal_produces_no_cross_document_edge() -> None:
+    """Two disagreeing claims in ONE document are reconcile_same_fact's job; the
+    cross-document pass never considers a single-document group."""
+    _delete_org(XDOC)
+    try:
+        deal_id, _ = await _seed_docs(
+            XDOC,
+            {
+                "deck": {
+                    "a": _claim(normalized=15_000_000, page=1),
+                    "b": _claim(normalized=12_000_000, page=2),
+                }
+            },
+        )
+        summary = await _run_cross_document(XDOC, deal_id, "run-1")
+        assert summary.groups_considered == 0
+        edges, _ = await _edges_and_claims(XDOC)
+        assert edges == []
+    finally:
+        _delete_org(XDOC)
+
+
+@requires_db
+async def test_a_within_document_pair_is_left_to_the_per_document_pass() -> None:
+    """A group spanning two documents where one document holds a same-value pair:
+    that within-document same_fact edge is reconcile_same_fact's, so this pass
+    skips it, while the cross-document disagreement still yields a contradicts."""
+    _delete_org(XDOC)
+    try:
+        deal_id, ids = await _seed_docs(
+            XDOC,
+            {
+                "deck": {
+                    "deck1": _claim(normalized=15_000_000, page=1),
+                    "deck2": _claim(normalized=15_000_000, page=2),
+                },
+                "model": {"model": _claim(normalized=12_000_000, page=1)},
+            },
+        )
+        summary = await _run_cross_document(XDOC, deal_id, "run-1")
+        assert summary.same_fact_edges == 0  # deck1<->deck2 is same-document, skipped
+        assert summary.contradicts_edges == 1
+        edges, _ = await _edges_and_claims(XDOC)
+        assert len(edges) == 1 and edges[0].type == "contradicts"
+        assert ids["model"] in {edges[0].from_claim_id, edges[0].to_claim_id}
+    finally:
+        _delete_org(XDOC)
+
+
+@requires_db
+async def test_cross_document_rerun_is_idempotent() -> None:
+    _delete_org(XDOC)
+    try:
+        deal_id, _ = await _seed_docs(
+            XDOC,
+            {
+                "deck": {"d": _claim(normalized=15_000_000, page=1)},
+                "model": {"m": _claim(normalized=15_000_000, page=1)},
+            },
+        )
+        await _run_cross_document(XDOC, deal_id, "run-1")
+        first, _ = await _edges_and_claims(XDOC)
+        await _run_cross_document(XDOC, deal_id, "run-2")
+        second, _ = await _edges_and_claims(XDOC)
+        assert len(first) == 1 and len(second) == 1
+        assert {e.id for e in first} == {e.id for e in second}
+    finally:
+        _delete_org(XDOC)

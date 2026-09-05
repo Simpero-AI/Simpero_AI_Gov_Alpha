@@ -58,7 +58,7 @@ from app.services.dashboard_structure import merge_dashboard_structures
 from app.services.deal_profile import deal_profile_updates
 from app.services.edge_writer import flush_edges, stage_edge
 from app.services.qualitative_findings import merge_qualitative_findings
-from app.services.reconciliation import reconcile_same_fact
+from app.services.reconciliation import reconcile_across_documents, reconcile_same_fact
 from app.services.span_promotion import promote_exact_span
 from app.services.status_rollup import roll_up_deal
 from app.services.uploads.spaces import get_json_object
@@ -420,6 +420,26 @@ async def _run_verification(
                         f"{consistency.derived_from_edges} derived_from, "
                         f"{consistency.contradicts_edges} contradicts."
                     )
+
+        # SIM-428: deal-wide cross-DOCUMENT reconciliation, after the
+        # per-document passes above and before the roll-up reads their edges.
+        # This is the deck-vs-model-vs-data-room internal-consistency check --
+        # the handover's alpha priority for pre-seed deals with no registry
+        # footprint. It emits the same `contradicts` edges the roll-up already
+        # demotes on, so an internally-inconsistent claim drops to `inconclusive`
+        # (never `conflicted`, which is reserved for an outside source). DB-only,
+        # so unlike the registry adapters it needs no I/O-placement decision.
+        cross_document = await reconcile_across_documents(
+            session, deal_id=deal_uuid, run_id=analysis_run_id
+        )
+        logger.info(
+            "cross-document reconciliation for deal %s: %s same_fact, %s contradicts "
+            "across %s cross-document group(s)",
+            deal_uuid,
+            cross_document.same_fact_edges,
+            cross_document.contradicts_edges,
+            cross_document.groups_considered,
+        )
 
         # SIM-413: the status roll-up (SIM-254) last, and deal-scoped rather
         # than per-document. Last because it READS what the passes above wrote
