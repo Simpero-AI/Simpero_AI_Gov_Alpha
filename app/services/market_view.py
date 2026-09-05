@@ -18,7 +18,6 @@ trust filter are shared with screening_materials so the two surfaces agree.
 
 import re
 import uuid
-from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -26,100 +25,9 @@ from typing import Any
 from app.models.claim import Claim
 from app.services.entity_resolution.resolved import normalize_name
 from app.services.screening_materials import _STATUS_RANK, _TRUSTED, _citation, _fmt_value
+from app.services.subject_fold import UNMATCHED, fold_subjects, strip_legal_suffix, subject_of
 
-# Sentinel subject for a claim whose entity matched no dashboard subject. A
-# distinct string no dashboard/parser emits as a subject name (a NUL byte), so an
-# unmatched entity never collides with a real lead subject literally named "Other"
-# -- which would otherwise hand the unmatched claim the lead's sizing priority.
-_UNMATCHED = "\x00unmatched"
-
-
-def _fold_subjects(
-    claims: Sequence[Claim],
-    dashboard_structure: dict[str, Any] | None,
-    company: str | None,
-) -> tuple[str, dict[str, str]]:
-    """(lead_subject, {casefolded entity: subject}). The parser's grounded
-    organizing pass leads when present; otherwise the most-mentioned entities are
-    their own subjects, and -- when none crosses the threshold -- the deal's own
-    company anchors the lead. Mirrors company_view/screening_materials, kept local
-    (the shared-helper consolidation is a tracked follow-up)."""
-    entity_subject: dict[str, str] = {}
-    order: list[str] = []
-    subjects = (dashboard_structure or {}).get("subjects")
-    if isinstance(subjects, list):
-        for subject in subjects:
-            if not isinstance(subject, dict) or not subject.get("name"):
-                continue
-            name = str(subject["name"])
-            registered_any = False
-            for entity in subject.get("entities") or []:
-                # normalize_name (not bare casefold) so a claim's raw entity string
-                # -- which can carry trailing/leading whitespace or punctuation noise
-                # from extraction -- still folds to the registered subject.
-                folded = normalize_name(entity) if entity else ""
-                if folded and folded not in entity_subject:
-                    entity_subject[folded] = name
-                    registered_any = True
-            # Only a subject that actually owns an entity can scope a claim. A
-            # name-only subject (empty or all-duplicate entities) would otherwise
-            # become a lead no claim can map to -- silently disabling the
-            # lead-subject filter and letting a competitor's figure win a slot --
-            # so it must not enter `order` (and, if it's the only one, the
-            # frequency fallback below takes over).
-            if registered_any:
-                order.append(name)
-    # Fall back whenever the dashboard yielded no usable subject -- absent, an
-    # empty list, OR a non-empty list whose every entry was malformed (not a dict /
-    # no name). Otherwise a malformed structure would leave lead="Other" and
-    # silently pass every claim (including a competitor's) through the sizing filter.
-    if not order:
-        # Elect the most-mentioned entities, then the deal's company. Only
-        # TRUSTED, QUANTITATIVE claims vote: a competitive_position/market_definition
-        # entity is a competitor or "the market", and an UNTRUSTED claim
-        # (proposed/rejected/conflicted) is unverified -- counting either could
-        # crown a non-target as lead on unearned mentions and let its sizing figure
-        # win the slot. (The main loop already gates on _TRUSTED; this mirrors it so
-        # the vote can't be inflated by claims that will never surface anyway.)
-        quantitative = [
-            c for c in claims if c.entity and c.claim_kind != "qualitative" and c.status in _TRUSTED
-        ]
-        freq = Counter(normalize_name(c.entity) for c in quantitative)  # type: ignore[arg-type]
-        display: dict[str, str] = {}
-        for claim in quantitative:
-            display.setdefault(normalize_name(claim.entity), claim.entity)  # type: ignore[arg-type]
-        if company and normalize_name(company) in freq:
-            # The deal's own company IS the target: if it appears among the trusted
-            # quantitative claims at all, it leads OUTRIGHT. Otherwise a competitor
-            # with MORE trusted claims wins the election and, since sizing keeps one
-            # winner per slot, replaces the target's own figure entirely. Threshold/
-            # most-mentioned only decides the lead when deal.name matches no claim
-            # entity (the else branch).
-            entity_subject[normalize_name(company)] = display.get(normalize_name(company), company)
-            order.append(entity_subject[normalize_name(company)])
-        else:
-            for folded, _count in sorted(
-                ((e, f) for e, f in freq.items() if f >= 2), key=lambda item: (-item[1], item[0])
-            ):
-                entity_subject[folded] = display.get(folded, folded)
-                order.append(entity_subject[folded])
-        if not order and company:
-            entity_subject[normalize_name(company)] = company
-            order.append(company)
-    lead = order[0] if order else _UNMATCHED
-    return lead, entity_subject
-
-
-def _subject_of(entity_subject: dict[str, str], entity: str | None, lead: str) -> str:
-    """The subject a claim folds to. An untagged claim (no entity) is taken to be
-    about the deal's primary subject (the lead). An entity in no subject folds to
-    the _UNMATCHED sentinel -- never a real subject name."""
-    if not entity:
-        return lead
-    return entity_subject.get(normalize_name(entity), _UNMATCHED)
-
-
-# An _UNMATCHED sizing entity is either a legitimate market descriptor ("the UK
+# An UNMATCHED sizing entity is either a legitimate market descriptor ("the UK
 # student housing market") -- whose figure IS the deal's market and may fill an
 # empty slot -- or an unlisted competitor ("BigRival") whose figure must not
 # masquerade as the deal's own market size. Subject-folding can't separate them, so
@@ -133,11 +41,26 @@ _MARKET_DESCRIPTOR_TOKENS = frozenset(
 
 
 def _is_market_descriptor(entity: str | None) -> bool:
-    """Whether an _UNMATCHED sizing entity reads as a market/industry descriptor
-    rather than a company name."""
+    """Whether an UNMATCHED sizing entity reads as a market/industry descriptor
+    rather than a company name.
+
+    A named company that merely CONTAINS a market/industry/sector token ("The
+    Fresh Market, Inc.", "Sector Alarm AS", "Market Basket", "Industry Dive") is
+    NOT a descriptor -- and since a claim's entity text can originate from an
+    outside intake upload, precision matters. Require the token as the TRAILING
+    head noun ("the UK student housing MARKET") and reject any name carrying a
+    legal suffix (which marks a named entity, not a market). Precision over
+    recall: a rare descriptor without a trailing market/industry/sector word is
+    still dropped rather than risk surfacing a rival's figure as the deal's."""
     if not entity:
         return True
-    return bool(_MARKET_DESCRIPTOR_TOKENS.intersection(normalize_name(entity).split()))
+    normalized = normalize_name(entity)
+    tokens = normalized.split()
+    if not tokens:
+        return True
+    if strip_legal_suffix(entity) != normalized:
+        return False
+    return tokens[-1] in _MARKET_DESCRIPTOR_TOKENS
 
 
 @dataclass(frozen=True)
@@ -199,11 +122,6 @@ _SIZING_LABELS: tuple[tuple[str, str, frozenset[str], tuple[str, ...], str], ...
 
 _SIZING_ORDER = {key: i for i, (key, _d, _a, _p, _vt) in enumerate(_SIZING_LABELS)}
 
-# The value_type each slot expects, so _sizing_rank knows whether a negative
-# figure is an extraction error (currency: rank by absolute magnitude) or a
-# legitimate value (percent CAGR: a shrinking market -- rank by the signed value).
-_SIZING_VT = {key: vt for key, _d, _a, _p, vt in _SIZING_LABELS}
-
 # Cap on each qualitative list (market_definition / competitive_position). A
 # claim-dense CIM can surface dozens of competitor/market assertions; the tab
 # shows the most-corroborated first (see _qual_sort), so the cap keeps the
@@ -238,11 +156,23 @@ def _sizing_label(claim: Claim) -> tuple[str, str] | None:
         # (a retail comp's revenue line, not Serviceable Addressable Market): the
         # apostrophe-s marks a possessive noun, not an acronym, in both "Sam's" and
         # all-caps "SAM'S". The negative lookahead drops the token before that 's.
-        upper_acronyms = {
-            m.group(1).casefold()
-            for m in re.finditer(r"\b([A-Za-z]{2,})\b(?![’'`][sS]\b)", source)
-            if m.group(1).isupper()
-        }
+        #
+        # But an ALL-CAPS token is only EVIDENCE of an acronym against a mixed-case
+        # backdrop. A uniformly-uppercase label (the common Docling table form,
+        # "REVENUE | SAM | FY23") carries no case signal, so treating every caps
+        # token as an acronym misreads a revenue line as Serviceable Addressable
+        # Market. When the label is all-caps, accept an acronym only if the label
+        # is a single alpha token that IS the acronym ("TAM"); otherwise the
+        # acronyms fall away and only a full phrase can key a slot.
+        if any(c.islower() for c in source):
+            upper_acronyms = {
+                m.group(1).casefold()
+                for m in re.finditer(r"\b([A-Za-z]{2,})\b(?![’'`][sS]\b)", source)
+                if m.group(1).isupper()
+            }
+        else:
+            alpha_tokens = re.findall(r"\b[A-Za-z]{2,}\b", source)
+            upper_acronyms = {alpha_tokens[0].casefold()} if len(alpha_tokens) == 1 else set()
         for key, display, acronyms, phrases, expected_vt in _SIZING_LABELS:
             # A claim's TYPED value gates the slot: any known value_type that is
             # not the slot's expected one is excluded -- a "count"/"ratio"/percent
@@ -257,22 +187,24 @@ def _sizing_label(claim: Claim) -> tuple[str, str] | None:
     return None
 
 
-def _sizing_rank(claim: Claim, expected_vt: str) -> tuple[int, int, int, float]:
+def _sizing_rank(claim: Claim) -> tuple[int, int, int, float]:
     # Recency-first, mirroring screening_materials._rank_key: a forecast ranks
     # below any historical figure (an unmarked period counts as historical), then
-    # a later year, then a more corroborated status, then the value magnitude.
-    # This keeps a stale larger TAM from beating a more current one.
+    # a later year, then a more corroborated status, then the SIGNED value.
+    # Signed, not absolute, for BOTH slot types: a larger positive market size
+    # wins, while a negative figure -- an extraction error for a currency size, a
+    # legitimately shrinking market for a CAGR -- sinks below any positive rather
+    # than winning on magnitude (abs() let a parenthesized -$5B beat a real $2B,
+    # and preferred -20% over +5% for CAGR). This keeps a stale larger TAM from
+    # beating a more current one.
     is_historical = 0 if claim.period_kind in ("E", "P") else 1
     year = claim.period_year if claim.period_year is not None else -1
     normalized = claim.value.get("normalized") if isinstance(claim.value, dict) else None
-    if isinstance(normalized, (int, float)) and not isinstance(normalized, bool):
-        # For a currency size a negative is an extraction error, so rank by
-        # absolute magnitude -- a real market size is never picked by sign. For a
-        # percent CAGR a negative is a legitimate figure (a shrinking market), so
-        # rank by the SIGNED value: abs() would wrongly prefer -20% over +5%.
-        magnitude = float(normalized) if expected_vt == "percent" else abs(normalized)
-    else:
-        magnitude = float("-inf")
+    magnitude = (
+        float(normalized)
+        if isinstance(normalized, (int, float)) and not isinstance(normalized, bool)
+        else float("-inf")
+    )
     return (is_historical, year, _STATUS_RANK.get(claim.status, 0), magnitude)
 
 
@@ -317,7 +249,7 @@ def build_market_view(
 ) -> MarketView:
     """Curate the deal's claims into the Market tab's view. Only trust-earned
     claims are shown; a section with none comes back empty."""
-    lead_subject, entity_subject = _fold_subjects(claims, dashboard_structure, company)
+    fold = fold_subjects(claims, dashboard_structure, company)
 
     # key -> (rank, claim, display). The rank leads with a subject priority so the
     # target's own figure always outranks an "Other" one for the same slot (see
@@ -350,15 +282,15 @@ def build_market_view(
         # legitimately fills a slot the target lacks); drop one whose entity is a
         # NAMED non-lead subject OR an unlisted competitor (an unmapped bare company
         # name), so a rival's figure never surfaces as the deal's own market size.
-        subject = _subject_of(entity_subject, claim.entity, lead_subject)
-        # A real lead is never the _UNMATCHED sentinel. When the deal has no dashboard
+        subject = subject_of(fold, claim.entity)
+        # A real lead is never the UNMATCHED sentinel. When the deal has no dashboard
         # subject, nothing crosses the frequency threshold, and no company name (e.g.
-        # deal.name==""), lead_subject is itself _UNMATCHED -- and a named competitor
-        # also folds to _UNMATCHED, so a bare `subject == lead_subject` would treat it
-        # as the lead and let its figure through. Require lead_subject != _UNMATCHED so
+        # deal.name==""), fold.lead is itself UNMATCHED -- and a named competitor
+        # also folds to UNMATCHED, so a bare `subject == fold.lead` would treat it
+        # as the lead and let its figure through. Require fold.lead != UNMATCHED so
         # such a claim falls to the market-descriptor gate instead of passing unchecked.
-        is_lead = subject == lead_subject and lead_subject != _UNMATCHED
-        if not (is_lead or (subject == _UNMATCHED and _is_market_descriptor(claim.entity))):
+        is_lead = subject == fold.lead and fold.lead != UNMATCHED
+        if not (is_lead or (subject == UNMATCHED and _is_market_descriptor(claim.entity))):
             continue
         keyed = _sizing_label(claim)
         if keyed is None:
@@ -369,7 +301,7 @@ def build_market_view(
         # still fills a slot the lead lacks (subject_priority 0), but can no longer
         # outrank the target's own.
         subject_priority = 1 if is_lead else 0
-        rank = (subject_priority, *_sizing_rank(claim, _SIZING_VT[key]))
+        rank = (subject_priority, *_sizing_rank(claim))
         current = sizing_best.get(key)
         if current is None or rank > current[0]:
             sizing_best[key] = (rank, claim, display)

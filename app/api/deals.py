@@ -85,6 +85,7 @@ from app.services.screening.rule_view import enrich_rule_results
 from app.services.screening.rulebook import load_rulebook
 from app.services.screening_insights import derive_screening_insights
 from app.services.screening_materials import build_screening_materials
+from app.services.subject_fold import _TRUSTED as _TRUSTED_STATUSES
 
 logger = logging.getLogger(__name__)
 
@@ -460,11 +461,24 @@ async def get_deal_screening_materials(
     if deal is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
 
-    claims = list((await db.execute(select(Claim).where(Claim.deal_id == deal_id))).scalars().all())
+    claims = list(
+        (
+            await db.execute(
+                select(Claim)
+                .where(Claim.deal_id == deal_id)
+                .where(Claim.status.in_(sorted(_TRUSTED_STATUSES)))
+            )
+        )
+        .scalars()
+        .all()
+    )
     filenames = {ds.id: ds.filename for ds in await DataSourceRepo(db).list_for_deal(deal_id)}
 
     materials = build_screening_materials(
-        claims, dashboard_structure=deal.dashboard_structure, filenames=filenames
+        claims,
+        dashboard_structure=deal.dashboard_structure,
+        filenames=filenames,
+        company=deal.name,
     )
     return ScreeningMaterialsResponse(
         extracted_fields=[
@@ -492,7 +506,17 @@ async def get_deal_screening_insights(
     if deal is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
 
-    claims = list((await db.execute(select(Claim).where(Claim.deal_id == deal_id))).scalars().all())
+    claims = list(
+        (
+            await db.execute(
+                select(Claim)
+                .where(Claim.deal_id == deal_id)
+                .where(Claim.status.in_(sorted(_TRUSTED_STATUSES)))
+            )
+        )
+        .scalars()
+        .all()
+    )
     highlights, risk_flags = await derive_screening_insights(
         claims, company=deal.name, dashboard_structure=deal.dashboard_structure
     )
@@ -517,7 +541,14 @@ async def get_deal_market(
     # Deterministic row order for the exact-tie sizing tiebreak, same as the
     # company route.
     claims = list(
-        (await db.execute(select(Claim).where(Claim.deal_id == deal_id).order_by(Claim.id)))
+        (
+            await db.execute(
+                select(Claim)
+                .where(Claim.deal_id == deal_id)
+                .where(Claim.status.in_(sorted(_TRUSTED_STATUSES)))
+                .order_by(Claim.id)
+            )
+        )
         .scalars()
         .all()
     )
@@ -556,7 +587,14 @@ async def get_deal_company(
     # identity claims by first-seen, so without a stable ORDER BY the displayed
     # headcount/founded could differ across requests.
     claims = list(
-        (await db.execute(select(Claim).where(Claim.deal_id == deal_id).order_by(Claim.id)))
+        (
+            await db.execute(
+                select(Claim)
+                .where(Claim.deal_id == deal_id)
+                .where(Claim.status.in_(sorted(_TRUSTED_STATUSES)))
+                .order_by(Claim.id)
+            )
+        )
         .scalars()
         .all()
     )

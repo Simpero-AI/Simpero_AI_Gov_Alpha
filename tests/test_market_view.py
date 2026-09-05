@@ -535,3 +535,36 @@ def test_company_leads_even_when_a_competitor_has_more_claims():
 
     assert [(f.label, f.value) for f in view.sizing] == [("TAM", "$100.00M")]
     assert view.sizing[0].entity == "TargetCo"
+
+
+def test_a_negative_currency_size_does_not_win_by_magnitude():
+    # abs() used to rank a parenthesized -$5B ABOVE a real $2B TAM for the same
+    # period; signed ranking sinks the negative extraction error below the real
+    # positive figure.
+    claims = [
+        _claim(attribute_raw="TAM", normalized=2_000_000_000, period_year=2024),
+        _claim(attribute_raw="TAM", normalized=-5_000_000_000, period_year=2024),
+    ]
+    view = build_market_view(claims, filenames={}, company="AcmeCo")
+    assert [(f.label, f.value) for f in view.sizing] == [("TAM", "$2.00B")]
+
+
+def test_an_all_caps_table_label_does_not_misfire_a_sizing_acronym():
+    # Docling emits whole table labels uppercase; a revenue line "REVENUE | SAM |
+    # FY23" must NOT read as Serviceable Addressable Market, nor "SOM ARCHITECTS
+    # FEE" as SOM -- the caps carry no acronym signal when the whole label is caps.
+    claims = [
+        _claim(attribute_raw="REVENUE | SAM | FY23", normalized=100),
+        _claim(attribute_raw="SOM ARCHITECTS FEE", normalized=200),
+    ]
+    view = build_market_view(claims, filenames={}, company="AcmeCo")
+    assert view.sizing == []
+
+
+def test_a_bare_all_caps_acronym_still_keys_a_sizing_slot():
+    # The single-token all-caps case IS the acronym -- a bare "TAM" cell still
+    # keys the TAM slot even though the label carries no lowercase.
+    view = build_market_view(
+        [_claim(attribute_raw="TAM", normalized=5_000_000_000)], filenames={}, company="AcmeCo"
+    )
+    assert [(f.label, f.value) for f in view.sizing] == [("TAM", "$5.00B")]
