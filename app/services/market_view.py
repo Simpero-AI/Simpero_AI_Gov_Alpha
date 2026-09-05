@@ -218,14 +218,23 @@ _QUAL_LABEL_FALLBACK = {
 }
 
 
-def _qual_fact(claim: Claim, filenames: Mapping[uuid.UUID, str]) -> MarketFact:
+def _qual_fact(
+    claim: Claim, filenames: Mapping[uuid.UUID, str], display_names: dict[str, str]
+) -> MarketFact:
     """A qualitative assertion as a MarketFact: the entity it is about as the
     label, the assertion text (value.raw, via _fmt_value) as the value, plus its
     citation and trust status. Falls back to a class-appropriate label when the
-    claim carries no entity, so the row is never headed by a blank."""
-    label = (claim.entity or "").strip() or _QUAL_LABEL_FALLBACK.get(
-        claim.assertion_class or "", "—"
-    )
+    claim carries no entity, so the row is never headed by a blank.
+
+    `display_names` folds entity-name variants to one canonical spelling
+    (normalize_name -> first-seen), so "Acme Corp.", "ACME" and "Acme
+    Corporation" all head the same row rather than reading as three competitors."""
+    entity = (claim.entity or "").strip()
+    if entity:
+        key = strip_legal_suffix(entity) or normalize_name(entity)
+        label = display_names.get(key, entity)
+    else:
+        label = _QUAL_LABEL_FALLBACK.get(claim.assertion_class or "", "—")
     return MarketFact(
         label=label,
         value=_fmt_value(claim.value),
@@ -251,6 +260,19 @@ def build_market_view(
     claims are shown; a section with none comes back empty."""
     fold = fold_subjects(claims, dashboard_structure, company)
 
+    # Canonical display spelling per qualitative entity (normalize_name ->
+    # first-seen), so name variants ("Acme Corp." / "ACME" / "Acme Corporation")
+    # head the SAME Competitive Position / Market Definition row instead of
+    # reading as separate competitors.
+    qual_display: dict[str, str] = {}
+    for claim in claims:
+        if claim.claim_kind == "qualitative" and claim.entity and claim.status in _TRUSTED:
+            # Key on the suffix-stripped core (normalize_name keeps legal suffixes,
+            # so "Acme Corp." / "ACME" / "Acme Corporation" would NOT fold under it);
+            # fall back to normalize_name for a name that is all-suffix.
+            key = strip_legal_suffix(claim.entity) or normalize_name(claim.entity)
+            qual_display.setdefault(key, claim.entity.strip())
+
     # key -> (rank, claim, display). The rank leads with a subject priority so the
     # target's own figure always outranks an "Other" one for the same slot (see
     # the sizing loop); the remaining elements are _sizing_rank's recency/magnitude.
@@ -271,9 +293,9 @@ def build_market_view(
             # competitor -- scoping either to the target's lead subject would drop
             # exactly the rows these sections exist to show.
             if claim.assertion_class == "market_definition":
-                definition.append(_qual_fact(claim, filenames))
+                definition.append(_qual_fact(claim, filenames, qual_display))
             elif claim.assertion_class == "competitive_position":
-                competition.append(_qual_fact(claim, filenames))
+                competition.append(_qual_fact(claim, filenames, qual_display))
             continue
 
         # A single sizing figure wins per key, so a competitor's figure must not

@@ -296,6 +296,22 @@ def test_formats_percent_and_sub_million_currency():
     assert by_label["Net Income · FY2023"] == "$900.0K"
 
 
+def test_non_usd_currency_is_never_dropped():
+    # A non-USD figure must carry its currency, not render as a bare number that
+    # reads as USD next to a "$" figure. A known symbol prefixes; any other code
+    # is kept as a visible prefix.
+    claims = [
+        _claim(attribute="revenue", normalized=5_000_000_000, value_type="currency", unit="CAD"),
+        _claim(attribute="ebitda", normalized=1_200_000_000, value_type="currency", unit="GBP"),
+    ]
+
+    materials = build_screening_materials(claims, dashboard_structure=None, filenames={})
+    by_label = {f.label: f.value for f in materials.extracted_fields}
+
+    assert by_label["Revenue · FY2023"] == "CAD 5.00B"
+    assert by_label["Ebitda · FY2023"] == "£1.20B"
+
+
 def test_builds_citation_from_document_and_location():
     ds_id = uuid.uuid4()
     xlsx = _claim(

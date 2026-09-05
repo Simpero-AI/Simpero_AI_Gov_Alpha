@@ -171,7 +171,10 @@ _HEADLINE_RANK = {
     label.key: 1000 + i for i, label in enumerate(_HEADLINE_LABELS) if label.key not in _CANON_ORDER
 }
 
-_UNIT_SYMBOL = {"USD": "$", "%": "%"}
+# Symbols for the currencies with an unambiguous one; any other currency code
+# (CAD, AUD, ...) is prefixed as the code itself by _fmt_value, never dropped --
+# a bare "5.00B" next to a "$1.20B" reads as USD and misstates the figure.
+_UNIT_SYMBOL = {"USD": "$", "%": "%", "GBP": "£", "EUR": "€", "JPY": "¥"}
 _PERIOD_KIND = {"A": "Actual", "E": "Estimate", "P": "Projected"}
 
 
@@ -222,7 +225,14 @@ def _fmt_value(value: Any) -> str:
                 scaled = f"{n / 1e3:.1f}K"
             else:
                 scaled = _fmt_num(n)
-            return _UNIT_SYMBOL.get(unit, "") + scaled
+            # A known symbol prefixes directly ("$5.00B"); any other currency code
+            # is kept as a visible prefix ("CAD 5.00B") rather than dropped, so a
+            # non-USD figure is never mistaken for USD. An untyped/absent unit
+            # renders the bare number.
+            symbol = _UNIT_SYMBOL.get(unit)
+            if symbol:
+                return symbol + scaled
+            return f"{unit} {scaled}" if unit else scaled
         if value_type == "percent":
             return f"{_fmt_num(n)}%"
         if value_type == "ratio":

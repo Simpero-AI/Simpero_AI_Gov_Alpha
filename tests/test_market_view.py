@@ -568,3 +568,17 @@ def test_a_bare_all_caps_acronym_still_keys_a_sizing_slot():
         [_claim(attribute_raw="TAM", normalized=5_000_000_000)], filenames={}, company="AcmeCo"
     )
     assert [(f.label, f.value) for f in view.sizing] == [("TAM", "$5.00B")]
+
+
+def test_competitor_name_variants_fold_to_one_row_header():
+    # "Acme Corp.", "ACME" and "Acme Corporation" are one competitor -- they must
+    # head the SAME Competitive Position row (the first-seen spelling), not read as
+    # three separate competitors.
+    claims = [
+        _qual("Leads the premium segment.", "competitive_position", entity="Acme Corp."),
+        _qual("Weak in the value tier.", "competitive_position", entity="ACME"),
+        _qual("Expanding into Europe.", "competitive_position", entity="Acme Corporation"),
+    ]
+    view = build_market_view(claims, filenames={}, company="TargetCo")
+    assert {f.label for f in view.competitive_position} == {"Acme Corp."}
+    assert len(view.competitive_position) == 3  # three distinct assertions, one competitor
