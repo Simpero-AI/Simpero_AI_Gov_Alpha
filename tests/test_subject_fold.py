@@ -6,7 +6,6 @@ Pure: fold_subjects/subject_of and the three build_* functions are pure over
 in-memory Claim objects, no DB.
 """
 
-
 from app.models.claim import Claim
 from app.services.company_view import build_company_view
 from app.services.market_view import build_market_view
