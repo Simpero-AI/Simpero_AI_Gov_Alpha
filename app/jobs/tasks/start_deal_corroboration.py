@@ -8,6 +8,13 @@ re-runs the deal roll-up so an externally-conflicted claim reaches screening as
 `conflicted` rather than trusted. It sits BEFORE screening on purpose: screening
 reads rolled-up claim trust, so the corroboration verdicts must land first.
 
+It ALSO runs the web-search deep-search COLLECT pass (web_search_collect): a
+bounded, allowlisted web search that mints NEW cited `web` claims for the Market
+and Company tabs (sizing, competitors, market definition, company overview/
+risks/related-parties/plans) even when the deck itself is thin. Collection is
+best-effort enrichment and a no-op without an anthropic key, so it never gates
+the pipeline.
+
 I/O placement (SIM-253): the external HTTP must NOT run inside a DB transaction --
 holding a pooled PgBouncer backend across a slow network call is the anti-pattern
 start_deal_analysis documents. So this job runs THREE phases on ONE session
@@ -34,10 +41,12 @@ from uuid import UUID
 from saq.types import Context
 from sqlalchemy import select, text
 
+from app.core.config import get_settings
 from app.core.database import AsyncSessionLocal
 from app.jobs.queue import get_queue
 from app.models.claim import Claim
 from app.repo.AnalysisRunRepo import AnalysisRunRepo
+from app.repo.DealRepo import DealRepo
 from app.repo.HumanAuditRepo import HumanAuditRepo
 from app.services.corroboration import (
     CORROBORATABLE_STATUSES,
@@ -47,6 +56,7 @@ from app.services.corroboration import (
 from app.services.corroboration_sources import DEFAULT_SOURCES
 from app.services.entity_resolution.resolved import load_resolved_entity
 from app.services.status_rollup import roll_up_deal
+from app.services.web_search_collect import gather_web_facts, persist_web_facts
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +116,7 @@ async def _run_corroboration(*, screening_run_id: UUID, clerk_org_id: str) -> bo
     the screening run is already past `queued` -- i.e. a SAQ redelivery after this
     job already handed off -- so we neither re-corroborate (which would append
     duplicate append-only events) nor re-enqueue screening."""
+    settings = get_settings()
     async with AsyncSessionLocal() as session:
         # --- Phase A: short READ transaction ---
         async with session.begin():
@@ -117,6 +128,9 @@ async def _run_corroboration(*, screening_run_id: UUID, clerk_org_id: str) -> bo
                 # do not re-run or re-enqueue.
                 return False
             deal_uuid, org_id = run.deal_id, run.org_id
+            deal = await DealRepo(session).get_by_id(deal_uuid)
+            company = deal.name if deal is not None else ""
+            sector = deal.sector if deal is not None else None
             claims = list(
                 (
                     await session.scalars(
@@ -126,28 +140,58 @@ async def _run_corroboration(*, screening_run_id: UUID, clerk_org_id: str) -> bo
                     )
                 ).all()
             )
-            if not claims:
-                return True  # nothing to corroborate; proceed straight to screening
             # Prime the session-memoized entity resolution ONCE, so the ISED/Trademark
             # adapters' load_resolved_entity in phase B is a cache hit, not a query.
-            await load_resolved_entity(session, deal_uuid)
+            if claims:
+                await load_resolved_entity(session, deal_uuid)
 
         # --- Phase B: NO transaction -- all external HTTP happens here ---
-        results = await gather_corroboration(session, claims, DEFAULT_SOURCES)
+        # Corroboration verdicts over the deck's claims (skipped when there are
+        # none), plus the web-search COLLECT pass, which mints NEW cited web
+        # claims regardless of the deck and is a no-op without an anthropic key.
+        results = await gather_corroboration(session, claims, DEFAULT_SOURCES) if claims else []
+        web_candidates = await gather_web_facts(
+            company=company,
+            sector=sector,
+            api_key=settings.anthropic_api_key,
+            model=settings.web_search_model,
+        )
 
         # --- Phase C: short WRITE transaction ---
-        if results:
+        if results or web_candidates:
             async with session.begin():
                 # SET LOCAL and RLS (SET LOCAL app.org_id) are per-transaction, so
                 # re-issue them as the first statements of this new transaction.
                 await session.execute(text(f"SET LOCAL statement_timeout = '{_STATEMENT_TIMEOUT}'"))
                 await _set_org(session, clerk_org_id)
-                await persist_corroboration(session, results, {c.id: c for c in claims})
-                # autoflush=False: make the appended events + conflicted statuses
-                # visible to roll_up_deal's own SELECTs before it reads them.
-                await session.flush()
-                await roll_up_deal(session, claims)
-                await session.flush()
+                minted = 0
+                if results:
+                    await persist_corroboration(session, results, {c.id: c for c in claims})
+                    # flush so the appended events + conflicted statuses are visible
+                    # to roll_up_deal's own SELECTs before it reads them.
+                    await session.flush()
+                    await roll_up_deal(session, claims)
+                    await session.flush()
+                if web_candidates:
+                    # Isolate the web mint in a SAVEPOINT so a failure here (e.g. a
+                    # constraint violation from a malformed collected fact) rolls
+                    # back only the web claims, never the corroboration events +
+                    # roll-up already written in this transaction. Best-effort
+                    # enrichment must not discard real corroboration verdicts.
+                    try:
+                        async with session.begin_nested():
+                            minted = await persist_web_facts(
+                                session, deal_id=deal_uuid, org_id=org_id, candidates=web_candidates
+                            )
+                            await session.flush()
+                    except Exception:
+                        logger.warning(
+                            "web collect persist failed for screening run %s; "
+                            "corroboration verdicts kept",
+                            screening_run_id,
+                            exc_info=True,
+                        )
+                        minted = 0
                 await HumanAuditRepo(session).append(
                     {
                         "org_id": org_id,
@@ -159,6 +203,7 @@ async def _run_corroboration(*, screening_run_id: UUID, clerk_org_id: str) -> bo
                             "screening_run_id": str(screening_run_id),
                             "claims_checked": len(claims),
                             "events_recorded": len(results),
+                            "web_facts_collected": minted,
                         },
                     }
                 )

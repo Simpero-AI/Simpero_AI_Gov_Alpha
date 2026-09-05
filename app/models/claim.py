@@ -43,7 +43,12 @@ _VERIFICATION_METHODS = (
     "human_review",
 )
 
-_LOCATION_KINDS = ("pdf", "xlsx", "docx")
+# "web" is a backend-local kind for facts minted by the web-search collect pass
+# (app/services/web_search_collect.py), NOT a parser-emitted kind -- it is
+# deliberately absent from contracts/claims.schema.json, which governs the
+# parser->backend seam only. Its locator is the source URL on data_source; like
+# xlsx it carries no positional char span.
+_LOCATION_KINDS = ("pdf", "xlsx", "docx", "web")
 # Which extraction contract produced a claim. Absent means quantitative, so
 # every row written before this column existed stays valid.
 _CLAIM_KINDS = ("quantitative", "qualitative")
@@ -243,7 +248,10 @@ class Claim(Base):
         CheckConstraint(
             "(kind = 'pdf' AND page IS NOT NULL)"
             " OR (kind = 'xlsx' AND sheet IS NOT NULL AND cell_ref IS NOT NULL)"
-            " OR (kind = 'docx' AND paragraph IS NOT NULL)",
+            " OR (kind = 'docx' AND paragraph IS NOT NULL)"
+            # web: the source URL on data_source IS the locator, so the kind
+            # alone satisfies "we know where we looked".
+            " OR (kind = 'web')",
             name="ck_claims_locator_matches_kind",
         ),
         # All-or-nothing provenance, first half: a claim that is not `missing`
@@ -253,6 +261,9 @@ class Claim(Base):
         CheckConstraint(
             "status = 'missing'"
             " OR kind = 'xlsx'"
+            # web: the URL is the whole citation, there is no sub-page span to
+            # give -- exempt like xlsx.
+            " OR kind = 'web'"
             " OR (char_start IS NOT NULL AND char_end IS NOT NULL)",
             name="ck_claims_found_requires_span",
         ),

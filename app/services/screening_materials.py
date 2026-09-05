@@ -409,6 +409,12 @@ def _headline_claims(
     for claim in claims:
         if claim.status not in _TRUSTED:
             continue
+        # Web-collected claims are external enrichment for the Market/Company
+        # tabs, not internally-verified deck facts -- keep them out of the
+        # screening snapshot + the LLM insights grounding (both go through here),
+        # so screening reasons only over the deal's own documents.
+        if claim.kind == "web":
+            continue
         if subject_of(fold, claim.entity) != lead_subject:
             continue
         if _fmt_value(claim.value) == "—":

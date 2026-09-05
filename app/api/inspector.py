@@ -142,8 +142,12 @@ async def pipeline_inspector(
         {
             "data_source_id": str(ds.id),
             "filename": ds.filename,
-            # A signed URL so a fact can open its source page (PDF #page=N) in a tab.
-            "source_url": _source_url(ds.storage_key, ds.filename),
+            # A web-collected source carries its real external URL (https +
+            # allowlisted by the collect guard); link straight to it. A real
+            # uploaded document gets a signed URL so a fact can open its source
+            # page (PDF #page=N) in a tab -- its storage_key has a backing object,
+            # a web source's synthetic `web/...` key does not.
+            "source_url": ds.source_url or _source_url(ds.storage_key, ds.filename),
         }
         for ds in data_sources
     ]

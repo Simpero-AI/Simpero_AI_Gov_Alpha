@@ -63,6 +63,11 @@ EXPECTED_COLUMN_PRIVILEGES: set[tuple[str, str, str]] = {
     ("data_source", "intake_link_id", "SELECT"),
     ("data_source", "org_id", "INSERT"),
     ("data_source", "org_id", "SELECT"),
+    # source_url (web-collected sources): identity/append-only, so INSERT+SELECT
+    # like the other non-lifecycle columns -- covered by the table-level
+    # GRANT SELECT, INSERT ON data_source, no UPDATE/DELETE.
+    ("data_source", "source_url", "INSERT"),
+    ("data_source", "source_url", "SELECT"),
     ("data_source", "status", "INSERT"),
     ("data_source", "status", "SELECT"),
     ("data_source", "status_updated_at", "INSERT"),
