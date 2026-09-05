@@ -67,5 +67,15 @@ def test_trademarks_have_no_reliable_permalink():
     assert corroboration_source_url("trademarks_cipo_uspto", result) is None
 
 
+def test_web_search_uses_the_stored_source_url():
+    result = {"source_url": "https://grandviewresearch.com/report", "metric": "tam"}
+    assert corroboration_source_url("web_search", result) == "https://grandviewresearch.com/report"
+
+
+def test_web_search_without_a_source_url_is_none():
+    assert corroboration_source_url("web_search", {"metric": "tam"}) is None
+    assert corroboration_source_url("web_search", {"source_url": ""}) is None
+
+
 def test_unknown_source_is_none():
     assert corroboration_source_url("some_future_source", {"url": "https://x"}) is None

@@ -57,6 +57,7 @@ from app.services.corroboration_sources import DEFAULT_SOURCES
 from app.services.entity_resolution.resolved import load_resolved_entity
 from app.services.status_rollup import roll_up_deal
 from app.services.web_search_collect import gather_web_facts, persist_web_facts
+from app.services.web_search_corroborate import corroborate_sizing_against_web
 
 logger = logging.getLogger(__name__)
 
@@ -156,9 +157,20 @@ async def _run_corroboration(*, screening_run_id: UUID, clerk_org_id: str) -> bo
             api_key=settings.anthropic_api_key,
             model=settings.web_search_model,
         )
+        # Confirm the deck's OWN market-sizing figures against the web facts just
+        # gathered -- reusing that single search, no per-claim lookup. These are
+        # POSITIVE-ONLY (agrees=True) display verdicts kept SEPARATE from `results`
+        # on purpose: they must NOT feed roll_up_deal (a benign web agreement would
+        # otherwise trigger the deal roll-up and demote every uncorroborated
+        # reranker claim to `inconclusive` -- see web_search_corroborate docstring).
+        sizing_verdicts = (
+            corroborate_sizing_against_web(claims, web_candidates)
+            if claims and web_candidates
+            else []
+        )
 
         # --- Phase C: short WRITE transaction ---
-        if results or web_candidates:
+        if results or web_candidates or sizing_verdicts:
             async with session.begin():
                 # SET LOCAL and RLS (SET LOCAL app.org_id) are per-transaction, so
                 # re-issue them as the first statements of this new transaction.
@@ -171,6 +183,14 @@ async def _run_corroboration(*, screening_run_id: UUID, clerk_org_id: str) -> bo
                     # to roll_up_deal's own SELECTs before it reads them.
                     await session.flush()
                     await roll_up_deal(session, claims)
+                    await session.flush()
+                if sizing_verdicts:
+                    # Record the positive web-sizing confirmations as events, but do
+                    # NOT run roll_up_deal for them: they are agrees=True (change no
+                    # status) and exist for the Corroboration tab's display only.
+                    # Running the roll-up on their account would demote unrelated
+                    # uncorroborated claims (see the phase-B note).
+                    await persist_corroboration(session, sizing_verdicts, {c.id: c for c in claims})
                     await session.flush()
                 if web_candidates:
                     # Isolate the web mint in a SAVEPOINT so a failure here (e.g. a
@@ -202,7 +222,7 @@ async def _run_corroboration(*, screening_run_id: UUID, clerk_org_id: str) -> bo
                         "payload": {
                             "screening_run_id": str(screening_run_id),
                             "claims_checked": len(claims),
-                            "events_recorded": len(results),
+                            "events_recorded": len(results) + len(sizing_verdicts),
                             "web_facts_collected": minted,
                         },
                     }

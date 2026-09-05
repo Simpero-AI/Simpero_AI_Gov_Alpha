@@ -20,6 +20,13 @@ def corroboration_source_url(outside_source: str, result: Mapping[str, Any]) -> 
     """The external record URL for one corroboration event, or None when the
     source exposes no stable per-record link (the caller then surfaces the raw
     identifier from `result` instead)."""
+    if outside_source == "web_search":
+        # The web-search corroboration source stores the exact page it read the
+        # figure from (already https + allowlist-checked when the collect pass
+        # gathered it), so the citation is that URL verbatim.
+        url = result.get("source_url")
+        return url if isinstance(url, str) and url else None
+
     if outside_source == "us_federal_register":
         document = result.get("document")
         if isinstance(document, Mapping):
