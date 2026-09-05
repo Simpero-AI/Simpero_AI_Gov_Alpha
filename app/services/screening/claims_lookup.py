@@ -36,6 +36,10 @@ async def claims_for_attribute(
         .where(Claim.deal_id == deal_id)
         .where(Claim.attribute == attribute)
         .where(Claim.status.in_(_TRUSTED_STATUSES))
+        # Exclude web-collected claims: they are external enrichment for the
+        # Market/Company tabs, not internally-verified deck facts, so they must
+        # not feed the mandate-fit screening rulebook as if they were trusted.
+        .where(Claim.kind != "web")
         # `->>` (astext) maps a JSON `null` to SQL NULL; the bare `->`
         # subscript does not, so `isnot(None)` on it would let a claim whose
         # value.normalized is JSON null (a cited XLSX text cell -- see

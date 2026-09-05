@@ -173,10 +173,25 @@ async def _run_corroboration(*, screening_run_id: UUID, clerk_org_id: str) -> bo
                     await roll_up_deal(session, claims)
                     await session.flush()
                 if web_candidates:
-                    minted = await persist_web_facts(
-                        session, deal_id=deal_uuid, org_id=org_id, candidates=web_candidates
-                    )
-                    await session.flush()
+                    # Isolate the web mint in a SAVEPOINT so a failure here (e.g. a
+                    # constraint violation from a malformed collected fact) rolls
+                    # back only the web claims, never the corroboration events +
+                    # roll-up already written in this transaction. Best-effort
+                    # enrichment must not discard real corroboration verdicts.
+                    try:
+                        async with session.begin_nested():
+                            minted = await persist_web_facts(
+                                session, deal_id=deal_uuid, org_id=org_id, candidates=web_candidates
+                            )
+                            await session.flush()
+                    except Exception:
+                        logger.warning(
+                            "web collect persist failed for screening run %s; "
+                            "corroboration verdicts kept",
+                            screening_run_id,
+                            exc_info=True,
+                        )
+                        minted = 0
                 await HumanAuditRepo(session).append(
                     {
                         "org_id": org_id,

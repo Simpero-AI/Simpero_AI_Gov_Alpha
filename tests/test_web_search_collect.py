@@ -158,6 +158,27 @@ def test_claim_ref_is_deterministic_and_fact_specific():
     assert _claim_ref(a) != _claim_ref(other)
 
 
+def test_claim_ref_ignores_reworded_value_to_bound_accumulation():
+    # The model rephrases the same fact run-to-run; the id keys on identity
+    # (URL + class + subject), NOT the wording, so a reworded assertion about the
+    # same subject from the same source collapses instead of accumulating.
+    (a,) = _adjudicate({"sizing": [], "assertions": [_ASSERTION_ITEM]}, _ALLOWED)
+    reworded = {**_ASSERTION_ITEM, "text": "Rival Casinos is the western regional leader."}
+    (b,) = _adjudicate({"sizing": [], "assertions": [reworded]}, _ALLOWED)
+    assert a.value["raw"] != b.value["raw"]
+    assert _claim_ref(a) == _claim_ref(b)
+
+
+def test_adjudicate_drops_an_assertion_with_an_empty_subject():
+    # claims.entity is NOT NULL -- an assertion whose subject is empty/whitespace
+    # must be dropped, not minted with an empty entity (which would abort the
+    # whole phase-C write).
+    empty = {**_ASSERTION_ITEM, "subject": "   "}
+    assert _adjudicate({"sizing": [], "assertions": [empty]}, _ALLOWED) == []
+    missing = {k: v for k, v in _ASSERTION_ITEM.items() if k != "subject"}
+    assert _adjudicate({"sizing": [], "assertions": [missing]}, _ALLOWED) == []
+
+
 # --- a minted web claim reaches the tabs (pure view builders) -----------------
 
 

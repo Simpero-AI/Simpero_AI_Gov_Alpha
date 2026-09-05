@@ -916,13 +916,17 @@ async def list_deal_documents(
     in MaterialsCard/DataRoomPane/OverviewPane (Simpero_AI_Gov_Web) are what
     this closes. Org-side and external-intake uploads (P3-10) both land in
     data_source through the same DataSourceRepo, so this list is identical
-    regardless of which path a document came in through -- nothing here
-    filters or tags by origin."""
+    regardless of which path a document came in through. Web-collected citation
+    carriers (source_url set -- the synthetic rows the web-search collect pass
+    creates) are excluded: they are not data-room documents and have no
+    downloadable object."""
     deal = await DealRepo(db).get_by_id(deal_id)
     if deal is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
 
-    documents = await DataSourceRepo(db).list_for_deal(deal_id)
+    documents = [
+        ds for ds in await DataSourceRepo(db).list_for_deal(deal_id) if ds.source_url is None
+    ]
     return [
         DealDocumentResponse(
             id=str(document.id),
@@ -1037,7 +1041,12 @@ async def start_analysis(
             detail="Cannot start analysis while an intake link is still pending for this deal",
         )
 
-    data_sources = await DataSourceRepo(db).list_for_deal(deal_id)
+    # Exclude web-collected citation carriers (source_url set): they are not
+    # uploaded documents, so they must not count toward upload readiness (a web
+    # source sits at 'pending' forever and would otherwise skew this gate).
+    data_sources = [
+        ds for ds in await DataSourceRepo(db).list_for_deal(deal_id) if ds.source_url is None
+    ]
     usable = [ds for ds in data_sources if ds.status == "verified"]
     pending = [ds for ds in data_sources if ds.status == "pending"]
 

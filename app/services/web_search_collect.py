@@ -308,7 +308,12 @@ def _adjudicate(raw: dict[str, Any], allowed: frozenset[str]) -> list[WebFactCan
         text = _clean_text(item.get("text"))
         if text is None:
             continue
-        subject = _clean_text(item.get("subject")) or ""
+        subject = _clean_text(item.get("subject"))
+        if subject is None:
+            # claims.entity is NOT NULL and a subject-less assertion is ambiguous
+            # (whose competitive position? which related party?) -- drop it rather
+            # than mint an entity-less claim (which would fail the INSERT).
+            continue
         candidates.append(
             WebFactCandidate(
                 claim_kind="qualitative",
@@ -333,7 +338,10 @@ def _call_web_search(
     calls report_web_facts; we return that tool input. Run via asyncio.to_thread."""
     import anthropic
 
-    client = anthropic.Anthropic(api_key=api_key, timeout=_LLM_TIMEOUT_S)
+    # max_retries=0: this is best-effort enrichment that already fails soft to [],
+    # so a single attempt is the right posture -- and it keeps the max_uses/timeout
+    # cost bound honest (the SDK's default retries would multiply web searches).
+    client = anthropic.Anthropic(api_key=api_key, timeout=_LLM_TIMEOUT_S, max_retries=0)
     web_search_tool: dict[str, Any] = {
         "type": "web_search_20250305",
         "name": "web_search",
@@ -382,25 +390,34 @@ async def gather_web_facts(
         raw = await asyncio.to_thread(
             call, api_key=api_key, model=model, company=company, sector=sector, allowed=allowed
         )
+        if not isinstance(raw, dict):
+            return []
+        # _adjudicate is inside the try too: an adjudication bug must also fail
+        # soft to [] and never escape into the corroboration job's phase B.
+        return _adjudicate(raw, frozenset(allowed))
     except Exception:
         logger.warning(
             "web-search collect failed for %r; returning no facts", company, exc_info=True
         )
         return []
-    if not isinstance(raw, dict):
-        return []
-    return _adjudicate(raw, frozenset(allowed))
 
 
 def _claim_ref(candidate: WebFactCandidate) -> str:
     """Deterministic per-fact id so re-analysis is idempotent (the claims unique
-    index is org+data_source_id+claim_ref). Keyed on the fact's identity: source
-    URL + what it asserts."""
+    index is org+data_source_id+claim_ref).
+
+    Keyed on the fact's IDENTITY (source URL + metric/assertion class + subject),
+    NOT its free-text wording: the model rephrases the same fact run-to-run, so
+    including value.raw would mint a fresh claim every re-analysis and let web
+    claims accumulate unboundedly. Keying on identity makes the same
+    (URL, metric, subject) collapse via the unique index (ON CONFLICT DO NOTHING)
+    on the next run instead. The trade-off -- two genuinely distinct assertions
+    that share a URL, class, and subject collapse to one -- is acceptable for
+    best-effort enrichment and far better than unbounded growth."""
     basis = "\x1f".join(
         [
             candidate.source_url,
             candidate.attribute_raw or candidate.assertion_class or "",
-            str(candidate.value.get("raw", "")),
             candidate.entity,
         ]
     )
@@ -447,7 +464,10 @@ async def persist_web_facts(
             "deal_id": deal_id,
             "data_source_id": source_ids[c.source_url],
             "claim_ref": _claim_ref(c),
-            "entity": c.entity or None,
+            # entity is a required column and is guaranteed non-empty here:
+            # _adjudicate drops any qualitative candidate with an empty subject
+            # and every sizing candidate carries a market-descriptor entity.
+            "entity": c.entity,
             "attribute": c.attribute,
             "attribute_raw": c.attribute_raw,
             "value": c.value,
