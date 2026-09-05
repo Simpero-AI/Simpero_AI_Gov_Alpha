@@ -140,7 +140,7 @@ async def derive_screening_insights(
     if not settings.anthropic_api_key:
         return [], []
 
-    facts = render_claim_facts(claims, dashboard_structure=dashboard_structure)
+    facts = render_claim_facts(claims, dashboard_structure=dashboard_structure, company=company)
     if not facts:
         return [], []
 

@@ -33,7 +33,6 @@ on that one's evolving internals.
 
 import re
 import uuid
-from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -41,6 +40,7 @@ from typing import Any
 from app.models.claim import Claim
 from app.services.entity_resolution.resolved import normalize_name
 from app.services.screening_materials import _STATUS_RANK, _TRUSTED, _citation, _fmt_value
+from app.services.subject_fold import UNMATCHED, fold_subjects, subject_of
 
 # The status shown for a sector/HQ fact that came from the deal-profile
 # classifier rather than a cited claim -- honest about its (weaker) provenance.
@@ -222,61 +222,10 @@ def _rank(claim: Claim) -> tuple[int, int, int]:
     return (is_historical, year, _STATUS_RANK.get(claim.status, 0))
 
 
-def _fold_subjects(
-    claims: Sequence[Claim],
-    dashboard_structure: dict[str, Any] | None,
-    company: str | None = None,
-) -> tuple[str, dict[str, str]]:
-    """(lead_subject, {casefolded entity: subject}). The parser's grounded
-    organizing pass leads when present; otherwise the most-mentioned entities are
-    their own subjects, and -- when none crosses the threshold -- the deal's own
-    company anchors the lead so the subject filter is never a no-op. Keyed
-    casefolded so "American Casino" and "american casino" fold to one subject."""
-    entity_subject: dict[str, str] = {}
-    order: list[str] = []
-    subjects = (dashboard_structure or {}).get("subjects")
-    if isinstance(subjects, list) and subjects:
-        for subject in subjects:
-            if not isinstance(subject, dict) or not subject.get("name"):
-                continue
-            name = str(subject["name"])
-            order.append(name)
-            for entity in subject.get("entities") or []:
-                if entity and entity.casefold() not in entity_subject:
-                    entity_subject[entity.casefold()] = name
-    else:
-        # Count by the CASEFOLDED entity so case-variant spellings of one company
-        # accumulate together toward the f>=2 threshold.
-        freq = Counter(c.entity.casefold() for c in claims if c.entity)
-        display: dict[str, str] = {}
-        for claim in claims:
-            if claim.entity:
-                display.setdefault(claim.entity.casefold(), claim.entity)
-        for folded, _count in sorted(
-            ((e, f) for e, f in freq.items() if f >= 2), key=lambda item: (-item[1], item[0])
-        ):
-            entity_subject[folded] = display.get(folded, folded)
-            order.append(entity_subject[folded])
-        if not order and company:
-            # No entity crossed the threshold. Without an anchor every entity
-            # folds to "Other", which equals the "Other" lead, so the subject
-            # filter passes EVERYTHING -- a competitor's figure could win an
-            # identity slot. Anchor the lead on the deal's own company: an untagged
-            # fact (see _subject_of) or one whose entity IS the company is kept;
-            # any other named entity folds to "Other" and is dropped.
-            entity_subject[company.casefold()] = company
-            order.append(company)
-    lead = order[0] if order else "Other"
-    return lead, entity_subject
-
-
-def _subject_of(entity_subject: dict[str, str], entity: str | None, lead: str) -> str:
-    """The subject a claim folds to. An untagged claim (no entity) is taken to be
-    about the deal's primary subject (the lead) -- a CIM fact left without an
-    entity is about the target by default; a competitor's fact carries its name."""
-    if not entity:
-        return lead
-    return entity_subject.get(entity.casefold(), "Other")
+# Subject folding is shared with market_view and screening_materials (see
+# app/services/subject_fold.py) so the three tabs can't disagree on the same
+# deal: the consolidated anchor leads, and the deal's company matches its claims
+# suffix-insensitively.
 
 
 def _qual_fact(claim: Claim, filenames: Mapping[uuid.UUID, str]) -> CompanyFact:
@@ -305,7 +254,7 @@ def build_company_view(
     """Curate the deal's claims (plus the deal-profile sector/HQ) into the
     Business Overview tab. Only trust-earned claims of the lead business subject
     are shown; a section with none comes back empty."""
-    lead_subject, entity_subject = _fold_subjects(claims, dashboard_structure, company)
+    fold = fold_subjects(claims, dashboard_structure, company)
 
     facts: list[CompanyFact] = []
     if sector:
@@ -323,13 +272,13 @@ def build_company_view(
         # -- for the disclosures that matter (a director, an affiliate, a connected
         # company) that's the THIRD PARTY, not the target, so the plain lead-subject
         # filter would drop exactly the rows this section exists for. Keep such a
-        # claim when its entity is unmapped ("Other"), but still drop one that
+        # claim when its entity is unmapped (UNMATCHED), but still drop one that
         # resolves to a NAMED competitor subject (that fact belongs to the rival).
         is_related_party = (
             claim.claim_kind == "qualitative" and claim.assertion_class == "related_party"
         )
-        subject = _subject_of(entity_subject, claim.entity, lead_subject)
-        if subject != lead_subject and not (is_related_party and subject == "Other"):
+        subject = subject_of(fold, claim.entity)
+        if subject != fold.lead and not (is_related_party and subject == UNMATCHED):
             continue
         if _fmt_value(claim.value) == "—":
             continue

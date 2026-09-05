@@ -3,10 +3,10 @@ import logging
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Any, cast
+from typing import Any, TypeVar, cast
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -51,6 +51,8 @@ from app.schemas.deals import (
     IntakePipelineStatus,
     LatestMemoSessionResponse,
     LivePipelineRowResponse,
+    MarketFactResponse,
+    MarketViewResponse,
     PipelineStepResponse,
     PipelineValueStat,
     ScreeningCitedFieldResponse,
@@ -80,12 +82,14 @@ from app.services.intake_links import (
     compute_intake_link_effective_status,
     compute_pipeline_intake_status,
 )
+from app.services.market_view import build_market_view
 from app.services.memo_summary import derive_pipeline_metrics
 from app.services.pipeline_steps import no_job_steps
 from app.services.screening.rule_view import enrich_rule_results
 from app.services.screening.rulebook import load_rulebook
 from app.services.screening_insights import derive_screening_insights
 from app.services.screening_materials import build_screening_materials
+from app.services.subject_fold import _TRUSTED as _TRUSTED_STATUSES
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +120,19 @@ def _parse_answer(entry: Any, response_id: uuid.UUID) -> IntakeResponseAnswerRes
             response_id,
         )
         return None
+
+
+_FactResponse = TypeVar("_FactResponse", bound=BaseModel)
+
+
+def _to_responses(facts: list[Any], model_cls: type[_FactResponse]) -> list[_FactResponse]:
+    """Copy each claims-view dataclass fact onto its camelCase response model.
+    Safe because every *FactResponse is a CamelModel with from_attributes=True and
+    field names matching the view dataclass -- there is no hand-maintained field
+    list to drift. The hazard to know when editing either side: a field added to a
+    view dataclass with no matching (identically named) field on the response
+    model is silently DROPPED here by model_validate at runtime, with no error."""
+    return [model_cls.model_validate(f) for f in facts]
 
 
 router = APIRouter(prefix="/deals", tags=["deals"])
@@ -448,11 +465,24 @@ async def get_deal_screening_materials(
     if deal is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
 
-    claims = list((await db.execute(select(Claim).where(Claim.deal_id == deal_id))).scalars().all())
+    claims = list(
+        (
+            await db.execute(
+                select(Claim)
+                .where(Claim.deal_id == deal_id)
+                .where(Claim.status.in_(sorted(_TRUSTED_STATUSES)))
+            )
+        )
+        .scalars()
+        .all()
+    )
     filenames = {ds.id: ds.filename for ds in await DataSourceRepo(db).list_for_deal(deal_id)}
 
     materials = build_screening_materials(
-        claims, dashboard_structure=deal.dashboard_structure, filenames=filenames
+        claims,
+        dashboard_structure=deal.dashboard_structure,
+        filenames=filenames,
+        company=deal.name,
     )
     return ScreeningMaterialsResponse(
         extracted_fields=[
@@ -480,11 +510,66 @@ async def get_deal_screening_insights(
     if deal is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
 
-    claims = list((await db.execute(select(Claim).where(Claim.deal_id == deal_id))).scalars().all())
+    claims = list(
+        (
+            await db.execute(
+                select(Claim)
+                .where(Claim.deal_id == deal_id)
+                .where(Claim.status.in_(sorted(_TRUSTED_STATUSES)))
+            )
+        )
+        .scalars()
+        .all()
+    )
     highlights, risk_flags = await derive_screening_insights(
         claims, company=deal.name, dashboard_structure=deal.dashboard_structure
     )
     return ScreeningInsightsResponse(highlights=highlights, risk_flags=risk_flags)
+
+
+@router.get("/{deal_id}/market", response_model=MarketViewResponse)
+async def get_deal_market(
+    deal_id: uuid.UUID, db: AsyncSession = Depends(get_db)
+) -> MarketViewResponse:
+    """The Market tab, derived deterministically from the deal's claims spine
+    (build_market_view): numeric market sizing (TAM/SAM/SOM/market size/CAGR)
+    recovered by label, plus the qualitative market-definition and
+    competitive-position assertions the parser's qualitative tier emits -- each
+    with its citation and trust status. Claims-only and LLM-free; RLS-scoped by
+    get_db; returns empty lists (never 404) for a deal with no market claims, so
+    each panel renders its own "information not available" state."""
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    # Deterministic row order for the exact-tie sizing tiebreak, same as the
+    # company route.
+    claims = list(
+        (
+            await db.execute(
+                select(Claim)
+                .where(Claim.deal_id == deal_id)
+                .where(Claim.status.in_(sorted(_TRUSTED_STATUSES)))
+                .order_by(Claim.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    filenames = {ds.id: ds.filename for ds in await DataSourceRepo(db).list_for_deal(deal_id)}
+
+    market = build_market_view(
+        claims,
+        filenames=filenames,
+        dashboard_structure=deal.dashboard_structure,
+        company=deal.name,
+    )
+
+    return MarketViewResponse(
+        sizing=_to_responses(market.sizing, MarketFactResponse),
+        market_definition=_to_responses(market.market_definition, MarketFactResponse),
+        competitive_position=_to_responses(market.competitive_position, MarketFactResponse),
+    )
 
 
 @router.get("/{deal_id}/company", response_model=CompanyViewResponse)
@@ -506,13 +591,20 @@ async def get_deal_company(
     # identity claims by first-seen, so without a stable ORDER BY the displayed
     # headcount/founded could differ across requests.
     claims = list(
-        (await db.execute(select(Claim).where(Claim.deal_id == deal_id).order_by(Claim.id)))
+        (
+            await db.execute(
+                select(Claim)
+                .where(Claim.deal_id == deal_id)
+                .where(Claim.status.in_(sorted(_TRUSTED_STATUSES)))
+                .order_by(Claim.id)
+            )
+        )
         .scalars()
         .all()
     )
     filenames = {ds.id: ds.filename for ds in await DataSourceRepo(db).list_for_deal(deal_id)}
 
-    view = build_company_view(
+    company = build_company_view(
         claims,
         filenames=filenames,
         dashboard_structure=deal.dashboard_structure,
@@ -521,19 +613,13 @@ async def get_deal_company(
         company=deal.name,
     )
 
-    def _facts(facts: list) -> list[CompanyFactResponse]:
-        # CamelModel sets from_attributes=True and the field names match, so
-        # model_validate copies CompanyFact -> CompanyFactResponse without a
-        # hand-maintained field list that could silently drop a new field.
-        return [CompanyFactResponse.model_validate(f) for f in facts]
-
     return CompanyViewResponse(
-        facts=_facts(view.facts),
-        overview=_facts(view.overview),
-        risks=_facts(view.risks),
-        commercial=_facts(view.commercial),
-        related_parties=_facts(view.related_parties),
-        plans=_facts(view.plans),
+        facts=_to_responses(company.facts, CompanyFactResponse),
+        overview=_to_responses(company.overview, CompanyFactResponse),
+        risks=_to_responses(company.risks, CompanyFactResponse),
+        commercial=_to_responses(company.commercial, CompanyFactResponse),
+        related_parties=_to_responses(company.related_parties, CompanyFactResponse),
+        plans=_to_responses(company.plans, CompanyFactResponse),
     )
 
 

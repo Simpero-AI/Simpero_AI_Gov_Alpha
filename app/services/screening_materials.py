@@ -29,21 +29,21 @@ judgment call handled by a separate LLM pass, not invented deterministically.
 
 import math
 import uuid
-from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from app.models.claim import Claim
 from app.services.entity_resolution.resolved import normalize_name
+from app.services.subject_fold import _TRUSTED, fold_subjects, subject_of
 
 # The two E2 catch-all buckets the parser assigns when a fact does not map to a
 # real canonical metric; everything else is a genuine canonical attribute.
 _CATCHALL = frozenset({"operating_metric", "core_unmapped"})
 
-# Trust-earned statuses -- the only ones shown on a decision surface (matches
-# app/services/screening/claims_lookup.py and the inspector's isTrusted).
-_TRUSTED = frozenset({"verified", "partially_verified", "cited"})
+# _TRUSTED (the statuses shown on a decision surface) is single-sourced in
+# app/services/subject_fold and imported above; re-exported here because
+# market_view/company_view import it from this module.
 
 # Higher wins when two claims describe the same metric/period (pick the most
 # corroborated). Mirrors the inspector's STATUS_RANK.
@@ -171,7 +171,10 @@ _HEADLINE_RANK = {
     label.key: 1000 + i for i, label in enumerate(_HEADLINE_LABELS) if label.key not in _CANON_ORDER
 }
 
-_UNIT_SYMBOL = {"USD": "$", "%": "%"}
+# Symbols for the currencies with an unambiguous one; any other currency code
+# (CAD, AUD, ...) is prefixed as the code itself by _fmt_value, never dropped --
+# a bare "5.00B" next to a "$1.20B" reads as USD and misstates the figure.
+_UNIT_SYMBOL = {"USD": "$", "%": "%", "GBP": "£", "EUR": "€", "JPY": "¥"}
 _PERIOD_KIND = {"A": "Actual", "E": "Estimate", "P": "Projected"}
 
 
@@ -222,7 +225,14 @@ def _fmt_value(value: Any) -> str:
                 scaled = f"{n / 1e3:.1f}K"
             else:
                 scaled = _fmt_num(n)
-            return _UNIT_SYMBOL.get(unit, "") + scaled
+            # A known symbol prefixes directly ("$5.00B"); any other currency code
+            # is kept as a visible prefix ("CAD 5.00B") rather than dropped, so a
+            # non-USD figure is never mistaken for USD. An untyped/absent unit
+            # renders the bare number.
+            symbol = _UNIT_SYMBOL.get(unit)
+            if symbol:
+                return symbol + scaled
+            return f"{unit} {scaled}" if unit else scaled
         if value_type == "percent":
             return f"{_fmt_num(n)}%"
         if value_type == "ratio":
@@ -291,56 +301,11 @@ def _citation(claim: Claim, filenames: Mapping[uuid.UUID, str]) -> str | None:
     return " · ".join(parts) or None
 
 
-def _subject_map(
-    dashboard_structure: dict[str, Any] | None, claims: Sequence[Claim]
-) -> tuple[dict[str, str], list[str]]:
-    """Fold entity strings into business subjects. The parser's grounded
-    organizing pass leads when present; otherwise the most-mentioned entities
-    become their own subjects (frequency fallback). Mirrors the inspector, but
-    the map is keyed case-insensitively (casefolded entity -> subject): a deck
-    that writes "American Casino" in the dashboard structure and "american
-    casino" on the claims must still fold together, or the whole subject's facts
-    fall to "Other" and vanish from the panel. Look claims up via _subject_of."""
-    entity_subject: dict[str, str] = {}
-    order: list[str] = []
-    subjects = (dashboard_structure or {}).get("subjects")
-    if isinstance(subjects, list) and subjects:
-        for subject in subjects:
-            if not isinstance(subject, dict) or not subject.get("name"):
-                continue
-            name = str(subject["name"])
-            order.append(name)
-            for entity in subject.get("entities") or []:
-                if entity and entity.casefold() not in entity_subject:
-                    entity_subject[entity.casefold()] = name
-    else:
-        # Count by the CASEFOLDED entity so two spellings of one company
-        # ("American Casino" / "american casino") accumulate toward the f>=2
-        # threshold TOGETHER. Counting the raw string gives each spelling its own
-        # sub-threshold tally (1 and 1), so a company mentioned once per spelling
-        # never becomes a subject and its facts fall to "Other" -- the opposite
-        # of what folding is for.
-        freq = Counter(c.entity.casefold() for c in claims if c.entity)
-        # First-seen original spelling per folded key, for a readable subject name.
-        display: dict[str, str] = {}
-        for claim in claims:
-            if claim.entity:
-                display.setdefault(claim.entity.casefold(), claim.entity)
-        for folded, _count in sorted(
-            ((e, f) for e, f in freq.items() if f >= 2),
-            key=lambda item: (-item[1], item[0]),
-        ):
-            name = display.get(folded, folded)
-            entity_subject[folded] = name
-            order.append(name)
-    order.append("Other")
-    return entity_subject, order
-
-
-def _subject_of(entity_subject: dict[str, str], entity: str | None) -> str:
-    """The business subject a claim's entity folds to, matched case-insensitively
-    (see _subject_map); "Other" when it matches no subject."""
-    return entity_subject.get((entity or "").casefold(), "Other")
+# Subject folding is shared with market_view and company_view (see
+# app/services/subject_fold.py) so the three tabs can't disagree on the same
+# deal: the consolidated anchor leads, and the deal's company matches its claims
+# suffix-insensitively. The `company` a screening caller passes lets the fold
+# anchor the lead on the target rather than the most-mentioned entity.
 
 
 def _metric_rank(dashboard_structure: dict[str, Any] | None) -> dict[str, int]:
@@ -422,7 +387,10 @@ def _rank_for(metric_key: str, canonical_rank: dict[str, int]) -> int:
 
 
 def _headline_claims(
-    claims: Sequence[Claim], *, dashboard_structure: dict[str, Any] | None
+    claims: Sequence[Claim],
+    *,
+    dashboard_structure: dict[str, Any] | None,
+    company: str | None = None,
 ) -> tuple[list[tuple[Claim, str, str]], dict[str, int]]:
     """(claim, metric_key, display) for every trusted, displayable headline
     claim of the deal's lead business subject, plus the metric-rank map. The one
@@ -434,14 +402,14 @@ def _headline_claims(
     deals it exists for. When a metric has several undated values, _prefer picks
     one deterministically (see _rank_key); when years ARE present it still prefers
     the latest actual."""
-    entity_subject, subject_order = _subject_map(dashboard_structure, claims)
-    lead_subject = subject_order[0] if subject_order else "Other"
+    fold = fold_subjects(claims, dashboard_structure, company)
+    lead_subject = fold.lead
 
     rows: list[tuple[Claim, str, str]] = []
     for claim in claims:
         if claim.status not in _TRUSTED:
             continue
-        if _subject_of(entity_subject, claim.entity) != lead_subject:
+        if subject_of(fold, claim.entity) != lead_subject:
             continue
         if _fmt_value(claim.value) == "—":
             continue
@@ -457,6 +425,7 @@ def build_screening_materials(
     *,
     dashboard_structure: dict[str, Any] | None,
     filenames: Mapping[uuid.UUID, str],
+    company: str | None = None,
     limit: int = 12,
 ) -> ScreeningMaterials:
     """Curate the deal's claims into the screening snapshot.
@@ -470,7 +439,9 @@ def build_screening_materials(
     never resolve to a canonical attribute still populates the panel.
     `filenames` maps data_source_id -> the document's filename for the citation.
     """
-    rows, canonical_rank = _headline_claims(claims, dashboard_structure=dashboard_structure)
+    rows, canonical_rank = _headline_claims(
+        claims, dashboard_structure=dashboard_structure, company=company
+    )
 
     # Best claim per metric key. Keying on the metric (not claim.attribute -- the
     # catch-all facts all share "operating_metric") both spreads recovered line
@@ -506,6 +477,7 @@ def render_claim_facts(
     claims: Sequence[Claim],
     *,
     dashboard_structure: dict[str, Any] | None,
+    company: str | None = None,
     limit: int = 100,
 ) -> list[str]:
     """Human-readable fact lines for the deal's trusted headline claims -- the
@@ -519,7 +491,9 @@ def render_claim_facts(
     line item recovered from a catch-all bucket -- so the model reads exactly the
     figures the user sees, and no fact that is not one of them.
     """
-    rows, canonical_rank = _headline_claims(claims, dashboard_structure=dashboard_structure)
+    rows, canonical_rank = _headline_claims(
+        claims, dashboard_structure=dashboard_structure, company=company
+    )
 
     # One claim per (metric key, period): a metric legitimately spans periods
     # here (trend context), but two catch-all facts for the SAME metric and period
