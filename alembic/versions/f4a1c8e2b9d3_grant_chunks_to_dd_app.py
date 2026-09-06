@@ -32,7 +32,26 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.execute("GRANT SELECT, INSERT ON chunks TO dd_app")
+    # Guarded so this survives a database where `chunks` is absent. On the
+    # first-party clean history `chunks` is created by 6c8bc5907f94 far upstream
+    # of this migration, so the table exists and the GRANT runs. But a staging DB
+    # whose alembic_version was advanced past 6c8bc5907f94 without the physical
+    # table (a real staging inconsistency observed 2026-09-06: chunks recorded as
+    # applied, table missing) would otherwise fail here with UndefinedTableError
+    # and abort the whole deploy. GRANT only when the table exists; dd_app already
+    # holds DML on chunks via the doadmin default-privilege bootstrap regardless,
+    # so skipping the explicit grant on such a DB costs nothing.
+    op.execute("""
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT FROM information_schema.tables
+                WHERE table_schema = 'public' AND table_name = 'chunks'
+            ) THEN
+                GRANT SELECT, INSERT ON chunks TO dd_app;
+            END IF;
+        END $$;
+    """)
 
 
 def downgrade() -> None:
