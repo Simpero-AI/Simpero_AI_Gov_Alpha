@@ -196,6 +196,91 @@ async def test_all_documents_parsed_marks_run_successful(
     assert kwargs["timeout"] == 7200
 
 
+async def test_deadline_reached_marks_run_timed_out_without_chaining_verification(
+    owner_conn, seeded_org, seeded_deal, monkeypatch, mocked_verification_enqueue
+):
+    """Drive the poll loop's actual timed_out branch: a parse job that never reaches
+    a terminal status, plus a zeroed deadline budget so the deadline is `now`, must
+    mark the run failed with the timeout message and NOT chain into verification.
+    Guards the timed_out path itself, not just the arithmetic between the constants."""
+    _seed_verified_data_source(owner_conn, seeded_org["org_pk"], seeded_deal, "org/a.pdf")
+    run_id = _seed_run(owner_conn, seeded_org["org_pk"], seeded_deal)
+
+    async def fake_enqueue(
+        storage_key: str,
+        *,
+        entity: str,
+        known_sha256s=None,
+        sector_options=None,
+        geo_options=None,
+        screen_criteria=None,
+    ) -> str:
+        return "job-key-1"
+
+    async def fake_get_job(job_key: str) -> _FakeSaqJob:
+        return _FakeSaqJob(Status.ACTIVE)  # never terminal -- only the deadline ends the loop
+
+    monkeypatch.setattr(job_module, "enqueue_process_document_job", fake_enqueue)
+    monkeypatch.setattr(job_module, "get_parse_job", fake_get_job)
+    # Zero the per-doc budget and the ceiling so the deadline is `now`; the first
+    # `loop.time() >= deadline` check trips timed_out (no wall-clock wait, and the
+    # loop breaks before reaching asyncio.sleep).
+    monkeypatch.setattr(job_module, "_PARSE_DEADLINE_PER_DOC_SECONDS", 0)
+    monkeypatch.setattr(job_module, "_MAX_PARSE_WAIT_SECONDS", 0)
+
+    await job_module.start_deal_analysis(
+        {}, analysis_run_id=run_id, deal_id=seeded_deal, clerk_org_id=seeded_org["clerk_org_id"]
+    )
+
+    run = _fetch_run(owner_conn, run_id)
+    assert run["status"] == "failed"
+    assert run["error_message"] == "Analysis timed out waiting for documents to finish parsing."
+    assert run["parse_jobs"][0]["outcome"] is None  # the parse never resolved
+    # A timeout must NOT chain into verification.
+    assert _count_analysis_runs(owner_conn, seeded_deal, "verification") == 0
+    assert len(mocked_verification_enqueue) == 0
+
+
+_PARSER_PER_DOC_WORST_CASE_S = 7200  # process_document timeout=7200s, retries=1 => 1 attempt
+
+
+def test_parse_deadline_covers_the_parser_per_document_ceiling():
+    """Regression guard for the 'parsing took too long' freeze: the backend's
+    per-document parse-wait budget must stay >= the parser's own enqueued per-doc
+    ceiling, or a slow-but-succeeding parse trips the deadline mid-run, the analysis
+    is falsely marked timed out, and verification never runs. The parser enqueues
+    process_document with timeout=7200s and retries=1, which under SAQ (retryable =
+    retries > attempts) is ONE attempt -- so 7200s worst case per document; keep this
+    in sync if that ceiling changes (Simpero_Gov_AI_Services worker.py)."""
+    assert _PARSER_PER_DOC_WORST_CASE_S <= job_module._PARSE_DEADLINE_PER_DOC_SECONDS
+
+
+def test_parse_deadline_covers_serial_worst_case_for_every_doc_count():
+    """The parser runs concurrency:1, so N documents serialize to N * 7200s. The
+    inner poll deadline (min(_PARSE_DEADLINE_PER_DOC_SECONDS * N, _MAX_PARSE_WAIT_SECONDS))
+    must cover that for EVERY reachable N, or a large-but-succeeding deal false-times
+    out. This failed before _MAX_PARSE_WAIT_SECONDS was raised off a flat *5 (75000s),
+    which capped the wait below 11 * 7200 = 79200s for an 11-document deal."""
+    for n in range(1, job_module._MAX_PARSE_DOCS + 1):
+        budget = min(
+            job_module._PARSE_DEADLINE_PER_DOC_SECONDS * n, job_module._MAX_PARSE_WAIT_SECONDS
+        )
+        assert budget >= n * _PARSER_PER_DOC_WORST_CASE_S, (
+            f"{n} docs serialize to {n * _PARSER_PER_DOC_WORST_CASE_S}s worst case "
+            f"but the poll deadline caps the wait at {budget}s -> false timeout"
+        )
+
+
+def test_max_parse_docs_stays_at_or_above_the_intake_file_cap():
+    """_MAX_PARSE_DOCS is a local mirror of MAX_FILES_PER_LINK (kept local so this
+    worker module does not import the API layer). If the intake cap is raised without
+    raising _MAX_PARSE_DOCS, the ceiling would again cap the wait below the true serial
+    worst case for a full deal -- so pin them together here."""
+    from app.api.public_uploads import MAX_FILES_PER_LINK
+
+    assert job_module._MAX_PARSE_DOCS >= MAX_FILES_PER_LINK
+
+
 async def test_enqueue_receives_the_orgs_approved_mandate_options(
     owner_conn, seeded_org, seeded_deal, monkeypatch, mocked_verification_enqueue
 ):
