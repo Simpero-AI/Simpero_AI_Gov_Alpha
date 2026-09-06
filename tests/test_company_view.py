@@ -267,6 +267,30 @@ def test_freq_fallback_anchors_the_lead_on_the_company_excluding_competitors():
     assert [f.value for f in view.facts if f.label == "Headcount"] == ["1,450"]
 
 
+def test_qualitative_only_target_still_leads_over_a_quantitative_competitor():
+    # The target carries only a qualitative disclosure -- no trusted quantitative
+    # claim, so it is absent from the frequency vote -- while a competitor has two
+    # trusted quantitative claims. The deal's company must still lead: otherwise the
+    # competitor wins the election, the target's disclosure folds to _UNMATCHED and
+    # is dropped, and the rival's qualitative note surfaces as the target's overview.
+    claims = [
+        _qual(
+            "Revenue is highly concentrated in one key customer.",
+            "risk_or_dependency",
+            entity="TargetCo",
+        ),
+        _qual("Runs an aggressive franchise model.", "operating_model", entity="RivalCo"),
+        _claim(attribute="revenue", normalized=100_000_000, entity="RivalCo"),
+        _claim(attribute="cogs", normalized=60_000_000, entity="RivalCo"),
+    ]
+
+    view = build_company_view(claims, filenames={}, company="TargetCo")
+
+    assert [f.value for f in view.risks] == ["Revenue is highly concentrated in one key customer."]
+    # The rival's operating-model note did not surface as the target's overview.
+    assert [f.value for f in view.overview] == []
+
+
 def test_related_party_assertion_about_a_third_party_is_kept():
     # A related-party assertion's entity is the party it names -- a director or
     # affiliate (a third party), which folds to "Other". It must still surface in
@@ -320,3 +344,70 @@ def test_a_non_related_party_assertion_about_a_third_party_is_still_dropped():
     view = build_company_view(claims, filenames={}, company="TargetCo")
 
     assert view.overview == []
+
+
+def test_dashboard_subject_with_no_entities_does_not_empty_the_whole_view():
+    """The serious bug: a dashboard subject named but with an empty entities list
+    became an unusable lead, folding EVERY entity-tagged claim to _UNMATCHED and
+    rendering the entire Business Overview blank for a deal with perfectly good
+    claims. It must fall through to the frequency election instead, so the target's
+    identity + qualitative facts still surface."""
+    dashboard = {"subjects": [{"name": "TargetCo", "entities": []}]}
+    claims = [
+        _claim(
+            attribute_raw="Total Employees", normalized=1_450, value_type="count", entity="TargetCo"
+        ),
+        _claim(attribute="revenue", normalized=5_000_000, entity="TargetCo"),
+        _qual("Revenue is 70% recurring subscription.", "operating_model", entity="TargetCo"),
+        _qual("Heavily dependent on a single supplier.", "risk_or_dependency", entity="TargetCo"),
+    ]
+
+    view = build_company_view(
+        claims, filenames={}, dashboard_structure=dashboard, company="TargetCo"
+    )
+
+    assert [f.label for f in view.facts] == ["Headcount"]
+    assert [f.value for f in view.overview] == ["Revenue is 70% recurring subscription."]
+    assert [f.value for f in view.risks] == ["Heavily dependent on a single supplier."]
+
+
+def test_untrusted_claims_do_not_crown_a_bogus_company_lead():
+    """The frequency election votes only with trusted, quantitative claims, so two
+    untrusted mentions of a bogus entity can't be elected lead over the real target
+    and surface the wrong company's facts."""
+    claims = [
+        _claim(attribute="revenue", normalized=1, entity="BogusCo", status="proposed"),
+        _claim(attribute="cogs", normalized=1, entity="BogusCo", status="proposed"),
+        _claim(
+            attribute_raw="Total Employees", normalized=1_450, value_type="count", entity="TargetCo"
+        ),
+        _claim(attribute="revenue", normalized=5_000_000, entity="TargetCo"),
+        _qual("Revenue is 70% recurring subscription.", "operating_model", entity="TargetCo"),
+    ]
+
+    view = build_company_view(claims, filenames={})
+
+    assert [f.label for f in view.facts] == ["Headcount"]
+    assert [f.value for f in view.overview] == ["Revenue is 70% recurring subscription."]
+
+
+def test_company_leads_even_when_a_competitor_has_more_claims():
+    """The deal's own company is the target: when it appears among the trusted
+    quantitative claims it leads outright, so a competitor with MORE claims can't
+    win the frequency election and surface its facts as the target's."""
+    claims = [
+        _claim(
+            attribute_raw="Total Employees", normalized=1_000, value_type="count", entity="TargetCo"
+        ),
+        # Competitor with more trusted quantitative claims than the target.
+        _claim(
+            attribute_raw="Total Employees", normalized=9_000, value_type="count", entity="RivalCo"
+        ),
+        _claim(attribute="revenue", normalized=1, entity="RivalCo"),
+        _qual("The target's model is subscription.", "operating_model", entity="TargetCo"),
+    ]
+
+    view = build_company_view(claims, filenames={}, company="TargetCo")
+
+    assert [(f.label, f.value) for f in view.facts] == [("Headcount", "1,000")]
+    assert [f.value for f in view.overview] == ["The target's model is subscription."]
