@@ -50,7 +50,18 @@ def seeded_org(owner_conn) -> Iterator[dict[str, Any]]:
     yield {"clerk_org_id": clerk_org_id, "org_pk": org_pk}
 
     with owner_conn.cursor() as cur:
-        for table in ("human_audit_log", "edges", "claims", "analysis_run", "data_source", "deals"):
+        # chunks after claims (claims.chunk_id -> chunks) and before data_source /
+        # the organisation delete below (chunks.document_id -> data_source,
+        # chunks.org_id -> organisation), or those deletes hit chunks_*_fkey.
+        for table in (
+            "human_audit_log",
+            "edges",
+            "claims",
+            "chunks",
+            "analysis_run",
+            "data_source",
+            "deals",
+        ):
             cur.execute(f"DELETE FROM {table} WHERE org_id = %s", (org_pk,))
         cur.execute("DELETE FROM organisation WHERE id = %s", (org_pk,))
 
@@ -731,3 +742,110 @@ async def test_writes_deal_sector_and_hq_from_the_deal_profile(
         ],
         "metric_order": ["revenue", "ebitda"],
     }
+
+
+def _chunk_json(order: int, **kw: Any) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "content": f"Prose about the market (chunk {order}).",
+        "element_type": "prose",
+        "page": 1,
+        "order": order,
+        "document_id": "a" * 64,
+        "source_file": "cim.pdf",
+        "scale_context": None,
+        "scale_multiplier": None,
+        "spans": [[0, 20]],
+        "bbox": None,
+        "section": None,
+        "flags": [],
+    }
+    base.update(kw)
+    return base
+
+
+def _fetch_chunks(owner_conn, org_pk: int) -> list[tuple]:
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "SELECT document_id, content, element_type, char_start, char_end, embedding "
+            "FROM chunks WHERE org_id = %s ORDER BY content",
+            (org_pk,),
+        )
+        return cur.fetchall()
+
+
+async def test_ingests_chunks_from_the_envelope_idempotently(
+    owner_conn, seeded_org, seeded_deal, monkeypatch, mocked_screening_enqueue
+):
+    org_pk = seeded_org["org_pk"]
+    data_source_id = _seed_data_source(owner_conn, org_pk, seeded_deal, "cim.pdf")
+
+    def parse_jobs() -> list[dict]:
+        return [
+            {
+                "data_source_id": data_source_id,
+                "filename": "cim.pdf",
+                "storage_key": "org/cim.pdf",
+                "job_key": "job-1",
+                "outcome": "parsed",
+                "code": None,
+                "message": None,
+                "bucket": "test-bucket",
+                "key": "claims/cim.json",
+            }
+        ]
+
+    envelope = {
+        "run_id": "ignored",
+        "sha256": "a" * 64,
+        "source_file": "cim.pdf",
+        "claims": [_claim_json("c1", page=1)],
+        "edges": [],
+        "chunks": [
+            # A table chunk: scale folds into content, no span (cited by bbox).
+            _chunk_json(
+                0,
+                content="Revenue 15,295",
+                element_type="table",
+                scale_context="$ in millions",
+                spans=[],
+            ),
+            # A prose chunk with two blocks -> one covering (char_start, char_end).
+            _chunk_json(1, content="Prose about the market.", spans=[[3, 40], [1, 12]]),
+        ],
+    }
+    monkeypatch.setattr(job_module, "get_json_object", lambda bucket, key: envelope)
+
+    run1 = _seed_parsing_run(owner_conn, org_pk, seeded_deal, parse_jobs())
+    verify1 = _seed_verification_run(owner_conn, org_pk, seeded_deal)
+    await job_module.start_deal_verification(
+        {}, analysis_run_id=verify1, parsing_run_id=run1, clerk_org_id=seeded_org["clerk_org_id"]
+    )
+    assert _fetch_run(owner_conn, verify1)["status"] == "successful"
+
+    rows = _fetch_chunks(owner_conn, org_pk)
+    assert len(rows) == 2
+    by_content = {r[1]: r for r in rows}
+
+    table = by_content["[$ in millions] Revenue 15,295"]  # scale folded into content
+    assert str(table[0]) == data_source_id  # document_id is the REAL data_source id
+    assert table[2] == "table"
+    assert table[3] is None and table[4] is None  # no span (bbox-cited)
+    assert table[5] is None  # embedding NULL (dense backfill is a follow-up)
+
+    prose = by_content["Prose about the market."]
+    assert prose[3] == 1 and prose[4] == 40  # covering (min start, max end)
+
+    # Idempotent re-analysis: terminalize the active chain, then re-run the same
+    # envelope -- the deterministic chunk ids collide on the PK, so no duplicates.
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "UPDATE analysis_run SET status = 'successful' "
+            "WHERE deal_id = %s AND status IN ('queued', 'in_progress')",
+            (seeded_deal,),
+        )
+    run2 = _seed_parsing_run(owner_conn, org_pk, seeded_deal, parse_jobs())
+    verify2 = _seed_verification_run(owner_conn, org_pk, seeded_deal)
+    await job_module.start_deal_verification(
+        {}, analysis_run_id=verify2, parsing_run_id=run2, clerk_org_id=seeded_org["clerk_org_id"]
+    )
+    assert len(_fetch_chunks(owner_conn, org_pk)) == 2  # no duplicate chunks

@@ -48,10 +48,11 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.core.database import AsyncSessionLocal
 from app.jobs.queue import get_queue
-from app.models import Claim
+from app.models import Chunk, Claim
 from app.repo.AnalysisRunRepo import AnalysisRunRepo
 from app.repo.DealRepo import DealRepo
 from app.repo.HumanAuditRepo import HumanAuditRepo
+from app.services.chunk_ingest import chunk_row_values
 from app.services.consistency import reconcile_consistency
 from app.services.corroboration import CORROBORATABLE_STATUSES
 from app.services.dashboard_structure import merge_dashboard_structures
@@ -74,6 +75,7 @@ _STATEMENT_TIMEOUT = "120s"
 _IDLE_IN_TXN_TIMEOUT = "120s"
 
 _CONTRACT_PATH = Path(__file__).parents[3] / "contracts" / "claims.schema.json"
+_CHUNKS_CONTRACT_PATH = Path(__file__).parents[3] / "contracts" / "chunks.schema.json"
 
 # location keys that map to their own flat column -- mirrors
 # scripts/ingest_claims.py's _LOCATION_COLUMNS exactly.
@@ -83,6 +85,9 @@ _LOCATION_COLUMNS = ("page", "char_start", "char_end", "bbox", "sheet", "cell_re
 # bind-parameter ceiling (~24 columns/row -> 1000 rows leaves generous
 # headroom), mirroring edge_writer._EDGE_INSERT_CHUNK.
 _CLAIM_INSERT_CHUNK = 1000
+# Chunk rows carry ~8 columns, so a larger batch still clears the bind-param
+# ceiling comfortably.
+_CHUNK_INSERT_BATCH = 2000
 
 
 async def _set_org(session, clerk_org_id: str) -> None:
@@ -102,6 +107,24 @@ def _validate_claims(claims: list[dict]) -> None:
         errors = sorted(validator.iter_errors(claim), key=str)
         if errors:
             raise ValueError(f"claim {i} violates the contract: {errors[0].message}")
+
+
+def _validate_chunks(chunks: list[dict]) -> None:
+    """Contract check for the retrieval chunks against contracts/chunks.schema.json.
+
+    Unlike _validate_claims (whose ValueError aborts the whole verify job, because
+    claims are the pipeline's product), the caller runs this INSIDE the best-effort
+    chunk block, so a raise here is caught and downgraded to a warning -- chunks are
+    retrieval enrichment and must never fail the deal analysis. Serializer drift is
+    caught earlier + louder by CI's contracts/test_chunks_contract.py (both repos);
+    this is the runtime backstop that keeps a malformed chunk out of the table."""
+    from jsonschema import Draft202012Validator
+
+    validator = Draft202012Validator(json.loads(_CHUNKS_CONTRACT_PATH.read_text()))
+    for i, chunk in enumerate(chunks):
+        errors = sorted(validator.iter_errors(chunk), key=str)
+        if errors:
+            raise ValueError(f"chunk {i} violates the contract: {errors[0].message}")
 
 
 def _claim_values(
@@ -339,6 +362,38 @@ async def _run_verification(
                 # RETURNING yields one row per row actually inserted (conflicts are
                 # skipped), so this counts what was added, not the whole envelope.
                 inserted_count += len((await session.scalars(insert_claims)).all())
+
+            # Retrieval chunks (Epic 8, SIM-338): the same document's chunks ride
+            # in envelope["chunks"] (added by the parser worker). Ingest them into
+            # the chunks table -- document_id = this data_source_id, a deterministic
+            # id + ON CONFLICT DO NOTHING for re-analysis idempotency (mirroring the
+            # claims insert above), NULL embedding (a dense-embed backfill is a
+            # follow-up; the Postgres-generated content_tsv makes them
+            # sparse-retrievable now). Best-effort + SAVEPOINT-isolated: chunks are
+            # retrieval enrichment, so a chunk failure (malformed envelope, a
+            # missing grant) must roll back only the chunks, never the document's
+            # claims -- claims are the pipeline's product.
+            chunks = envelope.get("chunks", [])
+            if chunks:
+                try:
+                    _validate_chunks(chunks)
+                    chunk_rows = [
+                        chunk_row_values(c, org_id=org_id, data_source_id=data_source_id)
+                        for c in chunks
+                    ]
+                    async with session.begin_nested():
+                        for start in range(0, len(chunk_rows), _CHUNK_INSERT_BATCH):
+                            await session.execute(
+                                pg_insert(Chunk)
+                                .values(chunk_rows[start : start + _CHUNK_INSERT_BATCH])
+                                .on_conflict_do_nothing(index_elements=["id"])
+                            )
+                except Exception:
+                    logger.warning(
+                        "chunk ingest failed for data_source %s; claims kept, no chunks",
+                        data_source_id,
+                        exc_info=True,
+                    )
 
             # ref_to_id must map every ref this run's edges reference -- both the
             # rows just inserted and the ones a prior run already ingested (whose
