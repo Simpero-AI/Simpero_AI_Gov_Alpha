@@ -32,6 +32,20 @@ CORROBORATABLE_STATUSES = frozenset(
     {"cited", "conflicted", "inconclusive", "partially_verified", "verified"}
 )
 
+# The web-search corroboration source (web_search_corroborate). Named here, the
+# low-level module both it and status_rollup already import, so there is one
+# source of truth for the string.
+WEB_SEARCH_SOURCE = "web_search"
+
+# Sources whose events are DISPLAY-ONLY and must NOT count toward a claim's trust
+# roll-up. The web-search source only ever CONFIRMS (agrees=True) a deck sizing
+# figure for the Corroboration tab; letting roll_up_deal read those events as a
+# corroboration agreement would promote an uncorroborated claim into _TRUSTED on a
+# non-deterministic web match (across re-analysis, where the events persist) --
+# exactly the trust leak the source's positive-only, no-roll-up design avoids
+# within a run. status_rollup excludes these from its has_agreement computation.
+PRESENCE_ONLY_SOURCES = frozenset({WEB_SEARCH_SOURCE})
+
 
 class ClaimNotCorroboratableError(ValueError):
     """Raised when a corroboration result targets a claim that hasn't been

@@ -10,7 +10,11 @@ import pytest
 
 from app.models.claim import Claim
 from app.models.edge import Edge
-from app.services.corroboration import ClaimNotCorroboratableError, record_corroboration_result
+from app.services.corroboration import (
+    WEB_SEARCH_SOURCE,
+    ClaimNotCorroboratableError,
+    record_corroboration_result,
+)
 from app.services.screening.claims_lookup import claims_for_attribute
 from app.services.status_rollup import (
     RESOLVED_STATUSES,
@@ -280,6 +284,23 @@ async def test_rollup_weak_method_with_agreeing_event_is_partially_verified(
     assert await roll_up_status(db_session, cited_claim) == "partially_verified"
 
 
+async def test_rollup_web_search_event_does_not_promote(db_session, cited_claim):
+    # web_search is a DISPLAY-ONLY (presence-only) source: its confirming event
+    # must NOT count as a corroboration agreement, or a non-deterministic web match
+    # would silently promote an uncorroborated claim into _TRUSTED on the next run's
+    # roll-up. A weak-method claim with ONLY a web_search event stays inconclusive.
+    await record_corroboration_result(
+        db_session,
+        claim=cited_claim,
+        outside_source=WEB_SEARCH_SOURCE,
+        result={"source_url": "https://grandviewresearch.com/x", "metric": "tam"},
+        agrees=True,
+    )
+    await db_session.flush()
+
+    assert await roll_up_status(db_session, cited_claim) == "inconclusive"
+
+
 async def test_rollup_after_disagreement_is_conflicted_regardless_of_method(
     db_session, strong_claim
 ):
@@ -339,6 +360,44 @@ async def test_roll_up_deal_matches_per_claim_in_one_batch(
     assert cited_claim.status == "inconclusive"
     assert demoted.status == "inconclusive"
     assert corroborated.status == "partially_verified"
+
+
+async def test_roll_up_deal_excludes_web_search_from_agreement(db_session, org_pk, deal_pk):
+    # The batch has_agreement query must exclude the display-only web_search source:
+    # a claim whose ONLY event is a web_search confirmation stays inconclusive, while
+    # a sibling with a registry event promotes. Guards the cross-run trust leak where
+    # a prior run's web event would otherwise elevate a claim on the next roll-up.
+    web_only = Claim(
+        **_claim_kwargs(org_pk, deal_pk, status="cited", verification_method=WEAK_METHOD)
+    )
+    web_only.attribute = "revenue"
+    registry = Claim(
+        **_claim_kwargs(org_pk, deal_pk, status="cited", verification_method=WEAK_METHOD)
+    )
+    registry.attribute = "ebitda"
+    db_session.add_all([web_only, registry])
+    await db_session.flush()
+
+    await record_corroboration_result(
+        db_session,
+        claim=web_only,
+        outside_source=WEB_SEARCH_SOURCE,
+        result={"source_url": "https://statista.com/x", "metric": "tam"},
+        agrees=True,
+    )
+    await record_corroboration_result(
+        db_session,
+        claim=registry,
+        outside_source="entity_lookup",
+        result={"status": "MATCHED"},
+        agrees=True,
+    )
+    await db_session.flush()
+
+    await roll_up_deal(db_session, [web_only, registry])
+
+    assert web_only.status == "inconclusive"  # web_search does not count as agreement
+    assert registry.status == "partially_verified"  # a real registry event still does
 
 
 async def test_roll_up_deal_over_no_claims_is_a_noop(db_session):

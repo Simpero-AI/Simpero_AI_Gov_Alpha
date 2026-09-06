@@ -65,7 +65,11 @@ from app.models.claim import Claim
 from app.models.corroboration_event import CorroborationEvent
 from app.models.edge import Edge
 from app.repo.CorroborationEventRepo import CorroborationEventRepo
-from app.services.corroboration import CORROBORATABLE_STATUSES, ClaimNotCorroboratableError
+from app.services.corroboration import (
+    CORROBORATABLE_STATUSES,
+    PRESENCE_ONLY_SOURCES,
+    ClaimNotCorroboratableError,
+)
 
 # Exhaustive over the verification_method enum (ck_claims_verification_method):
 # exact_span, formula_reexecution, direct_read, reranker, human_review.
@@ -157,7 +161,9 @@ async def roll_up_status(db: AsyncSession, claim: Claim) -> str:
     has_agreement = False
     if not has_disagreement:
         events = await CorroborationEventRepo(db).list_for_claim(claim.id)
-        has_agreement = len(events) > 0
+        # Display-only sources (web-search) do not count as a corroboration
+        # agreement -- see PRESENCE_ONLY_SOURCES and roll_up_deal's group query.
+        has_agreement = any(e.outside_source not in PRESENCE_ONLY_SOURCES for e in events)
 
     claim.status = resolve_status(
         verification_method=claim.verification_method,
@@ -201,14 +207,18 @@ async def roll_up_deal(db: AsyncSession, claims: Sequence[Claim]) -> None:
         contradicted.add(from_id)
         contradicted.add(to_id)
 
-    # Claims with at least one corroboration event -- one query for the group,
-    # matching roll_up_status's `len(list_for_claim(...)) > 0`.
+    # Claims with at least one TRUST-BEARING corroboration event -- one query for
+    # the group, matching roll_up_status's `len(list_for_claim(...)) > 0`.
+    # PRESENCE_ONLY_SOURCES (the display-only web-search source) are excluded: their
+    # events must not count as a corroboration agreement, or a non-deterministic web
+    # match would promote an uncorroborated claim into _TRUSTED on the NEXT run's
+    # roll-up (the events persist append-only across re-analysis).
     claims_with_events: set[uuid.UUID] = set(
         (
             await db.scalars(
-                select(CorroborationEvent.claim_id).where(
-                    CorroborationEvent.claim_id.in_(claim_ids)
-                )
+                select(CorroborationEvent.claim_id)
+                .where(CorroborationEvent.claim_id.in_(claim_ids))
+                .where(CorroborationEvent.outside_source.not_in(sorted(PRESENCE_ONLY_SOURCES)))
             )
         ).all()
     )
