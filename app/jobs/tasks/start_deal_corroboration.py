@@ -169,62 +169,71 @@ async def _run_corroboration(*, screening_run_id: UUID, clerk_org_id: str) -> bo
             else []
         )
 
-        # --- Phase C: short WRITE transaction ---
-        if results or web_candidates or sizing_verdicts:
-            async with session.begin():
-                # SET LOCAL and RLS (SET LOCAL app.org_id) are per-transaction, so
-                # re-issue them as the first statements of this new transaction.
-                await session.execute(text(f"SET LOCAL statement_timeout = '{_STATEMENT_TIMEOUT}'"))
-                await _set_org(session, clerk_org_id)
-                minted = 0
-                if results:
-                    await persist_corroboration(session, results, {c.id: c for c in claims})
-                    # flush so the appended events + conflicted statuses are visible
-                    # to roll_up_deal's own SELECTs before it reads them.
-                    await session.flush()
-                    await roll_up_deal(session, claims)
-                    await session.flush()
-                if sizing_verdicts:
-                    # Record the positive web-sizing confirmations as events, but do
-                    # NOT run roll_up_deal for them: they are agrees=True (change no
-                    # status) and exist for the Corroboration tab's display only.
-                    # Running the roll-up on their account would demote unrelated
-                    # uncorroborated claims (see the phase-B note).
-                    await persist_corroboration(session, sizing_verdicts, {c.id: c for c in claims})
-                    await session.flush()
-                if web_candidates:
-                    # Isolate the web mint in a SAVEPOINT so a failure here (e.g. a
-                    # constraint violation from a malformed collected fact) rolls
-                    # back only the web claims, never the corroboration events +
-                    # roll-up already written in this transaction. Best-effort
-                    # enrichment must not discard real corroboration verdicts.
-                    try:
-                        async with session.begin_nested():
-                            minted = await persist_web_facts(
-                                session, deal_id=deal_uuid, org_id=org_id, candidates=web_candidates
-                            )
-                            await session.flush()
-                    except Exception:
-                        logger.warning(
-                            "web collect persist failed for screening run %s; "
-                            "corroboration verdicts kept",
-                            screening_run_id,
-                            exc_info=True,
+        # --- Phase C: short WRITE transaction. Runs UNCONDITIONALLY -- even an
+        # all-empty pass writes its audit row, so "why did corroboration produce
+        # nothing?" is answerable from the analysis_corroboration_completed payload
+        # in SQL instead of hunting the worker log. Each persist below is still
+        # guarded, so an empty pass just writes the audit row and commits. ---
+        async with session.begin():
+            # SET LOCAL and RLS (SET LOCAL app.org_id) are per-transaction, so
+            # re-issue them as the first statements of this new transaction.
+            await session.execute(text(f"SET LOCAL statement_timeout = '{_STATEMENT_TIMEOUT}'"))
+            await _set_org(session, clerk_org_id)
+            minted = 0
+            if results:
+                await persist_corroboration(session, results, {c.id: c for c in claims})
+                # flush so the appended events + conflicted statuses are visible
+                # to roll_up_deal's own SELECTs before it reads them.
+                await session.flush()
+                await roll_up_deal(session, claims)
+                await session.flush()
+            if sizing_verdicts:
+                # Record the positive web-sizing confirmations as events, but do
+                # NOT run roll_up_deal for them: they are agrees=True (change no
+                # status) and exist for the Corroboration tab's display only.
+                # Running the roll-up on their account would demote unrelated
+                # uncorroborated claims (see the phase-B note).
+                await persist_corroboration(session, sizing_verdicts, {c.id: c for c in claims})
+                await session.flush()
+            if web_candidates:
+                # Isolate the web mint in a SAVEPOINT so a failure here (e.g. a
+                # constraint violation from a malformed collected fact) rolls
+                # back only the web claims, never the corroboration events +
+                # roll-up already written in this transaction. Best-effort
+                # enrichment must not discard real corroboration verdicts.
+                try:
+                    async with session.begin_nested():
+                        minted = await persist_web_facts(
+                            session, deal_id=deal_uuid, org_id=org_id, candidates=web_candidates
                         )
-                        minted = 0
-                await HumanAuditRepo(session).append(
-                    {
-                        "org_id": org_id,
-                        "actor_id": "Internal System",
-                        "actor_email": "Internal System",
-                        "event_type": "analysis_corroboration_completed",
-                        "deal_id": deal_uuid,
-                        "payload": {
-                            "screening_run_id": str(screening_run_id),
-                            "claims_checked": len(claims),
-                            "events_recorded": len(results) + len(sizing_verdicts),
-                            "web_facts_collected": minted,
-                        },
-                    }
-                )
+                        await session.flush()
+                except Exception:
+                    logger.warning(
+                        "web collect persist failed for screening run %s; "
+                        "corroboration verdicts kept",
+                        screening_run_id,
+                        exc_info=True,
+                    )
+                    minted = 0
+            # web_candidates_collected (what gather_web_facts returned) vs
+            # web_facts_collected (rows actually minted) separates "web search found
+            # nothing" from "found some but the dedup/persist dropped them".
+            await HumanAuditRepo(session).append(
+                {
+                    "org_id": org_id,
+                    "actor_id": "Internal System",
+                    "actor_email": "Internal System",
+                    "event_type": "analysis_corroboration_completed",
+                    "deal_id": deal_uuid,
+                    "payload": {
+                        "screening_run_id": str(screening_run_id),
+                        "claims_checked": len(claims),
+                        "registry_verdicts": len(results),
+                        "sizing_verdicts": len(sizing_verdicts),
+                        "events_recorded": len(results) + len(sizing_verdicts),
+                        "web_candidates_collected": len(web_candidates),
+                        "web_facts_collected": minted,
+                    },
+                }
+            )
     return True
