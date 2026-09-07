@@ -557,11 +557,14 @@ async def get_deal_market(
         .scalars()
         .all()
     )
-    filenames = {ds.id: ds.filename for ds in await DataSourceRepo(db).list_for_deal(deal_id)}
+    data_sources = await DataSourceRepo(db).list_for_deal(deal_id)
+    filenames = {ds.id: ds.filename for ds in data_sources}
+    source_urls = {ds.id: ds.source_url for ds in data_sources if ds.source_url}
 
     market = build_market_view(
         claims,
         filenames=filenames,
+        source_urls=source_urls,
         dashboard_structure=deal.dashboard_structure,
         company=deal.name,
     )
@@ -603,11 +606,14 @@ async def get_deal_company(
         .scalars()
         .all()
     )
-    filenames = {ds.id: ds.filename for ds in await DataSourceRepo(db).list_for_deal(deal_id)}
+    data_sources = await DataSourceRepo(db).list_for_deal(deal_id)
+    filenames = {ds.id: ds.filename for ds in data_sources}
+    source_urls = {ds.id: ds.source_url for ds in data_sources if ds.source_url}
 
     company = build_company_view(
         claims,
         filenames=filenames,
+        source_urls=source_urls,
         dashboard_structure=deal.dashboard_structure,
         sector=deal.sector,
         hq_geography=deal.hq_geography,

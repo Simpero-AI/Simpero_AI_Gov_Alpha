@@ -3,6 +3,8 @@ objects, no database. Guards what surfaces on the Business Overview tab:
 identity facts (deal-profile sector/HQ + headcount/founded by label) and the
 qualitative assertions grouped by assertion_class, only trust-earned."""
 
+import uuid
+
 from app.models.claim import Claim
 from app.services.company_view import build_company_view
 
@@ -23,6 +25,7 @@ def _claim(
     period_kind: str | None = None,
     kind: str = "pdf",
     page: int | None = 1,
+    data_source_id: uuid.UUID | None = None,
 ) -> Claim:
     return Claim(
         entity=entity,
@@ -41,6 +44,7 @@ def _claim(
         kind=kind,
         page=page,
         status=status,
+        data_source_id=data_source_id,
     )
 
 
@@ -411,3 +415,28 @@ def test_company_leads_even_when_a_competitor_has_more_claims():
 
     assert [(f.label, f.value) for f in view.facts] == [("Headcount", "1,000")]
     assert [f.value for f in view.overview] == ["The target's model is subscription."]
+
+
+def test_web_claim_source_url_is_surfaced():
+    # A web-sourced operating_model assertion carries its citation as a real URL
+    # on its per-URL DataSource; it must reach the overview fact's source_url.
+    web_ds = uuid.uuid4()
+    claims = [
+        _qual(
+            "The market for confidential computing is projected to triple by 2030.",
+            "operating_model",
+            entity="AcmeCo",
+            kind="web",
+            status="cited",
+            data_source_id=web_ds,
+        ),
+    ]
+
+    view = build_company_view(
+        claims,
+        filenames={web_ds: "IDC Brief"},
+        source_urls={web_ds: "https://example.com/idc"},
+        company="AcmeCo",
+    )
+
+    assert [f.source_url for f in view.overview] == ["https://example.com/idc"]

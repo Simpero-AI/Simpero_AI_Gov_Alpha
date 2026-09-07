@@ -391,10 +391,23 @@ async def gather_web_facts(
             call, api_key=api_key, model=model, company=company, sector=sector, allowed=allowed
         )
         if not isinstance(raw, dict):
+            logger.info("web-collect for %r: model returned no structured facts", company)
             return []
         # _adjudicate is inside the try too: an adjudication bug must also fail
         # soft to [] and never escape into the corroboration job's phase B.
-        return _adjudicate(raw, frozenset(allowed))
+        candidates = _adjudicate(raw, frozenset(allowed))
+        # Observability: distinguishes "the model reported nothing" (web_search
+        # found/cited nothing) from "reported N but the allowlist dropped them all"
+        # (tune DEFAULT_ALLOWED_DOMAINS) from "N minted" -- the collect path is
+        # otherwise silent on success, so an empty result is undiagnosable.
+        logger.info(
+            "web-collect for %r: model reported %d sizing + %d assertions; %d passed the allowlist",
+            company,
+            len(raw.get("sizing") or []),
+            len(raw.get("assertions") or []),
+            len(candidates),
+        )
+        return candidates
     except Exception:
         logger.warning(
             "web-search collect failed for %r; returning no facts", company, exc_info=True

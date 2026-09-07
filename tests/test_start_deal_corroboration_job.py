@@ -207,3 +207,47 @@ async def test_still_hands_off_to_screening_when_a_source_raises(
     assert _claim_status(owner_conn, claim_id) == "verified"
     assert len(mocked_enqueue) == 1
     assert mocked_enqueue[0][0] == "start_deal_screening"
+
+
+def _corroboration_audit_payloads(owner_conn, deal_id: str) -> list[dict]:
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "SELECT payload FROM human_audit_log "
+            "WHERE deal_id = %s AND event_type = 'analysis_corroboration_completed'",
+            (deal_id,),
+        )
+        return [row[0] for row in cur.fetchall()]
+
+
+async def test_writes_an_audit_row_even_when_nothing_is_corroborated(
+    owner_conn, seeded_org, seeded_deal, monkeypatch, mocked_enqueue
+):
+    # A corroboratable claim exists, but no registry source produces a verdict and
+    # the web collect is empty. Corroboration must STILL write its
+    # analysis_corroboration_completed audit row -- the diagnostic signal for "why
+    # did corroboration produce nothing?", answerable from SQL rather than the worker
+    # log -- carrying the counts that separate "found nothing" from "found, dropped".
+    _seed_claim(owner_conn, seeded_org["org_pk"], seeded_deal, status="verified")
+    screening_run_id = _seed_screening_run(owner_conn, seeded_org["org_pk"], seeded_deal)
+    monkeypatch.setattr(job_module, "DEFAULT_SOURCES", [])
+
+    async def _no_web_facts(**_kwargs: Any) -> list:
+        return []
+
+    monkeypatch.setattr(job_module, "gather_web_facts", _no_web_facts)
+
+    await job_module.start_deal_corroboration(
+        {}, screening_run_id=screening_run_id, clerk_org_id=seeded_org["clerk_org_id"]
+    )
+
+    payloads = _corroboration_audit_payloads(owner_conn, seeded_deal)
+    assert len(payloads) == 1
+    payload = payloads[0]
+    assert payload["claims_checked"] == 1
+    assert payload["registry_verdicts"] == 0
+    assert payload["events_recorded"] == 0
+    assert payload["web_candidates_collected"] == 0
+    assert payload["web_facts_collected"] == 0
+    # Best-effort enrichment still hands off to screening.
+    assert len(mocked_enqueue) == 1
+    assert mocked_enqueue[0][0] == "start_deal_screening"

@@ -24,7 +24,13 @@ from typing import Any
 
 from app.models.claim import Claim
 from app.services.entity_resolution.resolved import normalize_name
-from app.services.screening_materials import _STATUS_RANK, _TRUSTED, _citation, _fmt_value
+from app.services.screening_materials import (
+    _STATUS_RANK,
+    _TRUSTED,
+    _citation,
+    _fmt_value,
+    _source_url,
+)
 from app.services.subject_fold import UNMATCHED, fold_subjects, strip_legal_suffix, subject_of
 
 # An UNMATCHED sizing entity is either a legitimate market descriptor ("the UK
@@ -79,6 +85,7 @@ class MarketFact:
     citation: str | None
     status: str
     entity: str | None
+    source_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -234,7 +241,10 @@ _QUAL_LABEL_FALLBACK = {
 
 
 def _qual_fact(
-    claim: Claim, filenames: Mapping[uuid.UUID, str], display_names: dict[str, str]
+    claim: Claim,
+    filenames: Mapping[uuid.UUID, str],
+    display_names: dict[str, str],
+    source_urls: Mapping[uuid.UUID, str] | None = None,
 ) -> MarketFact:
     """A qualitative assertion as a MarketFact: the entity it is about as the
     label, the assertion text (value.raw, via _fmt_value) as the value, plus its
@@ -256,6 +266,7 @@ def _qual_fact(
         citation=_citation(claim, filenames),
         status=claim.status,
         entity=claim.entity,
+        source_url=_source_url(claim, source_urls),
     )
 
 
@@ -268,6 +279,7 @@ def build_market_view(
     claims: Sequence[Claim],
     *,
     filenames: Mapping[uuid.UUID, str],
+    source_urls: Mapping[uuid.UUID, str] | None = None,
     dashboard_structure: dict[str, Any] | None = None,
     company: str | None = None,
 ) -> MarketView:
@@ -308,9 +320,9 @@ def build_market_view(
             # competitor -- scoping either to the target's lead subject would drop
             # exactly the rows these sections exist to show.
             if claim.assertion_class == "market_definition":
-                definition.append(_qual_fact(claim, filenames, qual_display))
+                definition.append(_qual_fact(claim, filenames, qual_display, source_urls))
             elif claim.assertion_class == "competitive_position":
-                competition.append(_qual_fact(claim, filenames, qual_display))
+                competition.append(_qual_fact(claim, filenames, qual_display, source_urls))
             continue
 
         # A single sizing figure wins per key, so a competitor's figure must not
@@ -350,6 +362,7 @@ def build_market_view(
             citation=_citation(claim, filenames),
             status=claim.status,
             entity=claim.entity,
+            source_url=_source_url(claim, source_urls),
         )
         for _key, (_rank, claim, display) in sorted(
             sizing_best.items(), key=lambda item: _SIZING_ORDER.get(item[0], 99)

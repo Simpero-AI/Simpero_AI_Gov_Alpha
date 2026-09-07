@@ -39,7 +39,13 @@ from typing import Any
 
 from app.models.claim import Claim
 from app.services.entity_resolution.resolved import normalize_name
-from app.services.screening_materials import _STATUS_RANK, _TRUSTED, _citation, _fmt_value
+from app.services.screening_materials import (
+    _STATUS_RANK,
+    _TRUSTED,
+    _citation,
+    _fmt_value,
+    _source_url,
+)
 from app.services.subject_fold import UNMATCHED, fold_subjects, subject_of
 
 # The status shown for a sector/HQ fact that came from the deal-profile
@@ -54,6 +60,7 @@ class CompanyFact:
     citation: str | None
     status: str
     entity: str | None
+    source_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -228,13 +235,18 @@ def _rank(claim: Claim) -> tuple[int, int, int]:
 # suffix-insensitively.
 
 
-def _qual_fact(claim: Claim, filenames: Mapping[uuid.UUID, str]) -> CompanyFact:
+def _qual_fact(
+    claim: Claim,
+    filenames: Mapping[uuid.UUID, str],
+    source_urls: Mapping[uuid.UUID, str] | None = None,
+) -> CompanyFact:
     return CompanyFact(
         label=claim.entity or "",
         value=_fmt_value(claim.value),
         citation=_citation(claim, filenames),
         status=claim.status,
         entity=claim.entity,
+        source_url=_source_url(claim, source_urls),
     )
 
 
@@ -246,6 +258,7 @@ def build_company_view(
     claims: Sequence[Claim],
     *,
     filenames: Mapping[uuid.UUID, str],
+    source_urls: Mapping[uuid.UUID, str] | None = None,
     dashboard_structure: dict[str, Any] | None = None,
     sector: str | None = None,
     hq_geography: str | None = None,
@@ -286,7 +299,7 @@ def build_company_view(
         if claim.claim_kind == "qualitative":
             section = _SECTION_BY_CLASS.get(claim.assertion_class or "")
             if section is not None:
-                sections[section].append(_qual_fact(claim, filenames))
+                sections[section].append(_qual_fact(claim, filenames, source_urls))
             continue
 
         keyed = _identity_label(claim)
@@ -306,6 +319,7 @@ def build_company_view(
             citation=_citation(claim, filenames),
             status=claim.status,
             entity=claim.entity,
+            source_url=_source_url(claim, source_urls),
         )
         for key, (claim, display) in sorted(
             identity_best.items(), key=lambda item: _IDENTITY_ORDER.get(item[0], 99)
