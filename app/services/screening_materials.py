@@ -401,17 +401,24 @@ def _headline_claims(
     *,
     dashboard_structure: dict[str, Any] | None,
     company: str | None = None,
+    include_web: bool = False,
 ) -> tuple[list[tuple[Claim, str, str]], dict[str, int]]:
     """(claim, metric_key, display) for every trusted, displayable headline
     claim of the deal's lead business subject, plus the metric-rank map. The one
-    eligibility gate shared by the extracted panel and the LLM grounding, so the
-    two never drift on which facts count.
+    eligibility gate shared by the extracted panel, the LLM grounding and the
+    Financials tab, so they never drift on which facts count.
 
     A missing period_year is NOT a filter: many CIMs carry statement figures with
     no machine-readable year, and dropping them empties the panel on exactly the
     deals it exists for. When a metric has several undated values, _prefer picks
     one deterministically (see _rank_key); when years ARE present it still prefers
-    the latest actual."""
+    the latest actual.
+
+    `include_web` is the single knob for whether web-collected claims count.
+    Screening (the extracted panel and the LLM insights grounding) leaves it
+    False so it reasons only over the deal's own documents; the Financials tab
+    passes True so an external figure surfaces with its source URL. It is the ONE
+    place the two policies diverge, kept here so they can't drift elsewhere."""
     fold = fold_subjects(claims, dashboard_structure, company)
     lead_subject = fold.lead
 
@@ -419,11 +426,10 @@ def _headline_claims(
     for claim in claims:
         if claim.status not in _TRUSTED:
             continue
-        # Web-collected claims are external enrichment for the Market/Company
-        # tabs, not internally-verified deck facts -- keep them out of the
-        # screening snapshot + the LLM insights grounding (both go through here),
-        # so screening reasons only over the deal's own documents.
-        if claim.kind == "web":
+        # Web-collected claims are external enrichment, not internally-verified
+        # deck facts. Screening keeps them out (include_web False) so it reasons
+        # only over the deal's own documents; the Financials tab opts in.
+        if not include_web and claim.kind == "web":
             continue
         if subject_of(fold, claim.entity) != lead_subject:
             continue

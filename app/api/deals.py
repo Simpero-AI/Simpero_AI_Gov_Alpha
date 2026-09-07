@@ -48,6 +48,8 @@ from app.schemas.deals import (
     DealStatusResponse,
     DealWithLatestMemoResponse,
     EntityResolutionResponse,
+    FinancialFactResponse,
+    FinancialsViewResponse,
     FormerNameResponse,
     IntakePipelineStatus,
     LatestMemoSessionResponse,
@@ -79,6 +81,7 @@ from app.services.corroboration_citation import corroboration_source_url
 from app.services.dashboard_stats import compute_month_bounds, compute_pipeline_value_delta
 from app.services.entity_resolution import get_resolver
 from app.services.entity_resolution.types import EntityResolutionError
+from app.services.financials_view import build_financials_view
 from app.services.intake_links import (
     compute_intake_link_effective_status,
     compute_pipeline_intake_status,
@@ -573,6 +576,57 @@ async def get_deal_market(
         sizing=_to_responses(market.sizing, MarketFactResponse),
         market_definition=_to_responses(market.market_definition, MarketFactResponse),
         competitive_position=_to_responses(market.competitive_position, MarketFactResponse),
+    )
+
+
+@router.get("/{deal_id}/financials", response_model=FinancialsViewResponse)
+async def get_deal_financials(
+    deal_id: uuid.UUID, db: AsyncSession = Depends(get_db)
+) -> FinancialsViewResponse:
+    """The Financials tab, derived deterministically from the deal's claims spine
+    (build_financials_view): the deal's trusted headline metrics -- the same
+    curation the screening extracted panel runs, web claims included -- partitioned
+    into five statement sections (income statement, profitability, balance sheet,
+    cash flow, operating), each fact carrying its pre-formatted value, rendered
+    period, citation and trust status. Claims-only and LLM-free; RLS-scoped by
+    get_db; returns empty lists (never 404) for a deal with no financial claims,
+    so each section renders its own "information not available" state."""
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    # Deterministic row order for the per-metric best-claim tiebreak, same as the
+    # market and company routes.
+    claims = list(
+        (
+            await db.execute(
+                select(Claim)
+                .where(Claim.deal_id == deal_id)
+                .where(Claim.status.in_(sorted(_TRUSTED_STATUSES)))
+                .order_by(Claim.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    data_sources = await DataSourceRepo(db).list_for_deal(deal_id)
+    filenames = {ds.id: ds.filename for ds in data_sources}
+    source_urls = {ds.id: ds.source_url for ds in data_sources if ds.source_url}
+
+    view = build_financials_view(
+        claims,
+        filenames=filenames,
+        source_urls=source_urls,
+        dashboard_structure=deal.dashboard_structure,
+        company=deal.name,
+    )
+
+    return FinancialsViewResponse(
+        income_statement=_to_responses(view.income_statement, FinancialFactResponse),
+        profitability=_to_responses(view.profitability, FinancialFactResponse),
+        balance_sheet=_to_responses(view.balance_sheet, FinancialFactResponse),
+        cash_flow=_to_responses(view.cash_flow, FinancialFactResponse),
+        operating=_to_responses(view.operating, FinancialFactResponse),
     )
 
 
