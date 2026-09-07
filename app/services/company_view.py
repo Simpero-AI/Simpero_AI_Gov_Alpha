@@ -54,6 +54,7 @@ class CompanyFact:
     citation: str | None
     status: str
     entity: str | None
+    source_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -228,13 +229,18 @@ def _rank(claim: Claim) -> tuple[int, int, int]:
 # suffix-insensitively.
 
 
-def _qual_fact(claim: Claim, filenames: Mapping[uuid.UUID, str]) -> CompanyFact:
+def _qual_fact(
+    claim: Claim,
+    filenames: Mapping[uuid.UUID, str],
+    source_urls: Mapping[uuid.UUID, str] | None = None,
+) -> CompanyFact:
     return CompanyFact(
         label=claim.entity or "",
         value=_fmt_value(claim.value),
         citation=_citation(claim, filenames),
         status=claim.status,
         entity=claim.entity,
+        source_url=(source_urls or {}).get(claim.data_source_id),
     )
 
 
@@ -246,6 +252,7 @@ def build_company_view(
     claims: Sequence[Claim],
     *,
     filenames: Mapping[uuid.UUID, str],
+    source_urls: Mapping[uuid.UUID, str] | None = None,
     dashboard_structure: dict[str, Any] | None = None,
     sector: str | None = None,
     hq_geography: str | None = None,
@@ -286,7 +293,7 @@ def build_company_view(
         if claim.claim_kind == "qualitative":
             section = _SECTION_BY_CLASS.get(claim.assertion_class or "")
             if section is not None:
-                sections[section].append(_qual_fact(claim, filenames))
+                sections[section].append(_qual_fact(claim, filenames, source_urls))
             continue
 
         keyed = _identity_label(claim)
@@ -306,6 +313,7 @@ def build_company_view(
             citation=_citation(claim, filenames),
             status=claim.status,
             entity=claim.entity,
+            source_url=(source_urls or {}).get(claim.data_source_id),
         )
         for key, (claim, display) in sorted(
             identity_best.items(), key=lambda item: _IDENTITY_ORDER.get(item[0], 99)

@@ -323,6 +323,9 @@ class MarketFactResponse(CamelModel):
     citation: str | None = None
     status: str
     entity: str | None = None
+    # The web source URL for a kind='web' fact; null for a document claim (whose
+    # citation is a file · p.N string).
+    source_url: str | None = None
 
 
 class CompanyFactResponse(CamelModel):
@@ -338,6 +341,9 @@ class CompanyFactResponse(CamelModel):
     citation: str | None = None
     status: str
     entity: str | None = None
+    # The web source URL for a kind='web' fact; null for a document claim (whose
+    # citation is a file · p.N string).
+    source_url: str | None = None
 
 
 class MarketViewResponse(CamelModel):

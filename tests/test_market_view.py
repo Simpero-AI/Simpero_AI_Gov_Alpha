@@ -601,3 +601,38 @@ def test_competitor_name_variants_fold_to_one_row_header():
     view = build_market_view(claims, filenames={}, company="TargetCo")
     assert {f.label for f in view.competitive_position} == {"Acme Corp."}
     assert len(view.competitive_position) == 3  # three distinct assertions, one competitor
+
+
+def test_web_claim_source_url_is_surfaced():
+    # A web-sourced sizing claim carries its citation as a real URL on its
+    # per-URL DataSource; it must reach the sizing fact's source_url. A document
+    # (pdf) claim, absent from source_urls, keeps source_url None.
+    web_ds = uuid.uuid4()
+    pdf_ds = uuid.uuid4()
+    claims = [
+        _claim(
+            attribute_raw="market size",
+            normalized=8_000_000_000,
+            entity="US data cloud market",
+            kind="web",
+            status="cited",
+            data_source_id=web_ds,
+        ),
+        _claim(
+            attribute_raw="Total Addressable Market",
+            normalized=5_000_000_000,
+            entity="AcmeCo",
+            data_source_id=pdf_ds,
+        ),
+    ]
+
+    view = build_market_view(
+        claims,
+        filenames={web_ds: "Gartner Report", pdf_ds: "CIM.pdf"},
+        source_urls={web_ds: "https://example.com/gartner"},
+        company="AcmeCo",
+    )
+
+    by_label = {f.label: f for f in view.sizing}
+    assert by_label["Market Size"].source_url == "https://example.com/gartner"
+    assert by_label["TAM"].source_url is None
