@@ -42,6 +42,7 @@ from app.services.screening_materials import (
     _labels_by_key,
     _prefer,
     _rank_for,
+    _source_url,
 )
 
 
@@ -237,7 +238,7 @@ def build_financials_view(
                 citation=_citation(claim, filenames),
                 status=claim.status,
                 entity=claim.entity,
-                source_url=(source_urls or {}).get(claim.data_source_id),
+                source_url=_source_url(claim, source_urls),
             )
             for metric_key, claim in sorted(items, key=_sort_key)
         ]
