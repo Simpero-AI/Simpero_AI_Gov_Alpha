@@ -24,7 +24,13 @@ from typing import Any
 
 from app.models.claim import Claim
 from app.services.entity_resolution.resolved import normalize_name
-from app.services.screening_materials import _STATUS_RANK, _TRUSTED, _citation, _fmt_value
+from app.services.screening_materials import (
+    _STATUS_RANK,
+    _TRUSTED,
+    _citation,
+    _fmt_value,
+    _source_url,
+)
 from app.services.subject_fold import UNMATCHED, fold_subjects, strip_legal_suffix, subject_of
 
 # An UNMATCHED sizing entity is either a legitimate market descriptor ("the UK
@@ -260,7 +266,7 @@ def _qual_fact(
         citation=_citation(claim, filenames),
         status=claim.status,
         entity=claim.entity,
-        source_url=(source_urls or {}).get(claim.data_source_id),
+        source_url=_source_url(claim, source_urls),
     )
 
 
@@ -356,7 +362,7 @@ def build_market_view(
             citation=_citation(claim, filenames),
             status=claim.status,
             entity=claim.entity,
-            source_url=(source_urls or {}).get(claim.data_source_id),
+            source_url=_source_url(claim, source_urls),
         )
         for _key, (_rank, claim, display) in sorted(
             sizing_best.items(), key=lambda item: _SIZING_ORDER.get(item[0], 99)

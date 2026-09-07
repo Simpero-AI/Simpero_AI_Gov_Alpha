@@ -301,6 +301,16 @@ def _citation(claim: Claim, filenames: Mapping[uuid.UUID, str]) -> str | None:
     return " · ".join(parts) or None
 
 
+def _source_url(claim: Claim, source_urls: Mapping[uuid.UUID, str] | None) -> str | None:
+    """The external source URL for a web claim (its synthetic per-URL data_source's
+    source_url), or None for a document claim. Guards data_source_id (nullable)
+    before the lookup, mirroring _citation, so a view can build a fact's clickable
+    external citation without pyright flagging the None key."""
+    if claim.data_source_id is None or not source_urls:
+        return None
+    return source_urls.get(claim.data_source_id)
+
+
 # Subject folding is shared with market_view and company_view (see
 # app/services/subject_fold.py) so the three tabs can't disagree on the same
 # deal: the consolidated anchor leads, and the deal's company matches its claims
