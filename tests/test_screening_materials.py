@@ -609,3 +609,20 @@ def test_grounding_dedupes_conflicting_values_for_the_same_metric_and_period():
     revenue_lines = [ln for ln in lines if ln.startswith("Net Revenue")]
     assert len(revenue_lines) == 1
     assert "$328.00M" in revenue_lines[0]
+
+
+def test_canonical_attributes_match_the_contract_enum():
+    # _is_canonical is an ALLOWLIST against the real canonicalAttribute vocabulary
+    # (contracts/claims.schema.json, minus the two catch-alls), not "not a catch-
+    # all". This guards it from drifting from the contract -- if the enum gains a
+    # metric, this set must too, or that metric silently stops surfacing.
+    import json
+    from pathlib import Path
+
+    from app.services.screening_materials import _CANONICAL_ATTRIBUTES
+
+    schema = json.loads(
+        (Path(__file__).parents[1] / "contracts" / "claims.schema.json").read_text()
+    )
+    enum = set(schema["$defs"]["canonicalAttribute"]["enum"])
+    assert enum - {"operating_metric", "core_unmapped"} == _CANONICAL_ATTRIBUTES

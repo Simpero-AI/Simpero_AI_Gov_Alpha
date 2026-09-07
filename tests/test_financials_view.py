@@ -125,19 +125,51 @@ def test_cash_flow_metrics_land_in_cash_flow():
     assert view.income_statement == []
 
 
-def test_an_unmapped_metric_defaults_to_operating():
-    # A canonical attribute in none of the five section sets (a debt-service ratio
-    # here) is not dropped -- it falls to the operating catch-all section.
+def test_a_canonical_operating_metric_lands_in_operating():
+    # A genuine canonical operating metric surfaces in the operating section.
     claims = [
-        _claim(attribute="dscr", normalized=1.4, value_type="ratio", period_year=2023),
+        _claim(
+            attribute="customer_concentration",
+            normalized=0.35,
+            value_type="ratio",
+            period_year=2023,
+        ),
     ]
 
     view = build_financials_view(claims, filenames={}, company="AcmeCo")
 
-    (fact,) = view.operating
-    assert fact.label == "Dscr"
+    assert [f.label for f in view.operating] == ["Customer Concentration"]
+    assert view.income_statement == []
+
+
+def test_a_noncanonical_raw_label_metric_is_not_surfaced():
+    # A raw-label attribute the parser never canonicalized -- fiscal metadata, a
+    # Forbes-list year, a customer-count definition -- is NOT a financial metric.
+    # It falls through the dollar-line recovery (which rejects non-dollar values)
+    # and surfaces nowhere. The old "not a catch-all == canonical" rule dumped
+    # exactly these into the operating section.
+    claims = [
+        _claim(
+            attribute="operating_metric",
+            attribute_raw="Forbes List Year Used",
+            normalized=2022,
+            value_type="count",
+        ),
+        _claim(
+            attribute="operating_metric",
+            attribute_raw="Fiscal Period Covered",
+            normalized=2024,
+            value_type="count",
+        ),
+    ]
+
+    view = build_financials_view(claims, filenames={}, company="AcmeCo")
+
+    assert view.operating == []
     assert view.income_statement == []
     assert view.balance_sheet == []
+    assert view.cash_flow == []
+    assert view.profitability == []
 
 
 def test_latest_period_wins_one_row_per_metric():
