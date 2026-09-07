@@ -75,6 +75,18 @@ async def test_agrees_when_edgar_matches_within_tolerance():
     assert v.result["edgar_value"] == 1000.0
 
 
+async def test_resolves_a_bare_name_without_the_legal_suffix():
+    # A deck often names the company without its legal form ("Apple", not "Apple
+    # Inc."). strip_legal_suffix reduces both the claim entity and SEC's "Apple
+    # Inc." title to the same core, so the CIK resolves -- an exact-string title
+    # match missed exactly this (the reason a real "snowflake" deal produced 0
+    # EDGAR verdicts despite 182 eligible revenue/net_income claims).
+    src = SecEdgarSource(fetch=_fake_fetch(_facts("Revenues", 2023, 1000.0)))
+    v = await src.check(None, _claim(entity="Apple", normalized=1000.0))
+    assert isinstance(v, CorroborationVerdict)
+    assert v.result["cik"] == 320193
+
+
 async def test_disagrees_on_material_delta_and_records_both_values():
     src = SecEdgarSource(fetch=_fake_fetch(_facts("Revenues", 2023, 2000.0)))
     v = await src.check(None, _claim(normalized=1000.0))

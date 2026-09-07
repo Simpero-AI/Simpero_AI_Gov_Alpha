@@ -27,6 +27,7 @@ import httpx
 
 from app.models.claim import Claim
 from app.services.corroboration import CorroborationVerdict
+from app.services.subject_fold import strip_legal_suffix
 
 logger = logging.getLogger(__name__)
 
@@ -66,10 +67,6 @@ async def _default_fetch(url: str) -> Any:
         resp = await client.get(url)
         resp.raise_for_status()
         return resp.json()
-
-
-def _normalize(name: str) -> str:
-    return " ".join(name.casefold().split())
 
 
 def _claim_usd_value(claim: Claim) -> float | None:
@@ -178,9 +175,14 @@ class SecEdgarSource:
         )
 
     async def _resolve_cik(self, company_name: str) -> int | None:
-        """Exact normalized-title match against company_tickers.json. Returns a
+        """Suffix-insensitive title match against company_tickers.json. Both the
+        SEC title and the claim entity are reduced by strip_legal_suffix (the same
+        core-name helper the views use), so a deck's bare "Snowflake" resolves to
+        SEC's "Snowflake Inc." -- an exact-string match missed exactly this, the
+        common case where a deck names a company without its legal form. Returns a
         CIK only on an unambiguous single match -- deterministic, never a guess;
-        None when not found or ambiguous (both are no-signal, not a conflict)."""
+        None when not found or ambiguous (a suffix-strip collision between two
+        filers is marked ambiguous below and drops to no-signal, not a conflict)."""
         if self._tickers is None:
             try:
                 data = await self._fetch(_COMPANY_TICKERS_URL)
@@ -190,14 +192,14 @@ class SecEdgarSource:
             rows = data.values() if isinstance(data, dict) else (data or [])
             seen: dict[str, int | None] = {}
             for row in rows:
-                title = _normalize(str(row.get("title", "")))
+                title = strip_legal_suffix(str(row.get("title", "")))
                 cik = row.get("cik_str")
                 if not title or not isinstance(cik, int):
                     continue
                 # Mark a title ambiguous (None) the moment a second CIK claims it.
                 seen[title] = None if title in seen and seen[title] != cik else cik
             self._tickers = {t: c for t, c in seen.items() if c is not None}
-        return self._tickers.get(_normalize(company_name))
+        return self._tickers.get(strip_legal_suffix(company_name))
 
     async def check(self, db: Any, claim: Claim) -> CorroborationVerdict | None:
         concepts = _CONCEPTS.get(claim.attribute)

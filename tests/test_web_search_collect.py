@@ -36,8 +36,8 @@ _ASSERTION_ITEM = {
     "section": "competitive_position",
     "subject": "Rival Casinos Inc",
     "text": "Rival Casinos leads the western regional market.",
-    "source_url": "https://reuters.com/article/rival",
-    "source_title": "Reuters",
+    "source_url": "https://www.bloomberg.com/news/rival",
+    "source_title": "Bloomberg",
 }
 
 
@@ -81,7 +81,7 @@ def test_adjudicate_maps_sizing_and_assertions_to_claim_shape():
 
 def test_adjudicate_drops_off_allowlist_and_non_https_sources():
     bad_sizing = {**_SIZING_ITEM, "source_url": "https://randomblog.example/x"}
-    bad_assertion = {**_ASSERTION_ITEM, "source_url": "http://reuters.com/x"}  # not https
+    bad_assertion = {**_ASSERTION_ITEM, "source_url": "http://www.bloomberg.com/x"}  # not https
     cands = _adjudicate({"sizing": [bad_sizing], "assertions": [bad_assertion]}, _ALLOWED)
     assert cands == []
 
