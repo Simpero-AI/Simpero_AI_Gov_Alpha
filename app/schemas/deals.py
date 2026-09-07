@@ -359,6 +359,40 @@ class MarketViewResponse(CamelModel):
     competitive_position: list[MarketFactResponse]
 
 
+class FinancialFactResponse(CamelModel):
+    """One Financials-tab fact copied from the claims spine (build_financials_view):
+    a statement line's server-formatted value plus its rendered period. `label` is
+    the metric name (e.g. "Revenue", "EBITDA", "Total Assets"); `value` is
+    PRE-FORMATTED ("$497.2M", "42%") and the FE renders it verbatim; `period` is a
+    rendered string ("FY23", "FY23 Estimate", or ""); `status` is the trust status
+    (verified/partially_verified/cited) so the tab can badge it; `citation` is the
+    human "file · p.N" string, null when unlocatable; `sourceUrl` is the web
+    source URL for a kind='web' fact, null for a document claim."""
+
+    label: str
+    value: str
+    period: str = ""
+    citation: str | None = None
+    status: str
+    entity: str | None = None
+    source_url: str | None = None
+
+
+class FinancialsViewResponse(CamelModel):
+    """GET /deals/{id}/financials — the Financials tab's claims-driven content:
+    the deal's trusted headline metrics partitioned into five statement sections
+    (income statement, profitability, balance sheet, cash flow, operating). Each
+    list is empty when the deal has no backing claims (the tab then renders
+    "information not available"); never 404s for a claim-less deal. Claims-only
+    and LLM-free, the same curation the screening extracted panel runs, re-partitioned."""
+
+    income_statement: list[FinancialFactResponse]
+    profitability: list[FinancialFactResponse]
+    balance_sheet: list[FinancialFactResponse]
+    cash_flow: list[FinancialFactResponse]
+    operating: list[FinancialFactResponse]
+
+
 class CompanyViewResponse(CamelModel):
     """GET /deals/{id}/company — the Business Overview tab's claims-driven content:
     company-identity facts (sector/HQ from the deal profile, headcount/founded by
