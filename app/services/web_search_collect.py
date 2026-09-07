@@ -48,8 +48,16 @@ logger = logging.getLogger(__name__)
 
 # Reputable public sources the web_search tool may cite. Market-research houses,
 # authoritative registries/press -- deliberately excludes LinkedIn/Crunchbase
-# (out per the provider decision) and anything user-generated. Tunable; passed to
-# the web_search tool's allowed_domains AND re-checked in the adjudicator.
+# (out per the provider decision) and anything user-generated.
+#
+# CRITICAL: every domain here must be crawlable by Anthropic's web_search user
+# agent. The tool rejects the WHOLE request with a 400 ("The following domains
+# are not accessible to our user agent: ...") if ANY allowed_domain is
+# inaccessible -- so one blocked domain silently zeroes out every search for
+# every deal. reuters.com / wsj.com / ft.com were removed for exactly that (they
+# block the crawler); verify a new domain is crawler-accessible before adding it.
+# Tunable; passed to the web_search tool's allowed_domains AND re-checked in the
+# adjudicator.
 DEFAULT_ALLOWED_DOMAINS: tuple[str, ...] = (
     "grandviewresearch.com",
     "mordorintelligence.com",
@@ -59,10 +67,7 @@ DEFAULT_ALLOWED_DOMAINS: tuple[str, ...] = (
     "gartner.com",
     "forrester.com",
     "mckinsey.com",
-    "reuters.com",
     "bloomberg.com",
-    "wsj.com",
-    "ft.com",
     "sec.gov",
     "businesswire.com",
     "prnewswire.com",
