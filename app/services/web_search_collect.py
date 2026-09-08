@@ -89,6 +89,7 @@ _SECTION_TO_ASSERTION_CLASS: dict[str, str] = {
     "competitive_position": "competitive_position",
     "company_overview": "operating_model",
     "company_risks": "risk_or_dependency",
+    "commercial_terms": "commercial_terms",
     "related_parties": "related_party",
     "plans": "plan_or_commitment",
 }
@@ -212,6 +213,7 @@ def _system_prompt() -> str:
         "- Competitive position: named competitors and how rivals are positioned.\n"
         "- Market definition: what the market is, its structure and growth drivers.\n"
         "- Company overview: what the company does and how it operates.\n"
+        "- Commercial terms: key customers, pricing, and contract/renewal terms.\n"
         "- Risks, related parties, and stated plans, when publicly reported.\n\n"
         "Hard rules:\n"
         "- Report ONLY facts that appear in a search result, each with the exact "
