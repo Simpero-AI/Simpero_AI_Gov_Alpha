@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     # selection/adjudication quality needs it. The pass is a no-op without
     # anthropic_api_key, so this is only consulted when a key is set.
     web_search_model: str = "claude-haiku-4-5-20251001"
+    # Model for the grounded field-synthesis pass (app/services/field_synthesis.py),
+    # which turns a deal's own retrieved chunks into structured, chunk-cited page
+    # summaries. Same fail-soft posture: a no-op without anthropic_api_key.
+    field_synthesis_model: str = "claude-haiku-4-5-20251001"
     embedding_model: str = "voyage-4-large"
     # Must match the chunks.embedding column dim (Vector(1024)); changing it
     # needs a matching migration. voyage-4 serves 2048/1024/512/256.
