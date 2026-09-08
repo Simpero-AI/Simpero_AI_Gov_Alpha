@@ -15,6 +15,12 @@ So a dimension we can't resolve is left as-is: we never null out an existing
 value and never manufacture a false "not met" out of uncertainty. Across several
 documents the strongest signal wins (a match beats an outside beats nothing),
 since sector/HQ are deal-wide but each document is classified on its own.
+
+When a dimension maps to nothing, we still keep the *stated* (grounded raw)
+sector/HQ in the display-only `sector_raw` / `hq_geography_raw` columns -- so the
+Company Facts box can surface a sector the deck states even when it fits no
+approved option (an "unknown" fit). Those columns are never read by a screening
+evaluator, so this can never manufacture a false "not met".
 """
 
 from collections.abc import Sequence
@@ -57,6 +63,19 @@ def _resolve(profiles: list[dict], fit_key: str, raw_key: str) -> str | None:
     return best[1] if best is not None else None
 
 
+def _grounded_raw(profiles: list[dict], raw_key: str) -> str | None:
+    """The sector/HQ as literally stated in the materials -- the parser's
+    grounded raw read, the first non-blank one in document order -- independent
+    of any mandate fit. Display-only (deal.sector_raw / deal.hq_geography_raw):
+    it lets the Company Facts box show a sector/HQ the deck states even when it
+    maps to no approved mandate option. Never fed to a screening evaluator."""
+    for profile in profiles:
+        raw = profile.get(raw_key)
+        if isinstance(raw, str) and raw.strip():
+            return raw
+    return None
+
+
 def deal_profile_updates(profiles: Sequence[dict | None]) -> dict[str, str]:
     """The `deal` columns to SET from the documents' deal_profile envelopes.
 
@@ -65,10 +84,19 @@ def deal_profile_updates(profiles: Sequence[dict | None]) -> dict[str, str]:
     (a document with no deal_profile) -- those are ignored."""
     present = [p for p in profiles if isinstance(p, dict)]
     updates: dict[str, str] = {}
+    # Each dimension resolves to EITHER a mandate-mapped screening value OR, when
+    # that maps to nothing, the stated (grounded raw) value for display only. The
+    # display column mirrors the Company Facts coalesce (`sector or sector_raw`):
+    # a sector the deck states still shows even when it fits no approved option.
+    # The display column is never read by a screening evaluator.
     sector = _resolve(present, "sector_fit", "sector")
     if sector is not None:
         updates["sector"] = sector
+    elif (sector_raw := _grounded_raw(present, "sector")) is not None:
+        updates["sector_raw"] = sector_raw
     hq = _resolve(present, "hq_fit", "hq_geography")
     if hq is not None:
         updates["hq_geography"] = hq
+    elif (hq_raw := _grounded_raw(present, "hq_geography")) is not None:
+        updates["hq_geography_raw"] = hq_raw
     return updates

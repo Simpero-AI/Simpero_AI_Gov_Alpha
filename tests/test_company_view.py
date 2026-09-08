@@ -83,6 +83,47 @@ def test_facts_include_deal_profile_and_identity_claims():
     assert by_label["Founded"].value == "1998"
 
 
+def test_stated_sector_and_hq_fall_back_when_no_screening_value():
+    # The mandate-mapped columns are null (the deck's sector/HQ mapped to no
+    # approved option), but the parser grounded them -- so the stated values
+    # still surface, rather than the box reading "Company facts not available".
+    view = build_company_view(
+        [],
+        filenames={},
+        sector=None,
+        hq_geography=None,
+        sector_raw="Cloud data platform",
+        hq_geography_raw="Bozeman, MT",
+        company="AcmeCo",
+    )
+
+    by_label = {f.label: f for f in view.facts}
+    assert by_label["Sector"].value == "Cloud data platform"
+    assert by_label["Sector"].status == "derived"
+    assert by_label["Headquarters"].value == "Bozeman, MT"
+
+
+def test_mapped_sector_wins_over_the_stated_raw():
+    # When both exist, the mandate-mapped screening value is preferred over the
+    # stated raw (which is only a fallback for the unmapped case).
+    view = build_company_view(
+        [],
+        filenames={},
+        sector="Gaming & Leisure",
+        sector_raw="casino operations",
+        company="AcmeCo",
+    )
+
+    (fact,) = view.facts
+    assert fact.label == "Sector"
+    assert fact.value == "Gaming & Leisure"
+
+
+def test_no_sector_at_all_shows_no_sector_fact():
+    view = build_company_view([], filenames={}, sector=None, sector_raw=None)
+    assert view.facts == []
+
+
 def test_qualitative_assertions_group_by_class():
     claims = [
         _qual("Revenue is 70% recurring subscription.", "operating_model"),
