@@ -100,6 +100,25 @@ def test_adjudicate_drops_unknown_metric_section_and_bad_numbers():
     assert cands == []
 
 
+def test_adjudicate_maps_commercial_terms_to_its_assertion_class():
+    # commercial_terms is the one Company qualitative section web-collect must also
+    # fill, so an empty Commercial Terms box gets a web fallback. The section maps
+    # to the commercial_terms assertion_class (build_company_view routes it to the
+    # "commercial" section).
+    item = {
+        "section": "commercial_terms",
+        "subject": "AcmeCo",
+        "text": "AcmeCo's top ten customers are on three-year auto-renewing contracts.",
+        "source_url": "https://www.bloomberg.com/news/acme-contracts",
+        "source_title": "Bloomberg",
+    }
+    (cand,) = _adjudicate({"sizing": [], "assertions": [item]}, _ALLOWED)
+    assert cand.claim_kind == "qualitative"
+    assert cand.assertion_class == "commercial_terms"
+    assert cand.value["value_type"] == "text"
+    assert cand.entity == "AcmeCo"
+
+
 def test_adjudicate_cagr_is_percent_typed():
     cagr = {
         "metric": "cagr",

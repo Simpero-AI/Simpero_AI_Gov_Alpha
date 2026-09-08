@@ -270,9 +270,66 @@ def _qual_fact(
     )
 
 
-def _qual_sort(fact: MarketFact) -> tuple[int, str]:
-    # Most-corroborated first, then alphabetical by text for a stable order.
-    return (-_STATUS_RANK.get(fact.status, 0), fact.value.lower())
+# Leading (normalized) phrases that mark a qualitative assertion as an
+# accounting-policy / definitional / methodology footnote rather than a
+# substantive market or competitive fact ("Note: ...", "For purposes of this
+# analysis ...", "We define the market as ..."). Such boilerplate is demoted
+# below real assertions in _qual_sort so the strongest rows survive the cap --
+# mirroring the Company tab's curation of its qualitative sections.
+_POLICY_OPENERS: tuple[str, ...] = (
+    "note",
+    "fiscal year end",
+    "we attribute",
+    "we do not include",
+    "we treat",
+    "we define",
+    "we calculate",
+    "we exclude",
+    "for purposes of",
+    "as used",
+)
+
+_NOTE_PREFIX = re.compile(r"^\s*note\s*[:\-—]\s*", re.IGNORECASE)
+
+
+def _is_policy_boilerplate(text: str) -> bool:
+    """Whether an assertion reads as accounting-policy / definitional / methodology
+    boilerplate -- it opens (after casefolding and whitespace collapse) with one of
+    the tell-tale phrases, so it sinks below substantive assertions."""
+    return " ".join(text.split()).casefold().startswith(_POLICY_OPENERS)
+
+
+def _dedup_key(text: str) -> str:
+    """A stable key for near-identical assertions: drop a leading "Note:", casefold,
+    collapse whitespace, and strip a trailing ". " -- so a `Note:`-prefixed twin and
+    a trailing-period variant of the same sentence fold to one row."""
+    return " ".join(_NOTE_PREFIX.sub("", text).casefold().split()).rstrip(". ")
+
+
+def _qual_sort(fact: MarketFact) -> tuple[int, int, str]:
+    # Boilerplate last, then most-corroborated first, then alphabetical by text for
+    # a stable order.
+    return (
+        1 if _is_policy_boilerplate(fact.value) else 0,
+        -_STATUS_RANK.get(fact.status, 0),
+        fact.value.lower(),
+    )
+
+
+def _curate(facts: list[MarketFact]) -> list[MarketFact]:
+    """Curate a qualitative section: sort (boilerplate sinks, most-corroborated
+    first), drop near-identical duplicates keeping the first, and cap to
+    _QUAL_LIMIT. Mirrors the Company tab's curation so the Market tab's
+    market_definition / competitive_position lists read the same way."""
+    seen: set[str] = set()
+    curated: list[MarketFact] = []
+    for fact in sorted(facts, key=_qual_sort):
+        key = _dedup_key(fact.value)
+        if key in seen:
+            continue
+        seen.add(key)
+        curated.append(fact)
+    return curated[:_QUAL_LIMIT]
 
 
 def build_market_view(
@@ -368,10 +425,8 @@ def build_market_view(
             sizing_best.items(), key=lambda item: _SIZING_ORDER.get(item[0], 99)
         )
     ]
-    definition.sort(key=_qual_sort)
-    competition.sort(key=_qual_sort)
     return MarketView(
         sizing=sizing,
-        market_definition=definition[:_QUAL_LIMIT],
-        competitive_position=competition[:_QUAL_LIMIT],
+        market_definition=_curate(definition),
+        competitive_position=_curate(competition),
     )

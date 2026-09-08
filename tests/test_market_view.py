@@ -603,6 +603,72 @@ def test_competitor_name_variants_fold_to_one_row_header():
     assert len(view.competitive_position) == 3  # three distinct assertions, one competitor
 
 
+def test_near_identical_market_definition_assertions_dedup_to_one():
+    # Near-identical market_definition assertions -- including a `Note:`-prefixed
+    # twin and a trailing-whitespace variant -- fold to a single row (first kept),
+    # mirroring the Company tab's dedup of its qualitative sections.
+    claims = [
+        _qual(
+            "The market is highly fragmented with no national operator.",
+            "market_definition",
+            entity="the market",
+        ),
+        _qual(
+            "The market is highly fragmented with no national operator.   ",
+            "market_definition",
+            entity="the market",
+        ),
+        _qual(
+            "Note: The market is highly fragmented with no national operator",
+            "market_definition",
+            entity="the market",
+        ),
+    ]
+
+    view = build_market_view(claims, filenames={}, company="AcmeCo")
+
+    assert len(view.market_definition) == 1
+
+
+def test_policy_boilerplate_competitive_position_sorts_below_a_substantive_one():
+    # An accounting-policy / methodology footnote ("For purposes of this
+    # analysis ...") is demoted below a substantive competitive assertion, so the
+    # strongest rows survive the cap.
+    claims = [
+        _qual(
+            "For purposes of this analysis, market share excludes private operators.",
+            "competitive_position",
+            entity="the market",
+        ),
+        _qual(
+            "Rival Corp holds the leading share in three of its four regions.",
+            "competitive_position",
+            entity="Rival Corp",
+        ),
+    ]
+
+    view = build_market_view(claims, filenames={}, company="AcmeCo")
+
+    values = [f.value for f in view.competitive_position]
+    assert values == [
+        "Rival Corp holds the leading share in three of its four regions.",
+        "For purposes of this analysis, market share excludes private operators.",
+    ]
+
+
+def test_market_definition_list_is_capped_after_curation():
+    # A claim-dense CIM can surface dozens of distinct market_definition
+    # assertions; curation caps the list at _QUAL_LIMIT (12).
+    claims = [
+        _qual(f"Market structure fact {i:02d}.", "market_definition", entity="the market")
+        for i in range(20)
+    ]
+
+    view = build_market_view(claims, filenames={}, company="AcmeCo")
+
+    assert len(view.market_definition) == 12
+
+
 def test_web_claim_source_url_is_surfaced():
     # A web-sourced sizing claim carries its citation as a real URL on its
     # per-URL DataSource; it must reach the sizing fact's source_url. A document
