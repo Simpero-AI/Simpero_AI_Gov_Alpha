@@ -250,8 +250,71 @@ def _qual_fact(
     )
 
 
-def _qual_sort(fact: CompanyFact) -> tuple[int, str]:
-    return (-_STATUS_RANK.get(fact.status, 0), fact.value.lower())
+# The essential-snapshot size per qualitative section. Business Overview is a
+# curated snapshot, not a transcript of every operating_model assertion the parser
+# emitted; dedup + demotion below decide which survive the cap.
+_QUAL_LIMIT = 8
+
+# Accounting-policy / methodology / definitional footnotes the parser classifies
+# as operating_model but which are not business facts a reader wants in the
+# overview ("we attribute revenue to ... regions", "we treat each customer account
+# ... as a unique customer", "Fiscal year ends January 31"). Matched as a
+# normalized LEADING phrase, so a substantive statement that merely mentions
+# revenue (e.g. "Snowflake recognizes the majority of its revenue as customers
+# consume the platform") is NOT demoted. Demotion only REORDERS -- it never drops
+# a claim outright; the cap then trims the demoted tail. The durable fix for the
+# essential-vs-footnote split is finer parser classification; this is the
+# display-side curation until then.
+_POLICY_OPENERS: tuple[str, ...] = (
+    "note",
+    "fiscal year end",
+    "we attribute",
+    "we do not include",
+    "we treat",
+    "we define",
+    "we calculate",
+    "we exclude",
+    "for purposes of",
+    "as used",
+)
+
+_NOTE_PREFIX = re.compile(r"^\s*note\s*[:\-—]\s*", re.IGNORECASE)
+
+
+def _is_policy_boilerplate(text: str) -> bool:
+    t = " ".join(text.casefold().split())
+    return any(t.startswith(p) for p in _POLICY_OPENERS)
+
+
+def _dedup_key(text: str) -> str:
+    """Normalized identity for near-duplicate assertions, so the same fact
+    extracted from several pages (or with/without a leading 'Note:') collapses to
+    one row: drop a leading 'Note:', casefold, collapse whitespace, drop trailing
+    punctuation."""
+    return " ".join(_NOTE_PREFIX.sub("", text).casefold().split()).rstrip(". ")
+
+
+def _qual_sort(fact: CompanyFact) -> tuple[int, int, str]:
+    # Essential first: policy/footnote boilerplate sinks (so the cap trims it, not
+    # a real business fact), then the more-corroborated status, then stable alpha.
+    return (
+        1 if _is_policy_boilerplate(fact.value) else 0,
+        -_STATUS_RANK.get(fact.status, 0),
+        fact.value.lower(),
+    )
+
+
+def _curate(facts: list[CompanyFact]) -> list[CompanyFact]:
+    """Rank (essential first), dedup near-identical, cap to a snapshot size."""
+    out: list[CompanyFact] = []
+    seen: set[str] = set()
+    for fact in sorted(facts, key=_qual_sort):
+        key = _dedup_key(fact.value)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(fact)
+    return out[:_QUAL_LIMIT]
 
 
 def build_company_view(
@@ -325,8 +388,7 @@ def build_company_view(
             identity_best.items(), key=lambda item: _IDENTITY_ORDER.get(item[0], 99)
         )
     )
-    for section_facts in sections.values():
-        section_facts.sort(key=_qual_sort)
+    sections = {name: _curate(facts) for name, facts in sections.items()}
 
     return CompanyView(
         facts=facts,

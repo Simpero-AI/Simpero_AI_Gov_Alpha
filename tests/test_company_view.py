@@ -6,7 +6,7 @@ qualitative assertions grouped by assertion_class, only trust-earned."""
 import uuid
 
 from app.models.claim import Claim
-from app.services.company_view import build_company_view
+from app.services.company_view import _QUAL_LIMIT, build_company_view
 
 
 def _claim(
@@ -440,3 +440,45 @@ def test_web_claim_source_url_is_surfaced():
     )
 
     assert [f.source_url for f in view.overview] == ["https://example.com/idc"]
+
+
+def test_overview_dedups_near_identical_assertions():
+    # The same fact extracted from several pages (and with/without a leading
+    # "Note:") collapses to one row instead of repeating.
+    claims = [
+        _qual("Fiscal year ends January 31.", "operating_model"),
+        _qual("Note: Fiscal year ends January 31.", "operating_model"),
+        _qual(
+            "The platform is priced based on consumption of compute and storage.", "operating_model"
+        ),
+    ]
+
+    view = build_company_view(claims, filenames={})
+
+    values = [f.value.lower() for f in view.overview]
+    assert sum("fiscal year ends january 31" in v for v in values) == 1
+
+
+def test_overview_demotes_policy_boilerplate_below_substantive_facts():
+    # Accounting-policy / definitional footnotes sink below real business facts,
+    # so the cap trims the boilerplate rather than a substantive statement.
+    claims = [
+        _qual("We attribute revenue to the Americas, EMEA, and APJ regions.", "operating_model"),
+        _qual(
+            "The platform is priced based on consumption of compute and storage.", "operating_model"
+        ),
+    ]
+
+    view = build_company_view(claims, filenames={})
+
+    assert view.overview[0].value.startswith("The platform is priced")
+    assert view.overview[-1].value.startswith("We attribute revenue")
+
+
+def test_overview_is_capped_to_a_snapshot():
+    # Business Overview is a curated snapshot, not a transcript of every assertion.
+    claims = [_qual(f"Distinct business fact number {i}.", "operating_model") for i in range(20)]
+
+    view = build_company_view(claims, filenames={})
+
+    assert len(view.overview) == _QUAL_LIMIT

@@ -41,6 +41,50 @@ from app.services.subject_fold import _TRUSTED, fold_subjects, subject_of
 # real canonical metric; everything else is a genuine canonical attribute.
 _CATCHALL = frozenset({"operating_metric", "core_unmapped"})
 
+# The canonical financial vocabulary: contracts/claims.schema.json
+# $defs/canonicalAttribute, minus the two catch-alls above. `attribute` holds one
+# of these ONLY when E2 canonicalization ran; otherwise it is the document's own
+# raw label (per the contract). So "canonical" is membership in THIS set, NOT
+# merely "not a catch-all" -- a raw-label attribute the parser never mapped (e.g.
+# "Forbes List Year Used", "Fiscal Period Covered", "Customer Count Methodology")
+# is not a financial metric and must go through the recovery path (dollar headline
+# lines only), never be surfaced as a canonical figure. test_screening_materials
+# asserts this stays identical to the contract enum so the two cannot drift.
+_CANONICAL_ATTRIBUTES = frozenset(
+    {
+        "revenue",
+        "cogs",
+        "gross_profit",
+        "opex",
+        "ebitda",
+        "ebit",
+        "net_income",
+        "gross_margin",
+        "net_margin",
+        "ebitda_margin",
+        "depreciation_and_amortization",
+        "interest_expense",
+        "tax_expense",
+        "capex",
+        "total_assets",
+        "total_liabilities",
+        "total_equity",
+        "cash_and_equivalents",
+        "total_debt",
+        "net_debt",
+        "current_assets",
+        "current_liabilities",
+        "working_capital",
+        "accounts_receivable",
+        "accounts_payable",
+        "inventory",
+        "operating_cash_flow",
+        "free_cash_flow",
+        "customer_concentration",
+        "monthly_burn",
+    }
+)
+
 # _TRUSTED (the statuses shown on a decision surface) is single-sourced in
 # app/services/subject_fold and imported above; re-exported here because
 # market_view/company_view import it from this module.
@@ -193,7 +237,11 @@ class ScreeningMaterials:
 
 
 def _is_canonical(attribute: str | None) -> bool:
-    return bool(attribute) and attribute not in _CATCHALL
+    # Membership in the real canonical vocabulary -- NOT "not a catch-all", which
+    # wrongly admitted every un-canonicalized raw-label attribute as a financial
+    # metric (surfacing "Forbes List Year Used" etc. in the Financials/screening
+    # panels). A raw label falls through to the dollar-line recovery path instead.
+    return attribute in _CANONICAL_ATTRIBUTES
 
 
 def _fmt_num(n: float) -> str:
