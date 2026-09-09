@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
@@ -377,6 +378,19 @@ def _call_web_search(
     return {}
 
 
+def _blocked_domains(err: Exception) -> tuple[str, ...]:
+    """The allowed_domains named in a web_search "not accessible to our user agent"
+    400, parsed from the error text; empty when the error is any other shape (so
+    the caller re-raises it). The tool lists EVERY inaccessible domain in the one
+    error, so a single parse gets them all."""
+    msg = str(err)
+    marker = msg.lower().find("not accessible")
+    if marker == -1:
+        return ()
+    found = re.findall(r"[a-z0-9][a-z0-9.-]*\.[a-z]{2,}", msg[marker:], re.IGNORECASE)
+    return tuple(dict.fromkeys(d.lower() for d in found))
+
+
 async def gather_web_facts(
     *,
     company: str,
@@ -394,9 +408,31 @@ async def gather_web_facts(
     allowed = tuple(allowed_domains)
     call = _call or _call_web_search
     try:
-        raw = await asyncio.to_thread(
-            call, api_key=api_key, model=model, company=company, sector=sector, allowed=allowed
-        )
+        try:
+            raw = await asyncio.to_thread(
+                call, api_key=api_key, model=model, company=company, sector=sector, allowed=allowed
+            )
+        except Exception as err:
+            # The web_search tool 400s the ENTIRE request when it names any
+            # allowed_domain its crawler can't reach -- so one gated research/press
+            # domain (gartner/bloomberg/mckinsey are prone to it) would otherwise
+            # silently zero every deal's search. Recover by dropping exactly the
+            # named domains and retrying once with the rest; any other error
+            # re-raises to the fail-soft handler below.
+            blocked = _blocked_domains(err)
+            reduced = tuple(d for d in allowed if d not in blocked)
+            if not blocked or not reduced or len(reduced) == len(allowed):
+                raise
+            logger.warning(
+                "web-collect for %r: dropping %d crawler-inaccessible domain(s) %s and retrying",
+                company,
+                len(allowed) - len(reduced),
+                list(blocked),
+            )
+            allowed = reduced
+            raw = await asyncio.to_thread(
+                call, api_key=api_key, model=model, company=company, sector=sector, allowed=allowed
+            )
         if not isinstance(raw, dict):
             logger.info("web-collect for %r: model returned no structured facts", company)
             return []
