@@ -762,3 +762,24 @@ def test_footnote_is_dropped_from_market_definition():
     values = [f.value for f in view.market_definition]
     assert "(1) China includes Hong Kong and Taiwan." not in values
     assert "The market is fragmented across regional players." in values
+
+
+def test_a_colon_terminated_lead_in_is_dropped_from_market_definition():
+    # A truncated preamble to a table/list (ends in ":") is not a self-contained
+    # market fact -- e.g. the Snowflake deck's "...mapped to workloads as follows:".
+    claims = [
+        _qual(
+            "We have mapped certain Gartner market opportunities to workloads as follows:",
+            "market_definition",
+            entity="the market",
+        ),
+        _qual(
+            "The data-cloud market is consolidating around a few platforms.", "market_definition"
+        ),
+    ]
+
+    view = build_market_view(claims, filenames={})
+
+    values = [f.value for f in view.market_definition]
+    assert all(not v.endswith(":") for v in values)
+    assert "The data-cloud market is consolidating around a few platforms." in values

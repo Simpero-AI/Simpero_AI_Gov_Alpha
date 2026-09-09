@@ -313,14 +313,17 @@ def _dedup_key(text: str) -> str:
 
 
 # A parenthesized enumerator opener ("(1) ...", "( a ) ...") marks a table/label
-# footnote ("(1) China includes Hong Kong and Taiwan."), never a substantive
-# market/competition fact -- dropped from these sections entirely (not just
-# demoted like boilerplate).
+# footnote ("(1) China includes Hong Kong and Taiwan."). A colon-terminated line
+# ("...we have mapped Gartner opportunities to Snowflake workloads as follows:",
+# "the segments include:") is a truncated lead-in to a list/table, not a
+# self-contained market fact. Both are non-substantive and dropped from these
+# sections entirely (not just demoted like boilerplate).
 _FOOTNOTE_RE = re.compile(r"^\s*\(\s*(?:\d{1,2}|[a-zA-Z])\s*\)")
 
 
-def _is_footnote(text: str) -> bool:
-    return bool(_FOOTNOTE_RE.match(text))
+def _is_low_value_fragment(text: str) -> bool:
+    stripped = text.strip()
+    return bool(_FOOTNOTE_RE.match(stripped)) or stripped.endswith(":")
 
 
 def _qual_sort(fact: MarketFact) -> tuple[int, int, int, str]:
@@ -344,7 +347,7 @@ def _curate(facts: list[MarketFact]) -> list[MarketFact]:
     seen: set[str] = set()
     curated: list[MarketFact] = []
     for fact in sorted(facts, key=_qual_sort):
-        if _is_footnote(fact.value):
+        if _is_low_value_fragment(fact.value):
             continue
         key = _dedup_key(fact.value)
         if key in seen:
