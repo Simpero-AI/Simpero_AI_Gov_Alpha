@@ -325,12 +325,24 @@ def build_company_view(
     dashboard_structure: dict[str, Any] | None = None,
     sector: str | None = None,
     hq_geography: str | None = None,
+    sector_raw: str | None = None,
+    hq_geography_raw: str | None = None,
     company: str | None = None,
 ) -> CompanyView:
     """Curate the deal's claims (plus the deal-profile sector/HQ) into the
     Business Overview tab. Only trust-earned claims of the lead business subject
-    are shown; a section with none comes back empty."""
+    are shown; a section with none comes back empty.
+
+    sector/hq_geography are the mandate-mapped screening values; sector_raw/
+    hq_geography_raw are the stated (grounded raw) values the parser read from
+    the materials. We prefer the mapped value and fall back to the stated one,
+    so a sector the deck plainly states still shows even when it mapped to no
+    approved mandate option (leaving the screening column null)."""
     fold = fold_subjects(claims, dashboard_structure, company)
+
+    # Prefer the mandate-mapped value; fall back to the stated (grounded raw) one.
+    sector = sector or sector_raw
+    hq_geography = hq_geography or hq_geography_raw
 
     facts: list[CompanyFact] = []
     if sector:

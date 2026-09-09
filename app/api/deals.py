@@ -671,6 +671,8 @@ async def get_deal_company(
         dashboard_structure=deal.dashboard_structure,
         sector=deal.sector,
         hq_geography=deal.hq_geography,
+        sector_raw=deal.sector_raw,
+        hq_geography_raw=deal.hq_geography_raw,
         company=deal.name,
     )
 

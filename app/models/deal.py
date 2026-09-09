@@ -64,6 +64,17 @@ class Deal(Base):
     sector: Mapped[str | None] = mapped_column(Text, nullable=True)
     hq_geography: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # Display-only counterpart to sector/hq_geography above. The parser grounds a
+    # raw sector/HQ in the deal's materials; the Path-B reducer (deal_profile.py)
+    # only promotes it to the screening column above on a mandate "match"/"outside",
+    # so an "unknown" fit -- typically the org configured no mandate options to map
+    # against -- leaves sector/hq_geography NULL even when the deck states a sector.
+    # These hold that stated value so the Company Facts box (build_company_view)
+    # can fall back to it. NEVER read by a screening evaluator: displaying an
+    # unmapped sector must not manufacture a false gs_08/db_04 "not met".
+    sector_raw: Mapped[str | None] = mapped_column(Text, nullable=True)
+    hq_geography_raw: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     # Path B "search just in case": the parser's grounded verdict per qualitative
     # (llm) screening rule that has no deterministic evaluator -- shaped
     # {rule_id: {"verdict": "Y"|"N"|"unknown", "evidence": "<quote>"}}. Written at
