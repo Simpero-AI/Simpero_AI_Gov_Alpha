@@ -11,7 +11,6 @@ from collections.abc import Mapping
 from types import SimpleNamespace
 from typing import cast
 
-import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.retrieval import (
@@ -189,9 +188,50 @@ async def test_no_matches_returns_empty_without_hydrating() -> None:
     assert all("ANY(:ids)" not in sql for sql, _ in session.calls)
 
 
-def test_empty_embedding_is_rejected() -> None:
+async def test_document_ids_filter_both_legs_with_any() -> None:
+    # A whole DEAL's document set: one ANY(:document_ids) filter on both legs, one
+    # global fusion -- the shape a deal-scoped consumer (field synthesis) needs.
+    rows = {1: _row(1, document_id="D1")}
+    session = RecordingSession(dense_ids=[1], sparse_ids=[1], rows=rows)
+    await _run(session, query_text="q", query_embedding=[1.0], top_k=1, document_ids=["D1", "D2"])
+    leg_calls = [(sql, p) for sql, p in session.calls if "<=>" in sql or "@@" in sql]
+    assert leg_calls, "expected dense and sparse legs"
+    for sql, params in leg_calls:
+        assert "document_id = ANY(:document_ids)" in sql
+        assert params["document_ids"] == ["D1", "D2"]
+
+
+async def test_no_embedding_runs_sparse_only() -> None:
+    # Before embeddings are backfilled a caller omits the vector; the dense leg is
+    # skipped entirely (not passed a dummy vector, which _vector_literal rejects),
+    # and the sparse leg still returns results.
+    rows = {1: _row(1), 2: _row(2)}
+    session = RecordingSession(dense_ids=[99], sparse_ids=[1, 2], rows=rows)
+    hits = await _run(session, query_text="q", query_embedding=None, top_k=2)
+    assert [h.chunk_id for h in hits] == [1, 2]  # sparse order; dense never ran
+    assert all("<=>" not in sql for sql, _ in session.calls)
+
+
+async def test_dense_leg_skipped_when_its_weight_is_zero() -> None:
+    # Zeroing the dense weight drops the leg outright, so no vector query runs even
+    # if a vector was passed.
+    rows = {1: _row(1)}
+    session = RecordingSession(dense_ids=[1], sparse_ids=[1], rows=rows)
+    await _run(
+        session,
+        query_text="q",
+        query_embedding=[1.0],
+        top_k=1,
+        weights=RRFWeights(dense=0.0, sparse=1.0),
+    )
+    assert all("<=>" not in sql for sql, _ in session.calls)
+
+
+def test_empty_embedding_runs_sparse_only_rather_than_raising() -> None:
+    # An empty vector is treated the same as no vector: sparse-only, no raise.
     import asyncio
 
-    session = RecordingSession(dense_ids=[], sparse_ids=[], rows={})
-    with pytest.raises(ValueError, match="empty"):
-        asyncio.run(_run(session, query_text="q", query_embedding=[], top_k=1))
+    session = RecordingSession(dense_ids=[], sparse_ids=[1], rows={1: _row(1)})
+    hits = asyncio.run(_run(session, query_text="q", query_embedding=[], top_k=1))
+    assert [h.chunk_id for h in hits] == [1]
+    assert all("<=>" not in sql for sql, _ in session.calls)

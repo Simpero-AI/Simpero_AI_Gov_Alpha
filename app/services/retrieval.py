@@ -116,42 +116,64 @@ async def hybrid_search(
     session: AsyncSession,
     *,
     query_text: str,
-    query_embedding: Sequence[float],
+    query_embedding: Sequence[float] | None = None,
     top_k: int = 10,
     weights: RRFWeights = RRFWeights(),
     document_id: str | None = None,
+    document_ids: Sequence[str] | None = None,
     k: int = RRF_K,
     leg_k: int | None = None,
 ) -> list[ChunkHit]:
     """Run the dense and sparse legs, fuse by RRF, and return the top_k chunks.
 
     `session` MUST already be org-scoped (see the module docstring); this call adds
-    no tenant filter of its own beyond the optional `document_id`, because RLS is
+    no tenant filter of its own beyond the optional document scope, because RLS is
     the tenant boundary and duplicating it here would invite it to drift. Each leg
     fetches `leg_k` candidates (wider than top_k, so a chunk strong in one leg but
     absent from the other still has room to be fused up); the fusion then trims to
     top_k.
+
+    Document scope: pass `document_ids` to search one DEAL's whole document set in
+    a single fused ranking (`document_id = ANY(...)`) -- RLS scopes only to the
+    org, so without a document scope this searches every deal in the org. `ANY(...)`
+    keeps it one global RRF; a per-document loop would reset each leg's ranks and
+    lose cross-document score comparability. `document_id` (singular) still scopes
+    to one document for the existing single-document callers.
+
+    The dense leg runs only when there is a query vector AND its weight is non-zero;
+    otherwise it is skipped entirely (not passed a dummy vector), so a caller can
+    run sparse-only before embeddings are backfilled -- every chunk's embedding is
+    NULL until then, so the dense leg would match nothing anyway.
     """
     fetch_k = leg_k if leg_k is not None else max(top_k * 4, 20)
-    doc_filter = "AND document_id = :document_id" if document_id is not None else ""
-    params: dict[str, object] = {
-        "qvec": _vector_literal(query_embedding),
-        "q": query_text,
-        "leg_k": fetch_k,
-    }
-    if document_id is not None:
+    if document_ids is not None:
+        doc_filter = "AND document_id = ANY(:document_ids)"
+    elif document_id is not None:
+        doc_filter = "AND document_id = :document_id"
+    else:
+        doc_filter = ""
+    params: dict[str, object] = {"q": query_text, "leg_k": fetch_k}
+    if document_ids is not None:
+        params["document_ids"] = list(document_ids)
+    elif document_id is not None:
         params["document_id"] = document_id
 
     # Dense leg: nearest neighbours by cosine distance. `embedding IS NOT NULL`
-    # skips chunks not yet embedded (embedding is populated asynchronously).
-    dense_sql = text(
-        f"""
-        SELECT id FROM chunks
-        WHERE embedding IS NOT NULL {doc_filter}
-        ORDER BY embedding <=> (:qvec)::vector
-        LIMIT :leg_k
-        """
-    )
+    # skips chunks not yet embedded (embedding is populated asynchronously). Run
+    # only with a real query vector and a non-zero weight -- see the docstring.
+    dense_ids: list[int] = []
+    if weights.dense != 0.0 and query_embedding:
+        params["qvec"] = _vector_literal(query_embedding)
+        dense_sql = text(
+            f"""
+            SELECT id FROM chunks
+            WHERE embedding IS NOT NULL {doc_filter}
+            ORDER BY embedding <=> (:qvec)::vector
+            LIMIT :leg_k
+            """
+        )
+        dense_ids = [row[0] for row in (await session.execute(dense_sql, params)).all()]
+
     # Sparse leg: full-text match ranked by ts_rank_cd. websearch_to_tsquery is the
     # forgiving parser (it never raises on user punctuation), which matters because
     # an Ask Me query is typed by a human.
@@ -163,8 +185,6 @@ async def hybrid_search(
         LIMIT :leg_k
         """
     )
-
-    dense_ids = [row[0] for row in (await session.execute(dense_sql, params)).all()]
     sparse_ids = [row[0] for row in (await session.execute(sparse_sql, params)).all()]
 
     fused = reciprocal_rank_fusion(

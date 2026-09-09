@@ -60,10 +60,11 @@ async def org_scoped_search(
     *,
     org_id: str,
     query_text: str,
-    query_embedding: Sequence[float],
+    query_embedding: Sequence[float] | None = None,
     top_k: int = 10,
     weights: RRFWeights = RRFWeights(),
     document_id: str | None = None,
+    document_ids: Sequence[str] | None = None,
     k: int = RRF_K,
     leg_k: int | None = None,
 ) -> list[ChunkHit]:
@@ -74,6 +75,10 @@ async def org_scoped_search(
     MemoryScopeError) BEFORE any query runs if `session` is not scoped to `org_id`,
     so a feature handed a wrong- or un-scoped session can never return another
     org's chunks -- independent of whether RLS alone would have caught it.
+
+    Pass `document_ids` to scope a search to one deal's whole document set (RLS
+    scopes only to the org); `query_embedding` may be omitted for a sparse-only
+    search before embeddings are backfilled.
     """
     await assert_session_scoped_to(session, org_id)
     return await hybrid_search(
@@ -83,6 +88,7 @@ async def org_scoped_search(
         top_k=top_k,
         weights=weights,
         document_id=document_id,
+        document_ids=document_ids,
         k=k,
         leg_k=leg_k,
     )
