@@ -50,6 +50,7 @@ from app.schemas.deals import (
     EntityResolutionResponse,
     FinancialFactResponse,
     FinancialsViewResponse,
+    FinancialTrendMetricResponse,
     FormerNameResponse,
     IntakePipelineStatus,
     LatestMemoSessionResponse,
@@ -81,7 +82,7 @@ from app.services.corroboration_citation import corroboration_source_url
 from app.services.dashboard_stats import compute_month_bounds, compute_pipeline_value_delta
 from app.services.entity_resolution import get_resolver
 from app.services.entity_resolution.types import EntityResolutionError
-from app.services.financials_view import build_financials_view
+from app.services.financials_view import build_financials_trend, build_financials_view
 from app.services.intake_links import (
     compute_intake_link_effective_status,
     compute_pipeline_intake_status,
@@ -620,6 +621,11 @@ async def get_deal_financials(
         dashboard_structure=deal.dashboard_structure,
         company=deal.name,
     )
+    trend = build_financials_trend(
+        claims,
+        dashboard_structure=deal.dashboard_structure,
+        company=deal.name,
+    )
 
     return FinancialsViewResponse(
         income_statement=_to_responses(view.income_statement, FinancialFactResponse),
@@ -627,6 +633,7 @@ async def get_deal_financials(
         balance_sheet=_to_responses(view.balance_sheet, FinancialFactResponse),
         cash_flow=_to_responses(view.cash_flow, FinancialFactResponse),
         operating=_to_responses(view.operating, FinancialFactResponse),
+        trend=_to_responses(trend, FinancialTrendMetricResponse),
     )
 
 

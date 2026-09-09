@@ -8,7 +8,7 @@ theirs, and the latest-actual figure winning a single row per metric."""
 import uuid
 
 from app.models.claim import Claim
-from app.services.financials_view import build_financials_view
+from app.services.financials_view import build_financials_trend, build_financials_view
 
 
 def _claim(
@@ -271,3 +271,77 @@ def test_empty_deal_yields_five_empty_sections():
     assert view.balance_sheet == []
     assert view.cash_flow == []
     assert view.operating == []
+
+
+# --- 3-Year Financial Trend (build_financials_trend) --------------------------
+
+
+def test_trend_builds_a_multi_year_series_per_metric():
+    claims = [
+        _claim(attribute="revenue", normalized=400_000_000, period_year=2021, period_kind="A"),
+        _claim(attribute="revenue", normalized=450_000_000, period_year=2022, period_kind="A"),
+        _claim(attribute="revenue", normalized=497_200_000, period_year=2023, period_kind="A"),
+    ]
+
+    trend = build_financials_trend(claims, company="AcmeCo")
+
+    (rev,) = trend
+    assert rev.label == "Revenue"
+    assert [(p.year, p.value, p.period) for p in rev.points] == [
+        (2021, "$400.00M", "FY2021"),
+        (2022, "$450.00M", "FY2022"),
+        (2023, "$497.20M", "FY2023"),
+    ]
+
+
+def test_trend_excludes_a_metric_with_a_single_year():
+    # One period is a figure, not a trend -- it belongs in the statement sections,
+    # not the multi-year trend.
+    claims = [_claim(attribute="revenue", normalized=497_200_000, period_year=2023)]
+    assert build_financials_trend(claims, company="AcmeCo") == []
+
+
+def test_trend_keeps_only_the_most_recent_years():
+    claims = [
+        _claim(attribute="revenue", normalized=1_000_000 * y, period_year=y)
+        for y in range(2018, 2025)  # 7 years
+    ]
+    (rev,) = build_financials_trend(claims, company="AcmeCo")
+    years = [p.year for p in rev.points]
+    assert years == [2020, 2021, 2022, 2023, 2024]  # most-recent 5
+
+
+def test_trend_picks_the_best_claim_per_year():
+    # Two revenue claims for the same year -> the more-trusted one wins that point.
+    claims = [
+        _claim(attribute="revenue", normalized=400_000_000, period_year=2022, status="cited"),
+        _claim(attribute="revenue", normalized=450_000_000, period_year=2022, status="verified"),
+        _claim(attribute="revenue", normalized=497_200_000, period_year=2023, status="verified"),
+    ]
+    (rev,) = build_financials_trend(claims, company="AcmeCo")
+    by_year = {p.year: p.value for p in rev.points}
+    assert by_year[2022] == "$450.00M"  # verified beat cited for 2022
+
+
+def test_trend_drops_a_competitors_series():
+    # A named competitor's multi-year revenue must not surface as the deal's trend.
+    claims = [
+        _claim(attribute="revenue", normalized=100_000_000, entity="AcmeCo", period_year=2022),
+        _claim(attribute="revenue", normalized=120_000_000, entity="AcmeCo", period_year=2023),
+        _claim(attribute="revenue", normalized=900_000_000, entity="Rival Corp", period_year=2022),
+        _claim(attribute="revenue", normalized=950_000_000, entity="Rival Corp", period_year=2023),
+    ]
+    structure = {
+        "subjects": [
+            {"name": "AcmeCo", "entities": ["AcmeCo"]},
+            {"name": "Rival Corp", "entities": ["Rival Corp"]},
+        ]
+    }
+
+    (rev,) = build_financials_trend(claims, dashboard_structure=structure, company="AcmeCo")
+
+    assert [p.value for p in rev.points] == ["$100.00M", "$120.00M"]
+
+
+def test_trend_is_empty_for_a_claimless_deal():
+    assert build_financials_trend([], company="AcmeCo") == []
