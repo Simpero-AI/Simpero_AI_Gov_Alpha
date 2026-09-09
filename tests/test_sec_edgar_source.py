@@ -121,11 +121,24 @@ async def test_no_signal_for_a_non_usd_unit():
     assert await src.check(None, _claim(unit="CAD")) is None
 
 
-async def test_no_signal_for_a_missing_unit():
-    """A missing unit is unknown currency, not implicit USD -- a CAD figure with
-    no unit compared against EDGAR USD would be a false conflict."""
+async def test_a_resolved_us_filer_treats_a_missing_unit_as_usd():
+    """A US SEC registrant reports its 10-K in USD, so once the entity resolves to
+    a CIK an unlabeled figure is taken as USD -- otherwise the many currency-less
+    top-line figures in a deck corroborate to nothing. (An explicit foreign
+    currency is still declined -- see the CAD test above.)"""
     src = SecEdgarSource(fetch=_fake_fetch(_facts("Revenues", 2023, 1000.0)))
-    assert await src.check(None, _claim(unit=None)) is None
+    v = await src.check(None, _claim(unit=None, normalized=1000.0))
+    assert isinstance(v, CorroborationVerdict)
+    assert v.agrees is True
+    assert v.result["claim_value"] == 1000.0
+
+
+async def test_missing_unit_still_declines_for_a_non_filer():
+    """The unlabeled-is-USD relaxation is gated on resolving to a US CIK: a company
+    not in EDGAR's filer list declines regardless of unit, so a foreign private
+    company's currency-less figure is never taken as USD."""
+    src = SecEdgarSource(fetch=_fake_fetch(_facts("Revenues", 2023, 1000.0)))
+    assert await src.check(None, _claim(entity="Some Private Startup LLC", unit=None)) is None
 
 
 async def test_no_signal_when_the_claim_scale_was_assumed():

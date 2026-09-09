@@ -13,9 +13,9 @@ match against EDGAR's company_tickers.json, and the roll-up never sees a
 model-derived value. The fuzzy / name-history AI-propose seam (handover 5.1) and
 former-name resolution are a follow-up, not this first cut.
 
-NOT registered in app.services.corroboration.CORROBORATION_SOURCES yet: it goes
-live only once the corroboration pass's I/O placement is settled (SIM-253), so a
-network call never sits unresolved inside the verify transaction.
+Registered in corroboration_sources.DEFAULT_SOURCES and run by the corroboration
+job (start_deal_corroboration) in its own phase, outside the verify transaction,
+so a network call never sits unresolved inside a held transaction.
 """
 
 import logging
@@ -69,19 +69,35 @@ async def _default_fetch(url: str) -> Any:
         return resp.json()
 
 
-def _claim_usd_value(claim: Claim) -> float | None:
+_USD_UNITS = frozenset({"USD", "US$", "USD$", "$"})
+
+
+def _claim_usd_value(claim: Claim, *, us_filer: bool = False) -> float | None:
     """The claim's comparable USD figure, or None if it isn't one. EDGAR
     us-gaap facts are absolute USD, so anything whose currency or magnitude is
     not pinned down is no-signal -- never a forced comparison that would
-    manufacture a delta out of a unit or scale we could not establish."""
+    manufacture a delta out of a unit or scale we could not establish.
+
+    `us_filer` is passed only after the entity has resolved to a CIK in EDGAR's
+    filer list -- i.e. it IS a US SEC registrant, which reports its 10-K in USD.
+    There an *unlabeled* (or "$") figure is taken as USD -- a deck's top-line
+    numbers are rarely tagged with a currency code -- while an *explicit* foreign
+    currency is still declined: we relax the unknown-currency case, never a
+    known-foreign one. Unresolved callers keep the strict rule (explicit USD only)."""
     value = claim.value or {}
     normalized = value.get("normalized")
     if not isinstance(normalized, (int, float)) or isinstance(normalized, bool):
         return None
-    # Currency must be explicitly USD. A missing unit is unknown currency, not an
-    # implicit USD -- in a Canadian-market product a CAD figure compared against
-    # EDGAR's USD would be a false conflict.
-    if value.get("unit") != "USD":
+    unit = value.get("unit")
+    if us_filer:
+        # A resolved US registrant reports in USD, so an unlabeled or "$" figure is
+        # USD here; only an explicitly labelled non-USD currency is a real mismatch.
+        if unit is not None and unit not in _USD_UNITS:
+            return None
+    elif unit != "USD":
+        # Unresolved: currency must be explicitly USD. A missing unit is unknown
+        # currency, not implicit USD -- in a Canadian-market product a CAD figure
+        # compared against EDGAR's USD would be a false conflict.
         return None
     # `assumed_1x` means the scale was never detected, so `normalized` may be off
     # by 10^3/10^6 (a "$15,295" that was really in thousands). Against an absolute
@@ -205,13 +221,18 @@ class SecEdgarSource:
         concepts = _CONCEPTS.get(claim.attribute)
         if concepts is None or claim.period_year is None:
             return None  # not an attribute/period EDGAR can speak to
-        claim_value = _claim_usd_value(claim)
-        if claim_value is None:
-            return None  # nothing comparable (non-USD / non-numeric)
 
         cik = await self._resolve_cik(claim.entity)
         if cik is None:
             return None  # not an EDGAR filer, or ambiguous -> no-signal
+
+        # The entity resolved to a CIK, so it is a US SEC registrant reporting in
+        # USD: an unlabeled figure is taken as USD here (a foreign currency is
+        # still declined inside), which is what lets the many unlabeled USD
+        # top-line figures corroborate instead of being silently dropped.
+        claim_value = _claim_usd_value(claim, us_filer=True)
+        if claim_value is None:
+            return None  # nothing comparable (explicit non-USD / non-numeric / unknown scale)
 
         try:
             facts = await self._fetch(_COMPANY_FACTS_URL.format(cik=cik))
