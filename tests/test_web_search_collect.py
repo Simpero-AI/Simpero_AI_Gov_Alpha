@@ -166,6 +166,45 @@ async def test_gather_is_a_noop_without_an_api_key():
     assert cands == []
 
 
+async def test_gather_drops_crawler_blocked_domains_and_retries():
+    # The first call 400s naming an inaccessible allowed_domain; gather drops
+    # exactly that domain and retries with the rest instead of zeroing the pass.
+    calls: list[tuple[str, ...]] = []
+
+    def flaky_call(*, allowed, **_kwargs):
+        calls.append(allowed)
+        if "gartner.com" in allowed:
+            raise RuntimeError(
+                "Error code: 400 - The following domains are not accessible to our "
+                "user agent: ['gartner.com']"
+            )
+        return {"sizing": [_SIZING_ITEM], "assertions": [_ASSERTION_ITEM]}
+
+    cands = await gather_web_facts(
+        company="AcmeCo", sector="Gaming", api_key="k", model="m", _call=flaky_call
+    )
+    assert len(cands) == 2
+    assert len(calls) == 2  # retried once
+    assert "gartner.com" in calls[0] and "gartner.com" not in calls[1]
+
+
+async def test_gather_fails_soft_when_the_retry_also_fails():
+    # A domain-block whose retry still errors falls soft to [] (single retry, no loop).
+    calls: list[int] = []
+
+    def flaky_call(**_kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("domains are not accessible to our user agent: ['gartner.com']")
+        raise RuntimeError("still failing")
+
+    cands = await gather_web_facts(
+        company="AcmeCo", sector=None, api_key="k", model="m", _call=flaky_call
+    )
+    assert cands == []
+    assert len(calls) == 2
+
+
 # --- claim_ref idempotency key ------------------------------------------------
 
 
