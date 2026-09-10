@@ -264,6 +264,43 @@ def _clean_text(text: Any) -> str | None:
     return out
 
 
+_SCALE_BY_TOKEN: dict[str, float] = {
+    "trillion": 1e12,
+    "t": 1e12,
+    "billion": 1e9,
+    "bn": 1e9,
+    "b": 1e9,
+    "million": 1e6,
+    "mm": 1e6,
+    "m": 1e6,
+    "thousand": 1e3,
+    "k": 1e3,
+}
+_SIZING_SCALE_RE = re.compile(
+    r"(\d[\d,]*(?:\.\d+)?)\s*(trillion|billion|million|thousand|bn|mm|[tbmk])\b",
+    re.IGNORECASE,
+)
+
+
+def _sizing_normalized(value_raw: str, value_number: float) -> float:
+    """Market-size figure in ABSOLUTE dollars. Models frequently return
+    `value_number` as the MANTISSA of a scaled string ("$537.6B" -> 537.6),
+    dropping the scale, which then renders as "$537.6" with the billions gone. So
+    when `value_raw` carries a scale marker (billion/B, million/M, trillion/T,
+    thousand/K), trust it: normalized = mantissa * scale -- but only override when
+    `value_number` is clearly the un-scaled mantissa (>= ~100x smaller), so a model
+    that already returned the full number is left alone. No scale marker (e.g. a
+    CAGR "8.4%") -> value_number as given."""
+    match = _SIZING_SCALE_RE.search(value_raw)
+    if match is None:
+        return float(value_number)
+    mantissa = float(match.group(1).replace(",", ""))
+    scaled = mantissa * _SCALE_BY_TOKEN[match.group(2).lower()]
+    if value_number and scaled / abs(value_number) >= 100:
+        return scaled
+    return float(value_number)
+
+
 def _adjudicate(raw: dict[str, Any], allowed: frozenset[str]) -> list[WebFactCandidate]:
     """Pure: turn the model's report_web_facts input into claim-shaped
     candidates, dropping anything whose source URL is not an allowlisted https
@@ -302,7 +339,11 @@ def _adjudicate(raw: dict[str, Any], allowed: frozenset[str]) -> list[WebFactCan
                 entity=entity,
                 value={
                     "raw": raw_value,
-                    "normalized": float(number),
+                    "normalized": (
+                        _sizing_normalized(raw_value, number)
+                        if value_type == "currency"
+                        else float(number)
+                    ),
                     "unit": _clean_text(item.get("unit")) if value_type == "currency" else None,
                     "value_type": value_type,
                 },
