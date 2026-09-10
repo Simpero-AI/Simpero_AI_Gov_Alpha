@@ -702,3 +702,84 @@ def test_web_claim_source_url_is_surfaced():
     by_label = {f.label: f for f in view.sizing}
     assert by_label["Market Size"].source_url == "https://example.com/gartner"
     assert by_label["TAM"].source_url is None
+
+
+def test_web_claims_sort_above_deck_claims_in_market_definition():
+    # Market Definition is answered from external research, so a web-collected
+    # (cited) claim outranks the deck's own (even verified) self-description.
+    claims = [
+        _qual(
+            "The company operates in highly competitive markets.",
+            "market_definition",
+            entity="AcmeCo",
+            status="verified",
+            kind="pdf",
+        ),
+        _qual(
+            "The global data-platform market is ~$150B, growing 20% annually.",
+            "market_definition",
+            entity="the market",
+            status="cited",
+            kind="web",
+        ),
+    ]
+
+    view = build_market_view(claims, filenames={})
+
+    assert view.market_definition[0].is_web is True
+    assert view.market_definition[0].value.startswith("The global data-platform market")
+    assert view.market_definition[1].is_web is False
+
+
+def test_web_competitor_claim_sorts_above_a_deck_competitor_claim():
+    claims = [
+        _qual("We are the market leader.", "competitive_position", entity="AcmeCo", kind="pdf"),
+        _qual(
+            "Rival Corp holds ~30% share and competes on price.",
+            "competitive_position",
+            entity="Rival Corp",
+            status="cited",
+            kind="web",
+        ),
+    ]
+
+    view = build_market_view(claims, filenames={})
+
+    assert view.competitive_position[0].is_web is True
+    assert view.competitive_position[0].entity == "Rival Corp"
+
+
+def test_footnote_is_dropped_from_market_definition():
+    # A parenthesized-enumerator footnote is a table/label note, not a market
+    # fact -- dropped entirely (not merely demoted).
+    claims = [
+        _qual("(1) China includes Hong Kong and Taiwan.", "market_definition", entity="China"),
+        _qual("The market is fragmented across regional players.", "market_definition"),
+    ]
+
+    view = build_market_view(claims, filenames={})
+
+    values = [f.value for f in view.market_definition]
+    assert "(1) China includes Hong Kong and Taiwan." not in values
+    assert "The market is fragmented across regional players." in values
+
+
+def test_a_colon_terminated_lead_in_is_dropped_from_market_definition():
+    # A truncated preamble to a table/list (ends in ":") is not a self-contained
+    # market fact -- e.g. the Snowflake deck's "...mapped to workloads as follows:".
+    claims = [
+        _qual(
+            "We have mapped certain Gartner market opportunities to workloads as follows:",
+            "market_definition",
+            entity="the market",
+        ),
+        _qual(
+            "The data-cloud market is consolidating around a few platforms.", "market_definition"
+        ),
+    ]
+
+    view = build_market_view(claims, filenames={})
+
+    values = [f.value for f in view.market_definition]
+    assert all(not v.endswith(":") for v in values)
+    assert "The data-cloud market is consolidating around a few platforms." in values

@@ -208,13 +208,23 @@ def _system_prompt() -> str:
         "You are a private-equity diligence analyst. Using web search, find factual, "
         "citable information about the target company and its market, then report it via "
         "report_web_facts.\n\n"
+        "Spend dedicated searches on the market and the competitive landscape -- "
+        "they are the priority, and the target's own filings rarely cover them well.\n\n"
         "Collect:\n"
         "- Market sizing: TAM/SAM/SOM, overall market size, and market CAGR.\n"
-        "- Competitive position: named competitors and how rivals are positioned.\n"
-        "- Market definition: what the market is, its structure and growth drivers.\n"
+        "- Competitive position: identify the top 5-10 NAMED competitors in this "
+        "market; for each, report its market share (% or rank) and how it is "
+        "positioned or differentiated, whenever publicly reported. One assertion "
+        "per competitor per fact, each with its own source URL.\n"
+        "- Market definition: what the market is, its structure, its main segments "
+        "and buyer/customer types, and its growth drivers.\n"
         "- Company overview: what the company does and how it operates.\n"
         "- Commercial terms: key customers, pricing, and contract/renewal terms.\n"
         "- Risks, related parties, and stated plans, when publicly reported.\n\n"
+        "Suggested searches (adapt to the company and sector): "
+        "'<sector> market size and growth', '<sector> competitive landscape', "
+        "'<sector> market share leaders', '<company> competitors', "
+        "'<sector> market segmentation'.\n\n"
         "Hard rules:\n"
         "- Report ONLY facts that appear in a search result, each with the exact "
         "source URL it came from. Never estimate or invent a figure, name, or URL.\n"
@@ -406,14 +416,28 @@ async def gather_web_facts(
         # Observability: distinguishes "the model reported nothing" (web_search
         # found/cited nothing) from "reported N but the allowlist dropped them all"
         # (tune DEFAULT_ALLOWED_DOMAINS) from "N minted" -- the collect path is
-        # otherwise silent on success, so an empty result is undiagnosable.
-        logger.info(
-            "web-collect for %r: model reported %d sizing + %d assertions; %d passed the allowlist",
-            company,
-            len(raw.get("sizing") or []),
-            len(raw.get("assertions") or []),
-            len(candidates),
-        )
+        # otherwise silent on success, so an empty result is undiagnosable. A hard
+        # allowlist 400 (one crawler-blocked domain zeroes the whole search) raises
+        # and is caught below at WARNING; this catches the softer case where the
+        # model cited facts but every URL fell outside the allowlist.
+        n_sizing = len(raw.get("sizing") or [])
+        n_assertions = len(raw.get("assertions") or [])
+        if (n_sizing or n_assertions) and not candidates:
+            logger.warning(
+                "web-collect for %r: model reported %d facts but 0 passed the allowlist -- "
+                "review DEFAULT_ALLOWED_DOMAINS (a blocked domain can also 400 the whole search)",
+                company,
+                n_sizing + n_assertions,
+            )
+        else:
+            logger.info(
+                "web-collect for %r: model reported %d sizing + %d assertions; "
+                "%d passed the allowlist",
+                company,
+                n_sizing,
+                n_assertions,
+                len(candidates),
+            )
         return candidates
     except Exception:
         logger.warning(

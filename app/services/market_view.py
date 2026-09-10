@@ -86,6 +86,11 @@ class MarketFact:
     status: str
     entity: str | None
     source_url: str | None = None
+    # True for a web-collected (public-source) claim -- sorts these above the
+    # deck's self-description in Market Definition / Competitive Position, which
+    # are answered from external research, not the filing. Internal to the view
+    # (dropped from the wire response by _to_responses); the FE reads source_url.
+    is_web: bool = False
 
 
 @dataclass(frozen=True)
@@ -267,6 +272,7 @@ def _qual_fact(
         status=claim.status,
         entity=claim.entity,
         source_url=_source_url(claim, source_urls),
+        is_web=claim.kind == "web",
     )
 
 
@@ -306,10 +312,26 @@ def _dedup_key(text: str) -> str:
     return " ".join(_NOTE_PREFIX.sub("", text).casefold().split()).rstrip(". ")
 
 
-def _qual_sort(fact: MarketFact) -> tuple[int, int, str]:
-    # Boilerplate last, then most-corroborated first, then alphabetical by text for
-    # a stable order.
+# A parenthesized enumerator opener ("(1) ...", "( a ) ...") marks a table/label
+# footnote ("(1) China includes Hong Kong and Taiwan."). A colon-terminated line
+# ("...we have mapped Gartner opportunities to Snowflake workloads as follows:",
+# "the segments include:") is a truncated lead-in to a list/table, not a
+# self-contained market fact. Both are non-substantive and dropped from these
+# sections entirely (not just demoted like boilerplate).
+_FOOTNOTE_RE = re.compile(r"^\s*\(\s*(?:\d{1,2}|[a-zA-Z])\s*\)")
+
+
+def _is_low_value_fragment(text: str) -> bool:
+    stripped = text.strip()
+    return bool(_FOOTNOTE_RE.match(stripped)) or stripped.endswith(":")
+
+
+def _qual_sort(fact: MarketFact) -> tuple[int, int, int, str]:
+    # Web (public-source, cited) first -- Market Definition / Competitive Position
+    # are answered from external research, not the deck's self-description; then
+    # boilerplate last, most-corroborated first, alphabetical for a stable order.
     return (
+        0 if fact.is_web else 1,
         1 if _is_policy_boilerplate(fact.value) else 0,
         -_STATUS_RANK.get(fact.status, 0),
         fact.value.lower(),
@@ -317,13 +339,16 @@ def _qual_sort(fact: MarketFact) -> tuple[int, int, str]:
 
 
 def _curate(facts: list[MarketFact]) -> list[MarketFact]:
-    """Curate a qualitative section: sort (boilerplate sinks, most-corroborated
-    first), drop near-identical duplicates keeping the first, and cap to
-    _QUAL_LIMIT. Mirrors the Company tab's curation so the Market tab's
-    market_definition / competitive_position lists read the same way."""
+    """Curate a qualitative section: drop table/label footnotes, sort (web first,
+    boilerplate sinks, most-corroborated first), drop near-identical duplicates
+    keeping the first, and cap to _QUAL_LIMIT. Mirrors the Company tab's curation
+    so the Market tab's market_definition / competitive_position lists read the
+    same way -- with web-collected public-source facts surfaced above the deck."""
     seen: set[str] = set()
     curated: list[MarketFact] = []
     for fact in sorted(facts, key=_qual_sort):
+        if _is_low_value_fragment(fact.value):
+            continue
         key = _dedup_key(fact.value)
         if key in seen:
             continue
