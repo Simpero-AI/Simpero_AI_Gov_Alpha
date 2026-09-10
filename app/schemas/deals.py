@@ -378,19 +378,40 @@ class FinancialFactResponse(CamelModel):
     source_url: str | None = None
 
 
+class FinancialTrendPointResponse(CamelModel):
+    """One (period, value) point in a metric's multi-year series. `value` is
+    PRE-FORMATTED ("$497.2M", "42%"), `period` is the rendered label ("FY23",
+    "FY24E"), and `year` is the raw period year for x-axis ordering."""
+
+    period: str
+    value: str
+    year: int
+
+
+class FinancialTrendMetricResponse(CamelModel):
+    """One headline metric's multi-year trend (build_financials_trend): the metric
+    name plus its per-year points, ascending by year. Only metrics the deal reports
+    across >= 2 periods appear."""
+
+    label: str
+    points: list[FinancialTrendPointResponse]
+
+
 class FinancialsViewResponse(CamelModel):
     """GET /deals/{id}/financials — the Financials tab's claims-driven content:
     the deal's trusted headline metrics partitioned into five statement sections
-    (income statement, profitability, balance sheet, cash flow, operating). Each
-    list is empty when the deal has no backing claims (the tab then renders
-    "information not available"); never 404s for a claim-less deal. Claims-only
-    and LLM-free, the same curation the screening extracted panel runs, re-partitioned."""
+    (income statement, profitability, balance sheet, cash flow, operating), plus a
+    multi-year `trend` per headline P&L metric. Each list is empty when the deal
+    has no backing claims (the tab then renders "information not available"); never
+    404s for a claim-less deal. Claims-only and LLM-free, the same curation the
+    screening extracted panel runs, re-partitioned."""
 
     income_statement: list[FinancialFactResponse]
     profitability: list[FinancialFactResponse]
     balance_sheet: list[FinancialFactResponse]
     cash_flow: list[FinancialFactResponse]
     operating: list[FinancialFactResponse]
+    trend: list[FinancialTrendMetricResponse] = []
 
 
 class CompanyViewResponse(CamelModel):

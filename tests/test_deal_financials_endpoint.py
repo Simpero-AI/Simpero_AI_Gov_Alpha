@@ -97,6 +97,7 @@ def test_empty_lists_when_no_financial_claims(client, seeded_org, seeded_deal):
         "balanceSheet": [],
         "cashFlow": [],
         "operating": [],
+        "trend": [],
     }
 
 
@@ -117,6 +118,7 @@ def test_returns_income_statement_with_camelcase_wire_keys(
         "balanceSheet",
         "cashFlow",
         "operating",
+        "trend",
     }
     (fact,) = body["incomeStatement"]
     # Every fact field on the wire, sourceUrl INCLUDED (serialized even when null).

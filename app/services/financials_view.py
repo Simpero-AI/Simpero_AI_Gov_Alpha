@@ -66,6 +66,37 @@ class FinancialsView:
     operating: list[FinancialFact]
 
 
+@dataclass(frozen=True)
+class TrendPoint:
+    period: str  # "FY2023" (or "FY2024E") -- _fmt_period carries the actual/est marker
+    value: str  # formatted verbatim by _fmt_value, never re-derived
+    year: int  # the raw period_year, for x-axis ordering on the FE
+
+
+@dataclass(frozen=True)
+class FinancialTrendMetric:
+    label: str
+    points: list[TrendPoint]  # ascending by year; only metrics with >= 2 years appear
+
+
+# The headline lines a multi-year trend is worth drawing, in display order. The
+# same canonical metric keys build_financials_view uses; a metric appears only
+# when the deal actually reports it across two or more periods.
+_TREND_METRICS: tuple[str, ...] = (
+    "revenue",
+    "gross_profit",
+    "ebitda",
+    "ebit",
+    "net_income",
+    "gross_margin",
+    "ebitda_margin",
+    "net_margin",
+)
+_TREND_METRIC_SET = frozenset(_TREND_METRICS)
+_TREND_MIN_POINTS = 2  # a single period is a figure, not a trend
+_TREND_MAX_YEARS = 5  # most-recent N years, so an old outlier can't stretch the axis
+
+
 # Section names, in tab reading order -- the five FinancialsView lists.
 _SECTIONS: tuple[str, ...] = (
     "income_statement",
@@ -250,3 +281,65 @@ def build_financials_view(
         cash_flow=built["cash_flow"],
         operating=built["operating"],
     )
+
+
+def build_financials_trend(
+    claims: Sequence[Claim],
+    *,
+    dashboard_structure: dict[str, Any] | None = None,
+    company: str | None = None,
+) -> list[FinancialTrendMetric]:
+    """A multi-year series per headline P&L metric, from the SAME claims spine the
+    statement sections use -- so the "3-Year Financial Trend" is real, not the
+    unwritten memo_json it read before.
+
+    Reuses the shared eligibility gate (_headline_claims: trust-earned, lead-
+    subject-scoped, web included), but aggregates the BEST claim per (metric,
+    period_year) instead of best-per-metric, so each metric becomes a per-year
+    series. Values are copied verbatim (_fmt_value) and never re-derived. A metric
+    appears only with >= 2 distinct years; the most-recent _TREND_MAX_YEARS are
+    kept. An estimate/projection year is included and labelled by _fmt_period
+    (FY2024E), never silently mixed in as an actual."""
+    rows, _canonical_rank = _headline_claims(
+        claims,
+        dashboard_structure=dashboard_structure,
+        company=company,
+        include_web=True,
+    )
+    labels = _labels_by_key(rows)
+
+    # Best claim per (metric, year) -- same _prefer rule as the statement sections,
+    # applied within each year rather than across all of a metric's periods.
+    best_by_year: dict[tuple[str, int], Claim] = {}
+    for claim, metric_key, _label in rows:
+        if metric_key not in _TREND_METRIC_SET or claim.period_year is None:
+            continue
+        key = (metric_key, claim.period_year)
+        current = best_by_year.get(key)
+        if current is None or _prefer(claim, current):
+            best_by_year[key] = claim
+
+    series: dict[str, list[tuple[int, Claim]]] = {}
+    for (metric_key, year), claim in best_by_year.items():
+        series.setdefault(metric_key, []).append((year, claim))
+
+    trend: list[FinancialTrendMetric] = []
+    for metric_key in _TREND_METRICS:  # pinned display order
+        points = sorted(series.get(metric_key, []), key=lambda yc: yc[0])
+        if len(points) < _TREND_MIN_POINTS:
+            continue
+        points = points[-_TREND_MAX_YEARS:]
+        trend.append(
+            FinancialTrendMetric(
+                label=labels.get(metric_key, metric_key),
+                points=[
+                    TrendPoint(
+                        period=_fmt_period(claim.period_year, claim.period_kind),
+                        value=_fmt_value(claim.value),
+                        year=year,
+                    )
+                    for year, claim in points
+                ],
+            )
+        )
+    return trend
