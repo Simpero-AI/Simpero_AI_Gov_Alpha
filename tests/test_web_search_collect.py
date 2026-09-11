@@ -133,6 +133,56 @@ def test_adjudicate_cagr_is_percent_typed():
     assert cand.value["unit"] is None
 
 
+def test_sizing_mantissa_is_scaled_up_from_value_raw():
+    # The "$537.6" bug: the model returned the MANTISSA (537.6) but value_raw says
+    # billions -- normalized must be the full 537.6B, not 537.6.
+    item = {
+        **_SIZING_ITEM,
+        "metric": "market_size",
+        "value_raw": "$537.6B",
+        "value_number": 537.6,
+    }
+    (cand,) = _adjudicate({"sizing": [item], "assertions": []}, _ALLOWED)
+    assert cand.value["normalized"] == 537_600_000_000.0
+
+
+def test_sizing_full_number_is_not_double_scaled():
+    # The model already returned the full number; value_raw's scale must not
+    # re-multiply it into the quadrillions.
+    item = {
+        **_SIZING_ITEM,
+        "metric": "market_size",
+        "value_raw": "$537.6 billion",
+        "value_number": 537_600_000_000,
+    }
+    (cand,) = _adjudicate({"sizing": [item], "assertions": []}, _ALLOWED)
+    assert cand.value["normalized"] == 537_600_000_000.0
+
+
+def test_sizing_without_a_scale_marker_keeps_value_number():
+    item = {
+        **_SIZING_ITEM,
+        "metric": "market_size",
+        "value_raw": "$537,600,000,000",
+        "value_number": 537_600_000_000,
+    }
+    (cand,) = _adjudicate({"sizing": [item], "assertions": []}, _ALLOWED)
+    assert cand.value["normalized"] == 537_600_000_000.0
+
+
+def test_cagr_mantissa_is_not_dollar_scaled():
+    # A percent carries no dollar scale ("8.4%") -> value_number as-is, never scaled.
+    cagr = {
+        "metric": "cagr",
+        "market": "cloud market",
+        "value_raw": "8.4%",
+        "value_number": 8.4,
+        "source_url": "https://mordorintelligence.com/x",
+    }
+    (cand,) = _adjudicate({"sizing": [cagr], "assertions": []}, _ALLOWED)
+    assert cand.value["normalized"] == 8.4
+
+
 # --- gather (injected Anthropic call) -----------------------------------------
 
 
