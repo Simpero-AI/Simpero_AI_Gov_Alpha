@@ -294,6 +294,28 @@ def _dedup_key(text: str) -> str:
     return " ".join(_NOTE_PREFIX.sub("", text).casefold().split()).rstrip(". ")
 
 
+# Content the parser mis-files as operating_model (etc.) that is never a business
+# fact and is DROPPED outright, not merely demoted like the policy openers above:
+# an auditor's internal-control-over-financial-reporting attestation ("...
+# maintained effective internal control over financial reporting ... based on the
+# COSO criteria"), a "(1)"-style table/label footnote, or a truncated lead-in that
+# ends in a colon ("... as follows:"). Mirrors market_view's curation.
+_AUDIT_BOILERPLATE_RE = re.compile(
+    r"internal control over financial reporting"
+    r"|committee of sponsoring organizations"
+    r"|\bcoso\b",
+    re.IGNORECASE,
+)
+_FOOTNOTE_RE = re.compile(r"^\s*\(\s*(?:\d{1,2}|[a-zA-Z])\s*\)")
+
+
+def _is_non_substantive(text: str) -> bool:
+    stripped = text.strip()
+    if _FOOTNOTE_RE.match(stripped) or stripped.endswith(":"):
+        return True
+    return bool(_AUDIT_BOILERPLATE_RE.search(text))
+
+
 def _qual_sort(fact: CompanyFact) -> tuple[int, int, str]:
     # Essential first: policy/footnote boilerplate sinks (so the cap trims it, not
     # a real business fact), then the more-corroborated status, then stable alpha.
@@ -309,6 +331,8 @@ def _curate(facts: list[CompanyFact]) -> list[CompanyFact]:
     out: list[CompanyFact] = []
     seen: set[str] = set()
     for fact in sorted(facts, key=_qual_sort):
+        if _is_non_substantive(fact.value):
+            continue
         key = _dedup_key(fact.value)
         if key in seen:
             continue

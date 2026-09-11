@@ -172,6 +172,41 @@ def test_untrusted_and_unlabelled_claims_are_excluded():
     assert [f.value for f in view.overview] == ["Real ops note."]
 
 
+def test_internal_controls_attestation_is_dropped_from_overview():
+    # An auditor's ICFR / COSO attestation is mis-filed as operating_model but is
+    # not a business fact -- dropped, never shown in Business Overview.
+    claims = [
+        _qual(
+            "The Company maintained, in all material respects, effective internal control "
+            "over financial reporting as of September 27, 2025, based on the COSO criteria.",
+            "operating_model",
+            entity="Apple Inc.",
+        ),
+        _qual(
+            "The Company designs and sells consumer electronics and services.", "operating_model"
+        ),
+    ]
+
+    view = build_company_view(claims, filenames={})
+
+    values = [f.value for f in view.overview]
+    assert not any("internal control over financial reporting" in v for v in values)
+    assert "The Company designs and sells consumer electronics and services." in values
+
+
+def test_a_colon_terminated_lead_in_is_dropped_from_overview():
+    claims = [
+        _qual("The Company's operating segments are as follows:", "operating_model"),
+        _qual("The Company generates revenue from product and services sales.", "operating_model"),
+    ]
+
+    view = build_company_view(claims, filenames={})
+
+    values = [f.value for f in view.overview]
+    assert all(not v.endswith(":") for v in values)
+    assert "The Company generates revenue from product and services sales." in values
+
+
 def test_empty_deal_yields_empty_view():
     view = build_company_view([], filenames={})
     assert view.facts == []
