@@ -48,6 +48,7 @@ from app.models.claim import Claim
 from app.repo.AnalysisRunRepo import AnalysisRunRepo
 from app.repo.DealRepo import DealRepo
 from app.repo.HumanAuditRepo import HumanAuditRepo
+from app.repo.IntakeResponseRepo import IntakeResponseRepo
 from app.services.corroboration import (
     CORROBORATABLE_STATUSES,
     gather_corroboration,
@@ -55,6 +56,7 @@ from app.services.corroboration import (
 )
 from app.services.corroboration_sources import DEFAULT_SOURCES
 from app.services.entity_resolution.resolved import load_resolved_entity
+from app.services.intake_facts import build_intake_candidates, persist_intake_facts
 from app.services.status_rollup import roll_up_deal
 from app.services.web_search_collect import gather_web_facts, persist_web_facts
 from app.services.web_search_corroborate import corroborate_sizing_against_web
@@ -138,6 +140,12 @@ async def _run_corroboration(*, screening_run_id: UUID, clerk_org_id: str) -> bo
                         select(Claim)
                         .where(Claim.deal_id == deal_uuid)
                         .where(Claim.status.in_(sorted(CORROBORATABLE_STATUSES)))
+                        # Intake claims are first-party attestations, not corroboration
+                        # targets: no outside source checks them, and they must NOT feed
+                        # roll_up_deal (a strong-method `cited` claim would be promoted to
+                        # `verified`, overstating an unaudited self-report). Excluded here
+                        # on re-analysis, where prior-run intake claims already exist.
+                        .where(Claim.kind != "intake")
                     )
                 ).all()
             )
@@ -180,6 +188,7 @@ async def _run_corroboration(*, screening_run_id: UUID, clerk_org_id: str) -> bo
             await session.execute(text(f"SET LOCAL statement_timeout = '{_STATEMENT_TIMEOUT}'"))
             await _set_org(session, clerk_org_id)
             minted = 0
+            minted_intake = 0
             if results:
                 await persist_corroboration(session, results, {c.id: c for c in claims})
                 # flush so the appended events + conflicted statuses are visible
@@ -215,6 +224,38 @@ async def _run_corroboration(*, screening_run_id: UUID, clerk_org_id: str) -> bo
                         exc_info=True,
                     )
                     minted = 0
+
+            # Mint the deal's intake-questionnaire answers as `intake` claims -- a
+            # first-party fact source, LLM-free (so unaffected by the web-collect
+            # Anthropic limit) and surfaced by the Company/Market views like any
+            # cited claim. Its own SAVEPOINT for the same best-effort isolation as
+            # the web mint, and its results are NOT fed to roll_up_deal, so an intake
+            # self-report stays `cited` and never reads as `verified`.
+            intake_response = await IntakeResponseRepo(session).latest_for_deal(deal_uuid)
+            intake_candidates = (
+                build_intake_candidates(intake_response.answers, company=company)
+                if intake_response is not None and intake_response.answers
+                else []
+            )
+            if intake_response is not None and intake_candidates:
+                try:
+                    async with session.begin_nested():
+                        minted_intake = await persist_intake_facts(
+                            session,
+                            deal_id=deal_uuid,
+                            org_id=org_id,
+                            intake_link_id=intake_response.link_id,
+                            candidates=intake_candidates,
+                        )
+                        await session.flush()
+                except Exception:
+                    logger.warning(
+                        "intake claim persist failed for screening run %s; "
+                        "corroboration verdicts kept",
+                        screening_run_id,
+                        exc_info=True,
+                    )
+                    minted_intake = 0
             # web_candidates_collected (what gather_web_facts returned) vs
             # web_facts_collected (rows actually minted) separates "web search found
             # nothing" from "found some but the dedup/persist dropped them".
@@ -233,6 +274,8 @@ async def _run_corroboration(*, screening_run_id: UUID, clerk_org_id: str) -> bo
                         "events_recorded": len(results) + len(sizing_verdicts),
                         "web_candidates_collected": len(web_candidates),
                         "web_facts_collected": minted,
+                        "intake_candidates_collected": len(intake_candidates),
+                        "intake_facts_collected": minted_intake,
                     },
                 }
             )
