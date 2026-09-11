@@ -47,8 +47,11 @@ _VERIFICATION_METHODS = (
 # (app/services/web_search_collect.py), NOT a parser-emitted kind -- it is
 # deliberately absent from contracts/claims.schema.json, which governs the
 # parser->backend seam only. Its locator is the source URL on data_source; like
-# xlsx it carries no positional char span.
-_LOCATION_KINDS = ("pdf", "xlsx", "docx", "web")
+# xlsx it carries no positional char span. "intake" is the same idea for the
+# founder/analyst intake questionnaire (app/services/intake_facts.py): a
+# backend-minted, first-party attested fact whose locator is a synthetic intake
+# data_source (intake_link_id), also span-less.
+_LOCATION_KINDS = ("pdf", "xlsx", "docx", "web", "intake")
 # Which extraction contract produced a claim. Absent means quantitative, so
 # every row written before this column existed stays valid.
 _CLAIM_KINDS = ("quantitative", "qualitative")

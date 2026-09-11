@@ -500,6 +500,11 @@ async def _run_verification(
             select(Claim)
             .where(Claim.deal_id == deal_uuid)
             .where(Claim.status.in_(sorted(CORROBORATABLE_STATUSES)))
+            # Never roll up intake claims: they are first-party attestations minted
+            # `cited`/`direct_read`, and the strong-method rule would promote them to
+            # `verified` -- overstating an unaudited self-report. Excluded on
+            # re-analysis, where prior-run intake claims already exist at this SELECT.
+            .where(Claim.kind != "intake")
         )
         rollup_claims = list((await session.scalars(rollup_stmt)).all())
         # The external corroboration pass no longer runs here: its adapters do
