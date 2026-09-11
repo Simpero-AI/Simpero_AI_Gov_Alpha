@@ -207,6 +207,52 @@ def test_a_colon_terminated_lead_in_is_dropped_from_overview():
     assert "The Company generates revenue from product and services sales." in values
 
 
+def test_accounting_methodology_footnotes_are_dropped_from_overview():
+    # Revenue-recognition / geographic-attribution / customer-count methodology is
+    # mis-filed as operating_model but is not a business overview -- dropped so the
+    # box reads as a summary, not a dump of footnotes.
+    claims = [
+        _qual(
+            "We attribute revenue to the Americas, EMEA, and APJ regions based on the "
+            "location of the customer.",
+            "operating_model",
+        ),
+        _qual(
+            "We treat each customer account with a capacity contract as a unique customer.",
+            "operating_model",
+        ),
+        _qual(
+            "We do not include customers that consume our platform only under on-demand arrangements.",
+            "operating_model",
+        ),
+        _qual("Fiscal year ends January 31.", "operating_model"),
+        _qual("The company sells a cloud data platform to enterprises.", "operating_model"),
+    ]
+
+    view = build_company_view(claims, filenames={})
+
+    values = [f.value for f in view.overview]
+    assert values == ["The company sells a cloud data platform to enterprises."]
+
+
+def test_policy_opener_is_kept_outside_the_summary_sections():
+    # The drop is scoped to overview/risks. A "we treat ..." sentence can be a real
+    # related-party disclosure, so it must survive in that section (demote-not-drop).
+    claims = [
+        _qual(
+            "We treat Acme Holdings LLC as a related party of the founder.",
+            "related_party",
+            entity="Acme Holdings LLC",
+        ),
+    ]
+
+    view = build_company_view(claims, filenames={})
+
+    assert [f.value for f in view.related_parties] == [
+        "We treat Acme Holdings LLC as a related party of the founder."
+    ]
+
+
 def test_empty_deal_yields_empty_view():
     view = build_company_view([], filenames={})
     assert view.facts == []
@@ -518,26 +564,26 @@ def test_web_claim_source_url_is_surfaced():
     assert [f.source_url for f in view.overview] == ["https://example.com/idc"]
 
 
-def test_overview_dedups_near_identical_assertions():
+def test_dedups_near_identical_assertions():
     # The same fact extracted from several pages (and with/without a leading
-    # "Note:") collapses to one row instead of repeating.
+    # "Note:") collapses to one row instead of repeating. Tested on a section that
+    # keeps policy openers (commercial), since overview now drops them outright.
     claims = [
-        _qual("Fiscal year ends January 31.", "operating_model"),
-        _qual("Note: Fiscal year ends January 31.", "operating_model"),
-        _qual(
-            "The platform is priced based on consumption of compute and storage.", "operating_model"
-        ),
+        _qual("Three-year contracts with a 5% annual uplift.", "commercial_terms"),
+        _qual("Note: Three-year contracts with a 5% annual uplift.", "commercial_terms"),
+        _qual("Pricing is per-seat annual SaaS.", "commercial_terms"),
     ]
 
     view = build_company_view(claims, filenames={})
 
-    values = [f.value.lower() for f in view.overview]
-    assert sum("fiscal year ends january 31" in v for v in values) == 1
+    values = [f.value.lower() for f in view.commercial]
+    assert sum("three-year contracts" in v for v in values) == 1
 
 
-def test_overview_demotes_policy_boilerplate_below_substantive_facts():
-    # Accounting-policy / definitional footnotes sink below real business facts,
-    # so the cap trims the boilerplate rather than a substantive statement.
+def test_overview_drops_policy_boilerplate_outright():
+    # Accounting-policy / definitional footnotes are DROPPED from the summary
+    # sections (overview/risks), not merely demoted, so the box reads as a
+    # business summary rather than a footnote dump.
     claims = [
         _qual("We attribute revenue to the Americas, EMEA, and APJ regions.", "operating_model"),
         _qual(
@@ -547,8 +593,9 @@ def test_overview_demotes_policy_boilerplate_below_substantive_facts():
 
     view = build_company_view(claims, filenames={})
 
-    assert view.overview[0].value.startswith("The platform is priced")
-    assert view.overview[-1].value.startswith("We attribute revenue")
+    assert [f.value for f in view.overview] == [
+        "The platform is priced based on consumption of compute and storage."
+    ]
 
 
 def test_overview_is_capped_to_a_snapshot():

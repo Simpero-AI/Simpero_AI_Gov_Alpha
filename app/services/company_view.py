@@ -274,6 +274,14 @@ _POLICY_OPENERS: tuple[str, ...] = (
     "we define",
     "we calculate",
     "we exclude",
+    "we recognize",
+    "we recognise",
+    "we account for",
+    "we record",
+    "we measure",
+    "we report",
+    "revenue is recognized",
+    "revenue is recognised",
     "for purposes of",
     "as used",
 )
@@ -326,12 +334,26 @@ def _qual_sort(fact: CompanyFact) -> tuple[int, int, str]:
     )
 
 
-def _curate(facts: list[CompanyFact]) -> list[CompanyFact]:
-    """Rank (essential first), dedup near-identical, cap to a snapshot size."""
+def _curate(facts: list[CompanyFact], *, drop_policy: bool = False) -> list[CompanyFact]:
+    """Rank (essential first), dedup near-identical, cap to a snapshot size.
+
+    `drop_policy` DROPS accounting-policy/methodology/definitional footnotes
+    outright rather than merely demoting them -- used for the Business Overview
+    and Key Business Risks sections, whose whole job is a readable business
+    summary, so a "we attribute revenue to ... regions" or "Fiscal year ends
+    January 31" footnote is noise there, never content. Left False for the
+    commercial/related-party/plans sections, where a "we treat X as ..."
+    sentence can be a genuine disclosure, so those keep the demote-not-drop
+    posture."""
     out: list[CompanyFact] = []
     seen: set[str] = set()
     for fact in sorted(facts, key=_qual_sort):
+        # Footnotes / colon-labels / audit boilerplate are never content anywhere.
         if _is_non_substantive(fact.value):
+            continue
+        # Accounting-policy / methodology openers are noise specifically in the
+        # summary sections (overview / risks); other sections keep demote-not-drop.
+        if drop_policy and _is_policy_boilerplate(fact.value):
             continue
         key = _dedup_key(fact.value)
         if key in seen:
@@ -424,7 +446,10 @@ def build_company_view(
             identity_best.items(), key=lambda item: _IDENTITY_ORDER.get(item[0], 99)
         )
     )
-    sections = {name: _curate(facts) for name, facts in sections.items()}
+    sections = {
+        name: _curate(facts, drop_policy=name in {"overview", "risks"})
+        for name, facts in sections.items()
+    }
 
     return CompanyView(
         facts=facts,
