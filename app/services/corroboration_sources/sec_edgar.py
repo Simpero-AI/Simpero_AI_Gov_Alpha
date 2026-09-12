@@ -59,6 +59,22 @@ _CONCEPTS: dict[str, tuple[str, ...]] = {
 # material discrepancy worth surfacing. Tunable alongside the B2/B3 rules.
 _REL_TOLERANCE = 0.005  # 0.5%
 
+# Attributes that have legitimate same-(attribute, entity, period_year) SIBLINGS
+# the extraction does not disambiguate: an income-statement flow arrives as
+# attribute="revenue" whether it is the consolidated total, a product/services
+# line, a reportable segment, or a quarterly/interim figure -- all for the same
+# fiscal year. EDGAR only knows the CONSOLIDATED ANNUAL total (see _CONCEPTS), so
+# every sub-line or interim figure differs from it for an entirely benign reason.
+# For these attributes we therefore CONFIRM on a match but stay no-signal (never
+# `conflicted`) on a mismatch, so a product-revenue line is not flipped to
+# `conflicted` merely for not equalling total revenue. Balance-sheet totals
+# (assets/liabilities/equity/cash) are single consolidated values, so a real
+# mismatch there is still surfaced as a conflict. The durable fix is finer
+# extraction (tag total vs product vs services vs segment, and the period_kind),
+# after which these can compare like-for-like against their own concepts; this is
+# the display-safe gate until then.
+_CONFIRM_ONLY_ATTRIBUTES = frozenset({"revenue", "net_income"})
+
 Fetch = Callable[[str], Awaitable[Any]]
 
 
@@ -246,6 +262,26 @@ class SecEdgarSource:
         concept, edgar_value = found
 
         delta = abs(edgar_value - claim_value) / max(abs(edgar_value), 1.0)
+        agrees = delta <= _REL_TOLERANCE
+
+        # A mismatch on a sub-line-ambiguous flow (revenue / net_income) is almost
+        # always a benign like-vs-total comparison -- a product/services line, a
+        # segment, or a quarter measured against EDGAR's consolidated annual total.
+        # Emitting agrees=False there manufactures a false conflict and flips the
+        # claim to `conflicted`, so we decline (no-signal) instead of conflicting.
+        # A genuine match still confirms; balance-sheet totals still conflict.
+        if not agrees and claim.attribute in _CONFIRM_ONLY_ATTRIBUTES:
+            logger.info(
+                "EDGAR: %s claim %s != consolidated %s %s for FY%s -- sub-line/interim "
+                "ambiguity, no-signal (not a conflict)",
+                claim.attribute,
+                claim_value,
+                concept,
+                edgar_value,
+                claim.period_year,
+            )
+            return None
+
         result = {
             "source": self.name,
             "cik": cik,
@@ -256,4 +292,4 @@ class SecEdgarSource:
             "edgar_value": edgar_value,
             "discrepancy_delta": delta,
         }
-        return CorroborationVerdict(agrees=delta <= _REL_TOLERANCE, result=result)
+        return CorroborationVerdict(agrees=agrees, result=result)
