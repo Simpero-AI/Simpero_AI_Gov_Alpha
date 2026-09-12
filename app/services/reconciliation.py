@@ -38,7 +38,7 @@ useful in the meantime.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
 from sqlalchemy import select
@@ -80,6 +80,20 @@ def _canonical_from_to(claim_a: uuid.UUID, claim_b: uuid.UUID) -> tuple[uuid.UUI
     UNIQUE constraint dedupes A<->B regardless of which claim this pass
     visited first."""
     return (claim_a, claim_b) if claim_a < claim_b else (claim_b, claim_a)
+
+
+def _same_page_pair(a: Claim, b: Claim) -> bool:
+    """Two claims E1's within-page reducer already covers -- the same page.
+    reconcile_same_fact is scoped to one document, so a shared page already means
+    the same document."""
+    return a.page is not None and a.page == b.page
+
+
+def _same_document_pair(a: Claim, b: Claim) -> bool:
+    """Two claims reconcile_same_fact already covers -- the same document. The
+    cross-document pass (SIM-428) skips these so it stays purely additive to the
+    per-document pass, never re-deriving a within-document edge."""
+    return a.data_source_id is not None and a.data_source_id == b.data_source_id
 
 
 @dataclass
@@ -172,12 +186,92 @@ async def reconcile_same_fact(
     return summary
 
 
+async def reconcile_across_documents(
+    session: AsyncSession,
+    *,
+    deal_id: uuid.UUID,
+    run_id: str,
+) -> ReconciliationSummary:
+    """Deal-wide cross-DOCUMENT reconciliation -- the deck-vs-model-vs-data-room
+    internal-consistency pass (SIM-428).
+
+    reconcile_same_fact runs per document (within-document, cross-page); this is
+    its deal-wide sibling. It reconciles numeric claims that share an
+    entity/attribute/period ACROSS the deal's documents. The "different CIMs
+    sharing a fact by coincidence are not the same fact" caveat that keeps that
+    pass within a document does NOT apply here: these are ONE deal's documents,
+    deliberately about the same company, so a shared fact SHOULD agree -- and a
+    material disagreement between the deck's summary and the model's figure is
+    exactly the internal-consistency signal a diligence reader needs, and the
+    handover's stated alpha priority for pre-seed deals with no registry footprint.
+
+    Emits the same same_fact/contradicts edges as reconcile_same_fact, so the
+    status roll-up DEMOTES an internally-disagreeing claim to `inconclusive`.
+    Deliberately NOT `conflicted`: `conflicted` means an OUTSIDE source disagreed
+    (SIM-252), and both app/services/status_rollup.py and
+    app/services/corroboration.py reserve it for external corroboration, handing
+    internal document-vs-document conflict to the demote lane. This pass stays in
+    that lane -- it is not a CorroborationSource and records no corroboration
+    event.
+
+    Deterministic and DB-only: no network, so unlike the registry adapters it is
+    not gated by the corroboration pass's I/O placement (SIM-253/416) and can run
+    inline in the verify pipeline today.
+
+    Skips same-document pairs (reconcile_same_fact's job), so it is purely
+    additive. Includes page-less claims (XLSX/DOCX) -- an operating model is often
+    a spreadsheet, and no per-document pass reconciles those across documents.
+    `session` must already be RLS-scoped (SET LOCAL app.org_id) by the caller.
+
+    Idempotent: edges go through the same INSERT ... ON CONFLICT DO NOTHING against
+    SIM-369's UNIQUE(org_id, from, to, type) as reconcile_same_fact.
+    """
+    stmt = (
+        select(Claim)
+        .where(Claim.deal_id == deal_id)
+        .where(Claim.value["normalized"].isnot(None))
+        # Same catch-all exclusion as reconcile_same_fact: operating_metric and
+        # core_unmapped are not same-fact keys, so grouping on one collapses
+        # unrelated metrics and floods false contradicts. Reconciling those by
+        # attribute_raw is the same follow-up (SIM-381) it is there.
+        .where(Claim.attribute.notin_(("operating_metric", "core_unmapped")))
+    )
+    claims = list((await session.scalars(stmt)).all())
+
+    groups: dict[tuple[str, str, int | None, str | None], list[Claim]] = {}
+    for c in claims:
+        groups.setdefault((c.entity, c.attribute, c.period_year, c.period_kind), []).append(c)
+
+    summary = ReconciliationSummary()
+    edges: list[dict] = []
+    for group in groups.values():
+        if len(group) < 2:
+            continue
+        # A group confined to one document is reconcile_same_fact's already: only
+        # a group spanning two or more documents can yield a cross-document edge.
+        if len({c.data_source_id for c in group}) < 2:
+            continue
+        summary.groups_considered += 1
+        _reconcile_group(
+            group,
+            run_id=run_id,
+            summary=summary,
+            edges=edges,
+            already_paired=_same_document_pair,
+            scope_label="cross-document reconciliation",
+        )
+    await flush_edges(session, edges)
+    return summary
+
+
 def _reconcile_group(
     group: Sequence[Claim],
     *,
     run_id: str,
     summary: ReconciliationSummary,
     edges: list[dict],
+    already_paired: Callable[[Claim, Claim], bool] = _same_page_pair,
+    scope_label: str = "cross-page reconciliation",
 ) -> None:
     # Greedy value-clustering: each claim joins the first existing cluster
     # whose representative value matches it, else starts a new cluster.
@@ -219,9 +313,10 @@ def _reconcile_group(
     for other in canonical_cluster:
         if other.id == canonical_claim.id:
             continue
-        if other.page is not None and other.page == canonical_claim.page:
-            # Same page -- E1's within-page reducer already covers this
-            # pairing (SIM-341); re-deriving it here would double-count.
+        if already_paired(other, canonical_claim):
+            # A narrower pass already covers this pairing (E1's within-page
+            # reducer for the per-page pass; the per-document pass for the
+            # cross-document one) -- re-deriving it here would double-count.
             summary.skipped_same_page_pairs += 1
             continue
         stage_edge(
@@ -230,7 +325,7 @@ def _reconcile_group(
             from_claim_id=other.id,
             to_claim_id=canonical_claim.id,
             type_="same_fact",
-            basis=f"cross-page reconciliation: {other.attribute} matches the canonical claim",
+            basis=f"{scope_label}: {other.attribute} matches the canonical claim",
             created_by="reconciliation",
             run_id=run_id,
             metadata_={"rule": "value_match", "tolerance": _SAME_FACT_REL_TOL},
@@ -247,7 +342,7 @@ def _reconcile_group(
     # fact, which is what a consumer needs to see the disagreement at all.
     for other_cluster in clusters[1:]:
         rep = min(other_cluster, key=lambda c: c.id)
-        if rep.page is not None and rep.page == canonical_claim.page:
+        if already_paired(rep, canonical_claim):
             summary.skipped_same_page_pairs += 1
             continue
         from_id, to_id = _canonical_from_to(rep.id, canonical_claim.id)
@@ -258,7 +353,7 @@ def _reconcile_group(
             from_claim_id=from_id,
             to_claim_id=to_id,
             type_="contradicts",
-            basis=f"cross-page reconciliation: {rep.attribute} disagrees with the canonical claim",
+            basis=f"{scope_label}: {rep.attribute} disagrees with the canonical claim",
             created_by="reconciliation",
             run_id=run_id,
             metadata_={"value_delta": value_delta},
