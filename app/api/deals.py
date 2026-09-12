@@ -35,6 +35,9 @@ from app.schemas.common import SuccessResponse
 from app.schemas.deals import (
     AvgAiScoreStat,
     CompanyFactResponse,
+    CompanySynthesisResponse,
+    CompanySynthPointResponse,
+    CompanySynthSectionResponse,
     CompanyViewResponse,
     CorroborationEventResponse,
     CorroborationViewResponse,
@@ -82,6 +85,7 @@ from app.services.corroboration_citation import corroboration_source_url
 from app.services.dashboard_stats import compute_month_bounds, compute_pipeline_value_delta
 from app.services.entity_resolution import get_resolver
 from app.services.entity_resolution.types import EntityResolutionError
+from app.services.field_synthesis import SectionSynthesis, synthesize_company_sections
 from app.services.financials_view import build_financials_trend, build_financials_view
 from app.services.intake_links import (
     compute_intake_link_effective_status,
@@ -530,6 +534,66 @@ async def get_deal_screening_insights(
         claims, company=deal.name, dashboard_structure=deal.dashboard_structure
     )
     return ScreeningInsightsResponse(highlights=highlights, risk_flags=risk_flags)
+
+
+def _synthesis_to_response(
+    sections: list[SectionSynthesis], filenames: dict[str, str]
+) -> CompanySynthesisResponse:
+    """Map grounded synthesis sections to the wire shape, resolving each point's
+    (document_id, page) citations to human "file · p.N" strings (deduped, in
+    order, joined by '; '). A page-less citation renders as just the filename; a
+    point whose citations resolve to nothing gets a null citation."""
+    out_sections: list[CompanySynthSectionResponse] = []
+    for section in sections:
+        points: list[CompanySynthPointResponse] = []
+        for point in section.points:
+            seen: set[str] = set()
+            labels: list[str] = []
+            for cite in point.citations:
+                name = filenames.get(cite.document_id, cite.document_id)
+                label = f"{name} · p.{cite.page}" if cite.page is not None else name
+                if label not in seen:
+                    seen.add(label)
+                    labels.append(label)
+            points.append(
+                CompanySynthPointResponse(text=point.text, citation="; ".join(labels) or None)
+            )
+        out_sections.append(
+            CompanySynthSectionResponse(key=section.key, title=section.title, points=points)
+        )
+    return CompanySynthesisResponse(sections=out_sections)
+
+
+@router.get("/{deal_id}/company-synthesis", response_model=CompanySynthesisResponse)
+async def get_deal_company_synthesis(
+    deal_id: uuid.UUID,
+    claims: dict[str, Any] = Depends(get_claims),
+    db: AsyncSession = Depends(get_db),
+) -> CompanySynthesisResponse:
+    """Grounded AI summaries for the Company tab's narrative sections (Business
+    Overview, Risks, ...) -- field_synthesis over the deal's own document chunks,
+    each point verified against a real span and carrying its "file · p.N"
+    citation.
+
+    A separate, isolated endpoint like screening-insights on purpose: this call
+    can be slow or fail, so it is quarantined from the claims-driven Company view.
+    Fails soft to an empty `sections` list (no key / usage limit, no ingested
+    chunks, or any model/transport error/timeout), so the FE falls back to the
+    claims-driven section rendering. RLS-scoped by get_db; the org guard inside
+    synthesize_company_sections uses the same clerk org the session is scoped to;
+    never 404s for a chunk-less deal.
+    """
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    data_sources = await DataSourceRepo(db).list_for_deal(deal_id)
+    document_ids = [str(ds.id) for ds in data_sources]
+    filenames = {str(ds.id): ds.filename for ds in data_sources}
+    sections = await synthesize_company_sections(
+        db, org_id=claims["tenant_id"], document_ids=document_ids, company=deal.name
+    )
+    return _synthesis_to_response(sections, filenames)
 
 
 @router.get("/{deal_id}/market", response_model=MarketViewResponse)
