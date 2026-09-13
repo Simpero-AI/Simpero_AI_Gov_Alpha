@@ -352,9 +352,10 @@ async def test_run_corroboration_skips_non_corroboratable_claims(db_session, org
     assert await CorroborationEventRepo(db_session).list_for_claim(proposed.id) == []
 
 
-async def test_agree_then_rollup_reaches_partially_verified(db_session, org_pk, deal_pk):
-    """Acceptance: an external agree event moves a weak (reranker) claim to
-    `partially_verified` through the roll-up -- the foundation's end-to-end path."""
+async def test_agree_then_rollup_reaches_verified(db_session, org_pk, deal_pk):
+    """Acceptance: an external agree event moves a weak (reranker) claim all the
+    way to `verified` through the roll-up -- external corroboration is what earns
+    `verified` (product decision 2026-09-12), regardless of the internal method."""
     claim = Claim(**_claim_kwargs(org_pk, deal_pk, status="cited", verification_method="reranker"))
     db_session.add(claim)
     await db_session.flush()
@@ -364,7 +365,7 @@ async def test_agree_then_rollup_reaches_partially_verified(db_session, org_pk, 
     await db_session.flush()
     await roll_up_deal(db_session, [claim])
 
-    assert claim.status == "partially_verified"
+    assert claim.status == "verified"
 
 
 async def test_disagree_then_rollup_stays_conflicted(db_session, cited_claim):
