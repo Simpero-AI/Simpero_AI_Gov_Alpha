@@ -8,13 +8,15 @@ the retired "triangulation" concept:
 2. Internal verification strength — `verification_method`, demoted by
    internal cross-claim disagreement. exact_span, formula_reexecution,
    direct_read, and human_review are byte-exact or explicitly
-   human-confirmed, so they're treated as dispositive on their own
-   (matches the claims contract's own framing: "reading the bytes IS the
-   verification" for a direct XLSX read). reranker is a semantic/fuzzy
-   match — weaker on its own, and needs external agreement to earn full
-   trust. Either way, a claim the verification passes themselves flagged
-   as internally inconsistent never counts as strong — see
-   has_internal_disagreement below.
+   human-confirmed — strong evidence we captured what the document says
+   ("reading the bytes IS the verification" for a direct XLSX read).
+   reranker is a semantic/fuzzy match — weaker. But (product decision,
+   2026-09-12) strong internal verification alone now earns only
+   `partially_verified`, NOT `verified`: fidelity to the source document is
+   not the same as an outside party confirming the value. A claim the
+   verification passes flagged as internally inconsistent never counts as
+   strong — see has_internal_disagreement below.
+3'. External corroboration is now what earns `verified`. See resolve_status.
 3. External corroboration — derived from `corroboration_events` plus the
    claim's current status. SIM-252's `conflicted` transition is sticky (a
    later agreeing event never clears it — see app/services/corroboration.py
@@ -97,14 +99,38 @@ def resolve_status(
     has_disagreement: an external source has ever disagreed with this claim.
     has_agreement: at least one external check has run and none disagreed
     (only consulted when has_disagreement is False).
+
+    CORROBORATION-CENTRIC LADDER (product decision, 2026-09-12): `verified` means
+    an independent EXTERNAL source corroborates the value -- the strongest claim a
+    diligence tool can make. Strong internal verification alone (a byte-exact span,
+    a re-executed formula, a direct read) means we faithfully captured what the
+    document says, but no outside party confirmed it, so it earns
+    `partially_verified`, not `verified`. This supersedes the earlier rule where a
+    strong internal method reached `verified` with no external check at all
+    (see [[reglens-verified-claims-path]]).
+
+    Consequence to keep in mind: a target with no external corroborator (a private
+    company, absent from EDGAR and the registries) will show its financials as
+    `partially_verified`, never `verified` -- honest, since nothing external
+    confirms them, but the FE copy should read `partially_verified` as
+    "internally verified; not externally corroborated," not as a downgrade.
     """
     if has_disagreement:
         return "conflicted"
 
-    if verification_method in STRONG_VERIFICATION_METHODS and not internal_disagreement:
+    # An internal inconsistency (failed formula re-execution, a `contradicts` edge)
+    # is a red flag that keeps a claim out of `verified` even when an outside source
+    # agrees; external agreement can still lift it to `partially_verified`.
+    if internal_disagreement:
+        return "partially_verified" if has_agreement else "inconclusive"
+
+    if has_agreement:
         return "verified"
 
-    return "partially_verified" if has_agreement else "inconclusive"
+    if verification_method in STRONG_VERIFICATION_METHODS:
+        return "partially_verified"
+
+    return "inconclusive"
 
 
 async def has_internal_disagreement(db: AsyncSession, claim: Claim) -> bool:
