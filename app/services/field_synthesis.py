@@ -67,11 +67,29 @@ class SectionSpec:
     query: str
 
 
-# The five narrative sections of the Company tab. Identity facts (Sector / HQ /
-# Headcount / Founded) are deliberately NOT here -- they stay on the claims +
-# deal-profile path; this pass is for the prose sections where synthesis over the
-# full text adds the most over the atomic claim dump.
+# The narrative sections synthesized per deal. The first five feed the Company
+# tab; "executive_summary" is deal-level and feeds the Summary tab's Executive
+# Summary (the memo composer that used to write it is unbuilt). Identity facts
+# (Sector / HQ / Headcount / Founded) are deliberately NOT here -- they stay on
+# the claims + deal-profile path; this pass is for the prose sections where
+# synthesis over the full text adds the most over the atomic claim dump. All
+# sections are served by GET /deals/{id}/company-synthesis and cached under one
+# query key, so the Company and Summary tabs share a single synthesis pass; each
+# tab renders only the sections it needs by key.
 COMPANY_SECTIONS: tuple[SectionSpec, ...] = (
+    SectionSpec(
+        "executive_summary",
+        "Executive Summary",
+        (
+            "Summarize this company as a potential investment: what it does and how "
+            "it makes money, the market it serves, its commercial traction, and its "
+            "principal risks."
+        ),
+        (
+            "business model products services market size customers revenue growth "
+            "traction competitive position risks investment thesis"
+        ),
+    ),
     SectionSpec(
         "overview",
         "Business Overview",

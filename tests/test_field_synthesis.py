@@ -13,6 +13,7 @@ import uuid
 from app.services.field_synthesis import (
     _MAX_POINT_CHARS,
     _MAX_POINTS,
+    COMPANY_SECTIONS,
     _build_user_message,
     _verify_points,
 )
@@ -139,3 +140,13 @@ def test_build_user_message_labels_excerpts_with_ids_and_pages():
     assert "QUESTION: What does it do?" in msg
     assert "[c1] (p.7) Apple sells iPhones." in msg
     assert "[c2] (n/a) A table with no page." in msg
+
+
+def test_company_sections_include_executive_summary_with_unique_keys():
+    # The Summary tab's Executive Summary is served by the same synthesis pass
+    # (deal-level executive_summary section); every section key must be unique so
+    # a tab can select its section by key without collision.
+    keys = [s.key for s in COMPANY_SECTIONS]
+    assert "executive_summary" in keys
+    assert "overview" in keys and "risks" in keys and "commercial" in keys
+    assert len(keys) == len(set(keys))
