@@ -163,6 +163,19 @@ async def test_dense_and_sparse_legs_have_the_right_operators() -> None:
     assert "websearch_to_tsquery" in sparse_sql and "ts_rank_cd" in sparse_sql
 
 
+async def test_both_legs_carry_an_id_tiebreak_for_a_deterministic_limit_boundary() -> None:
+    # Short chunks routinely tie on ts_rank_cd (and can tie on cosine distance), so
+    # without a secondary `, id` sort Postgres returns an arbitrary subset of the
+    # tied rows at the LIMIT boundary -- two loads then retrieve different chunks and
+    # synthesis drifts. The `, id` makes the boundary reproducible.
+    session = RecordingSession(dense_ids=[1], sparse_ids=[1], rows={1: _row(1)})
+    await _run(session, query_text="margin", query_embedding=[0.5, 0.5], top_k=1)
+    dense_sql = next(sql for sql, _ in session.calls if "<=>" in sql)
+    sparse_sql = next(sql for sql, _ in session.calls if "@@" in sql)
+    assert "(:qvec)::vector, id" in dense_sql
+    assert "DESC, id" in sparse_sql
+
+
 async def test_document_id_filters_both_legs_when_given_and_not_otherwise() -> None:
     rows = {1: _row(1, document_id="D1")}
     scoped = RecordingSession(dense_ids=[1], sparse_ids=[1], rows=rows)

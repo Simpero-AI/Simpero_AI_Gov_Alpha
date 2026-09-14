@@ -525,6 +525,11 @@ async def get_deal_screening_insights(
                 select(Claim)
                 .where(Claim.deal_id == deal_id)
                 .where(Claim.status.in_(sorted(_TRUSTED_STATUSES)))
+                # Deterministic row order so the facts fed to the (request-time)
+                # insights LLM are assembled the same way on every load -- matches
+                # the four sibling analysis endpoints; without it the ordering is
+                # arbitrary DB order, an independent per-load variance source.
+                .order_by(Claim.id)
             )
         )
         .scalars()
