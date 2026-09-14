@@ -208,7 +208,9 @@ async def test_synthesize_classifies_each_empty_reason_and_logs_the_summary(monk
     q_of = {s.key: s.question for s in COMPANY_SECTIONS}
     plans_query = next(s.query for s in COMPANY_SECTIONS if s.key == "plans")
 
-    async def fake_search(_session, *, org_id, query_text, document_ids, weights, top_k, match_mode):
+    async def fake_search(
+        _session, *, org_id, query_text, document_ids, weights, top_k, match_mode
+    ):
         # "plans" retrieves nothing (-> no_hits); every other section gets one hit.
         return [] if query_text == plans_query else [_hit(page=1)]
 
