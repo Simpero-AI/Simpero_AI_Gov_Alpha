@@ -235,3 +235,21 @@ def test_empty_embedding_runs_sparse_only_rather_than_raising() -> None:
     hits = asyncio.run(_run(session, query_text="q", query_embedding=[], top_k=1))
     assert [h.chunk_id for h in hits] == [1]
     assert all("<=>" not in sql for sql, _ in session.calls)
+
+
+async def test_match_mode_or_transforms_the_sparse_query_to_or_terms() -> None:
+    # A keyword-bag query must OR its terms in "or" mode -- websearch_to_tsquery
+    # reads "or" as the OR operator -- so a chunk matching ANY term is a candidate.
+    session = RecordingSession(dense_ids=[], sparse_ids=[1], rows={1: _row(1)})
+    await _run(session, query_text="alpha beta gamma", top_k=1, match_mode="or")
+    sparse_params = next(p for sql, p in session.calls if "@@" in sql)
+    assert sparse_params["q"] == "alpha or beta or gamma"
+
+
+async def test_match_mode_defaults_to_and_leaving_the_query_verbatim() -> None:
+    # Default "and" mode is unchanged: the query text reaches websearch_to_tsquery
+    # verbatim (every term required) -- the precise mode for a human Ask-Me query.
+    session = RecordingSession(dense_ids=[], sparse_ids=[1], rows={1: _row(1)})
+    await _run(session, query_text="alpha beta gamma", top_k=1)
+    sparse_params = next(p for sql, p in session.calls if "@@" in sql)
+    assert sparse_params["q"] == "alpha beta gamma"
