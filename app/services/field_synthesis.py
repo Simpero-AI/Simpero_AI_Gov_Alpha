@@ -368,6 +368,12 @@ async def synthesize_company_sections(
                 document_ids=document_ids,
                 weights=_WEIGHTS,
                 top_k=_TOP_K,
+                # A section query is a keyword bag (e.g. "business overview products
+                # services ... segments"); ANDing every term matches no single chunk
+                # (verified: AND -> 0 hits, OR -> 48 on a real deal). Recall mode ORs
+                # them and lets ts_rank_cd rank -- essential while retrieval is
+                # sparse-only (dense embeddings not yet backfilled).
+                match_mode="or",
             )
             retrieved.append((spec, hits))
         except Exception:

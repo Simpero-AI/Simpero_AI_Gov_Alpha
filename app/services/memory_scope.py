@@ -67,6 +67,7 @@ async def org_scoped_search(
     document_ids: Sequence[str] | None = None,
     k: int = RRF_K,
     leg_k: int | None = None,
+    match_mode: str = "and",
 ) -> list[ChunkHit]:
     """`hybrid_search` behind an explicit per-caller org guard.
 
@@ -91,4 +92,5 @@ async def org_scoped_search(
         document_ids=document_ids,
         k=k,
         leg_k=leg_k,
+        match_mode=match_mode,
     )

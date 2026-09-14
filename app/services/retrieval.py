@@ -123,6 +123,7 @@ async def hybrid_search(
     document_ids: Sequence[str] | None = None,
     k: int = RRF_K,
     leg_k: int | None = None,
+    match_mode: str = "and",
 ) -> list[ChunkHit]:
     """Run the dense and sparse legs, fuse by RRF, and return the top_k chunks.
 
@@ -144,15 +145,27 @@ async def hybrid_search(
     otherwise it is skipped entirely (not passed a dummy vector), so a caller can
     run sparse-only before embeddings are backfilled -- every chunk's embedding is
     NULL until then, so the dense leg would match nothing anyway.
+
+    `match_mode` controls the sparse leg: "and" (default) requires EVERY query term
+    (precise -- right for a human Ask-Me question), while "or" requires ANY term and
+    lets ts_rank_cd rank by how well each chunk matches. Use "or" for keyword-bag
+    queries (e.g. field synthesis), where a long list of keywords ANDed against a
+    single chunk matches nothing and returns zero results even though the section is
+    plainly in the document. It matters most while the dense leg is dark (no
+    embeddings): sparse is then the only leg, so its recall is the whole recall.
     """
     fetch_k = leg_k if leg_k is not None else max(top_k * 4, 20)
+    # In "or" mode, turn "a b c" into "a or b or c" -- websearch_to_tsquery reads the
+    # word "or" as the OR operator, so this stays on the forgiving parser (never
+    # raises on punctuation) rather than hand-building a to_tsquery.
+    sparse_q = " or ".join(query_text.split()) if match_mode == "or" else query_text
     if document_ids is not None:
         doc_filter = "AND document_id = ANY(:document_ids)"
     elif document_id is not None:
         doc_filter = "AND document_id = :document_id"
     else:
         doc_filter = ""
-    params: dict[str, object] = {"q": query_text, "leg_k": fetch_k}
+    params: dict[str, object] = {"q": sparse_q, "leg_k": fetch_k}
     if document_ids is not None:
         params["document_ids"] = list(document_ids)
     elif document_id is not None:
