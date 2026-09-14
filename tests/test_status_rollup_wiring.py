@@ -173,13 +173,14 @@ async def _run_job(monkeypatch, envelope, seeded_org, parsing_run_id, run_id):
     )
 
 
-async def test_cleanly_cited_claims_come_out_verified(
+async def test_cleanly_cited_claims_come_out_partially_verified(
     owner_conn, seeded_org, seeded_deal, monkeypatch, mocked_screening_enqueue
 ):
-    """The acceptance criterion: a run used to end with zero `verified`
-    claims because nothing called the roll-up. `exact_span` is a strong
-    method, so a promoted claim with no internal disagreement and no external
-    check resolves all the way to `verified`."""
+    """A promoted `exact_span` claim with no internal disagreement resolves to
+    `partially_verified` at verification time: strong internal verification with
+    no external corroboration is `partially_verified`, not `verified` (product
+    decision 2026-09-12). It reaches `verified` only once the corroboration pass
+    finds an agreeing external source."""
     data_source_id = _seed_data_source(owner_conn, seeded_org["org_pk"], seeded_deal)
     parsing_run_id, run_id = _seed_runs(
         owner_conn, seeded_org["org_pk"], seeded_deal, _parse_jobs(data_source_id)
@@ -200,8 +201,8 @@ async def test_cleanly_cited_claims_come_out_verified(
 
     run = _run_payload(owner_conn, run_id)
     assert run["status"] == "successful"
-    assert _statuses(owner_conn, seeded_org["org_pk"]) == {"verified": 2}
-    assert "Status roll-up (deal-wide): 2 verified" in run["job_comments"][0]["comment"]
+    assert _statuses(owner_conn, seeded_org["org_pk"]) == {"partially_verified": 2}
+    assert "Status roll-up (deal-wide): 2 partially_verified" in run["job_comments"][0]["comment"]
 
 
 async def test_contradicted_claims_are_demoted_out_of_screening_trust(
@@ -212,7 +213,7 @@ async def test_contradicted_claims_are_demoted_out_of_screening_trust(
     entity/attribute/period on different pages is exactly what 3a contradicts,
     so both claims must land on `inconclusive` -- and `inconclusive` is not in
     claims_lookup's trusted set, so neither reaches a screening evaluator.
-    Running the roll-up before 3a would have left both `verified`."""
+    Running the roll-up before 3a would have left both `partially_verified`."""
     data_source_id = _seed_data_source(owner_conn, seeded_org["org_pk"], seeded_deal)
     parsing_run_id, run_id = _seed_runs(
         owner_conn, seeded_org["org_pk"], seeded_deal, _parse_jobs(data_source_id)
@@ -272,7 +273,7 @@ async def test_unpromotable_claims_do_not_fail_the_job(
 
     assert _run_payload(owner_conn, run_id)["status"] == "successful"
     assert _statuses(owner_conn, seeded_org["org_pk"]) == {
-        "verified": 1,
+        "partially_verified": 1,
         "proposed": 1,
         "missing": 1,
     }
@@ -306,7 +307,7 @@ async def test_rolled_up_statuses_are_recorded_on_the_audit_event(
             (seeded_org["org_pk"],),
         )
         payload = cur.fetchone()[0]
-    assert payload["status_rollup"] == {"verified": 1}
+    assert payload["status_rollup"] == {"partially_verified": 1}
 
 
 async def test_rolling_up_again_over_the_same_claims_is_idempotent(
@@ -339,7 +340,7 @@ async def test_rolling_up_again_over_the_same_claims_is_idempotent(
 
     await _run_job(monkeypatch, envelope, seeded_org, parsing_run_id, run_id)
     after_first = _statuses(owner_conn, seeded_org["org_pk"])
-    assert after_first == {"inconclusive": 2, "verified": 1}
+    assert after_first == {"inconclusive": 2, "partially_verified": 1}
 
     async with AsyncSessionLocal() as session, session.begin():
         await session.execute(
@@ -348,5 +349,5 @@ async def test_rolling_up_again_over_the_same_claims_is_idempotent(
         )
         second = await _roll_up_all(session)
 
-    assert second == {"inconclusive": 2, "verified": 1}
+    assert second == {"inconclusive": 2, "partially_verified": 1}
     assert _statuses(owner_conn, seeded_org["org_pk"]) == after_first

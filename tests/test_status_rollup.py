@@ -88,16 +88,20 @@ def deal_pk(owner_conn, org_pk) -> str:
 @pytest.mark.parametrize(
     "verification_method,internal_disagreement,has_disagreement,has_agreement,expected",
     [
-        # Strong internal check, nothing internally inconsistent.
+        # Strong internal check, nothing internally inconsistent. `verified`
+        # now requires EXTERNAL corroboration; strong-internal-alone is
+        # `partially_verified` (product decision 2026-09-12).
         ("exact_span", False, True, False, "conflicted"),
-        ("exact_span", False, False, True, "verified"),
-        ("exact_span", False, False, False, "verified"),
-        # Weak internal check (reranker).
+        ("exact_span", False, False, True, "verified"),  # external agreement -> verified
+        ("exact_span", False, False, False, "partially_verified"),  # internal-only
+        # Weak internal check (reranker). External agreement still earns verified;
+        # the value is corroborated regardless of how the span was matched.
         (WEAK_METHOD, False, True, False, "conflicted"),
-        (WEAK_METHOD, False, False, True, "partially_verified"),
+        (WEAK_METHOD, False, False, True, "verified"),
         (WEAK_METHOD, False, False, False, "inconclusive"),
-        # Strong method, but the claim is internally inconsistent -- demoted
-        # to exactly the weak rows above.
+        # Strong method, but the claim is internally inconsistent -- a red flag
+        # that keeps it out of `verified`; external agreement can only lift it to
+        # `partially_verified`.
         ("exact_span", True, True, False, "conflicted"),
         ("exact_span", True, False, True, "partially_verified"),
         ("exact_span", True, False, False, "inconclusive"),
@@ -168,13 +172,31 @@ def test_external_disagreement_beats_every_other_signal():
 
 
 @pytest.mark.parametrize("method", sorted(STRONG_VERIFICATION_METHODS))
-def test_all_strong_methods_resolve_verified_without_external_check(method):
+def test_strong_method_without_external_check_is_partially_verified(method):
+    # Strong internal verification with no external corroboration is
+    # `partially_verified`, not `verified` (product decision 2026-09-12): we
+    # captured the source faithfully, but nothing external confirmed the value.
     assert (
         resolve_status(
             verification_method=method,
             internal_disagreement=False,
             has_disagreement=False,
             has_agreement=False,
+        )
+        == "partially_verified"
+    )
+
+
+@pytest.mark.parametrize("method", sorted(STRONG_VERIFICATION_METHODS | {WEAK_METHOD}))
+def test_external_agreement_earns_verified(method):
+    # An agreeing external source is what earns `verified`, for a strong OR a
+    # weak internal method -- the value itself is corroborated.
+    assert (
+        resolve_status(
+            verification_method=method,
+            internal_disagreement=False,
+            has_disagreement=False,
+            has_agreement=True,
         )
         == "verified"
     )
@@ -214,8 +236,9 @@ def test_unknown_verification_method_is_treated_as_weak():
 
 @pytest.fixture
 async def cited_claim(db_session, org_pk, deal_pk) -> Claim:
-    """A weakly-verified claim -- the interesting case, since a strong one
-    reaches `verified` without any external signal at all."""
+    """A weakly-verified claim. Without an external event it is `inconclusive`;
+    a strong claim without one is `partially_verified` -- neither reaches
+    `verified`, which now requires external corroboration."""
     claim = Claim(**_claim_kwargs(org_pk, deal_pk, status="cited", verification_method=WEAK_METHOD))
     db_session.add(claim)
     await db_session.flush()
@@ -259,9 +282,9 @@ async def _add_contradicts_edge(db_session, org_pk, *, source: Claim, target: Cl
     await db_session.flush()
 
 
-async def test_rollup_strong_method_no_events_is_verified(db_session, strong_claim):
-    assert await roll_up_status(db_session, strong_claim) == "verified"
-    assert strong_claim.status == "verified"
+async def test_rollup_strong_method_no_events_is_partially_verified(db_session, strong_claim):
+    assert await roll_up_status(db_session, strong_claim) == "partially_verified"
+    assert strong_claim.status == "partially_verified"
 
 
 async def test_rollup_weak_method_no_events_is_inconclusive(db_session, cited_claim):
@@ -269,9 +292,7 @@ async def test_rollup_weak_method_no_events_is_inconclusive(db_session, cited_cl
     assert cited_claim.status == "inconclusive"
 
 
-async def test_rollup_weak_method_with_agreeing_event_is_partially_verified(
-    db_session, cited_claim
-):
+async def test_rollup_weak_method_with_agreeing_event_is_verified(db_session, cited_claim):
     await record_corroboration_result(
         db_session,
         claim=cited_claim,
@@ -281,7 +302,8 @@ async def test_rollup_weak_method_with_agreeing_event_is_partially_verified(
     )
     await db_session.flush()
 
-    assert await roll_up_status(db_session, cited_claim) == "partially_verified"
+    # External corroboration earns `verified`, even off a weak internal method.
+    assert await roll_up_status(db_session, cited_claim) == "verified"
 
 
 async def test_rollup_web_search_event_does_not_promote(db_session, cited_claim):
@@ -328,10 +350,10 @@ async def test_roll_up_deal_matches_per_claim_in_one_batch(
     db_session, org_pk, deal_pk, strong_claim, cited_claim
 ):
     """roll_up_deal resolves the same statuses as roll_up_status would, batched:
-    strong -> verified, weak -> inconclusive, a strong claim demoted by a
-    contradicts edge -> inconclusive, a weak claim with an agreeing external
-    event -> partially_verified. Guards the batch path against diverging from
-    the per-claim decision it reimplements inline."""
+    strong-internal-only -> partially_verified, weak -> inconclusive, a strong
+    claim demoted by a contradicts edge -> inconclusive, a weak claim with an
+    agreeing external event -> verified. Guards the batch path against diverging
+    from the per-claim decision it reimplements inline."""
     demoted = Claim(
         **_claim_kwargs(org_pk, deal_pk, status="cited", verification_method="exact_span")
     )
@@ -356,10 +378,10 @@ async def test_roll_up_deal_matches_per_claim_in_one_batch(
 
     await roll_up_deal(db_session, [strong_claim, cited_claim, demoted, corroborated])
 
-    assert strong_claim.status == "verified"
+    assert strong_claim.status == "partially_verified"
     assert cited_claim.status == "inconclusive"
     assert demoted.status == "inconclusive"
-    assert corroborated.status == "partially_verified"
+    assert corroborated.status == "verified"
 
 
 async def test_roll_up_deal_excludes_web_search_from_agreement(db_session, org_pk, deal_pk):
@@ -397,7 +419,7 @@ async def test_roll_up_deal_excludes_web_search_from_agreement(db_session, org_p
     await roll_up_deal(db_session, [web_only, registry])
 
     assert web_only.status == "inconclusive"  # web_search does not count as agreement
-    assert registry.status == "partially_verified"  # a real registry event still does
+    assert registry.status == "verified"  # a real registry event corroborates -> verified
 
 
 async def test_roll_up_deal_over_no_claims_is_a_noop(db_session):
@@ -407,14 +429,15 @@ async def test_roll_up_deal_over_no_claims_is_a_noop(db_session):
 async def test_rollup_is_stable_re_run_over_an_already_resolved_status(db_session, strong_claim):
     """Idempotency where the SECOND pass's INPUT status is already a resolved
     value, not `cited`. test_rollup_is_idempotent only re-runs from
-    `cited` -> `inconclusive`; here the first pass moves `cited` -> `verified`,
-    so the re-run exercises a resolved status as input. It must not raise
-    (every resolved status is in CORROBORATABLE_STATUSES) and must not drift."""
-    assert await roll_up_status(db_session, strong_claim) == "verified"
-    assert strong_claim.status == "verified"
+    `cited` -> `inconclusive`; here the first pass moves `cited` ->
+    `partially_verified` (strong internal, no external), so the re-run exercises a
+    resolved status as input. It must not raise (every resolved status is in
+    CORROBORATABLE_STATUSES) and must not drift."""
+    assert await roll_up_status(db_session, strong_claim) == "partially_verified"
+    assert strong_claim.status == "partially_verified"
 
-    assert await roll_up_status(db_session, strong_claim) == "verified"
-    assert strong_claim.status == "verified"
+    assert await roll_up_status(db_session, strong_claim) == "partially_verified"
+    assert strong_claim.status == "partially_verified"
 
 
 async def test_rollup_upgrades_as_new_agreeing_evidence_arrives(db_session, cited_claim):
@@ -431,7 +454,7 @@ async def test_rollup_upgrades_as_new_agreeing_evidence_arrives(db_session, cite
     )
     await db_session.flush()
 
-    assert await roll_up_status(db_session, cited_claim) == "partially_verified"
+    assert await roll_up_status(db_session, cited_claim) == "verified"
 
 
 async def test_rollup_stays_conflicted_after_a_later_agreeing_event(db_session, cited_claim):
@@ -547,7 +570,7 @@ async def test_non_contradicts_edges_do_not_demote(db_session, org_pk, deal_pk, 
     await db_session.flush()
 
     assert await has_internal_disagreement(db_session, strong_claim) is False
-    assert await roll_up_status(db_session, strong_claim) == "verified"
+    assert await roll_up_status(db_session, strong_claim) == "partially_verified"
 
 
 async def test_superseded_by_same_fact_flag_does_not_demote(db_session, strong_claim):
@@ -558,7 +581,7 @@ async def test_superseded_by_same_fact_flag_does_not_demote(db_session, strong_c
     await db_session.flush()
 
     assert await has_internal_disagreement(db_session, strong_claim) is False
-    assert await roll_up_status(db_session, strong_claim) == "verified"
+    assert await roll_up_status(db_session, strong_claim) == "partially_verified"
 
 
 async def test_unrelated_flags_do_not_demote(db_session, strong_claim):
@@ -566,7 +589,7 @@ async def test_unrelated_flags_do_not_demote(db_session, strong_claim):
     await db_session.flush()
 
     assert await has_internal_disagreement(db_session, strong_claim) is False
-    assert await roll_up_status(db_session, strong_claim) == "verified"
+    assert await roll_up_status(db_session, strong_claim) == "partially_verified"
 
 
 async def test_no_flags_is_not_a_disagreement(db_session, strong_claim):
@@ -591,7 +614,7 @@ async def test_another_claims_contradicts_edge_does_not_demote(
     await _add_contradicts_edge(db_session, org_pk, source=other, target=third)
 
     assert await has_internal_disagreement(db_session, strong_claim) is False
-    assert await roll_up_status(db_session, strong_claim) == "verified"
+    assert await roll_up_status(db_session, strong_claim) == "partially_verified"
 
 
 async def test_external_disagreement_still_wins_over_internal_demotion(db_session, strong_claim):
@@ -637,15 +660,16 @@ async def test_rollup_demotes_a_claim_out_of_screening_trust(db_session, cited_c
 
 
 async def test_rollup_keeps_a_strong_claim_inside_screening_trust(db_session, strong_claim):
-    """The other side of the same coin: `cited` -> `verified` is still
-    trusted, so a well-verified claim survives the roll-up."""
+    """The other side of the same coin: `cited` -> `partially_verified` is still
+    trusted, so a well-verified claim survives the roll-up (strong internal, no
+    external corroboration -> `partially_verified`, which is in _TRUSTED_STATUSES)."""
     await roll_up_status(db_session, strong_claim)
     await db_session.flush()
 
-    # Pin the `cited` -> `verified` transition this test's docstring names, not
-    # just screening membership: `cited` (a no-op roll-up) and
-    # `partially_verified` are both in _TRUSTED_STATUSES too, so a bare
-    # membership check would still pass under a strong -> verified regression.
-    assert strong_claim.status == "verified"
+    # Pin the exact `cited` -> `partially_verified` transition, not just screening
+    # membership: `cited` (a no-op roll-up) and `verified` are both in
+    # _TRUSTED_STATUSES too, so a bare membership check would still pass under a
+    # regression that produced the wrong trusted status.
+    assert strong_claim.status == "partially_verified"
     after = await claims_for_attribute(db_session, strong_claim.deal_id, "revenue")
     assert strong_claim.id in {c.id for c in after}
