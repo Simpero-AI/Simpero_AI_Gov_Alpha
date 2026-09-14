@@ -310,6 +310,38 @@ class ScreeningInsightsResponse(CamelModel):
     risk_flags: list[str]
 
 
+class CompanySynthPointResponse(CamelModel):
+    """One grounded, verification-gated synthesis point (field_synthesis): a short
+    sentence plus the human "file · p.N" citation(s) it was verified against.
+    `citation` is null only for a page-less chunk (a table/chart) that still
+    grounded the point."""
+
+    text: str
+    citation: str | None = None
+
+
+class CompanySynthSectionResponse(CamelModel):
+    """One synthesized narrative section of the Company tab (e.g. overview,
+    risks). `key` matches the build_company_view section names so the FE can slot
+    it into the same box; a section absent from the list produced no grounded
+    point (no chunks, no answer, or the LLM pass was unavailable)."""
+
+    key: str
+    title: str
+    points: list[CompanySynthPointResponse] = []
+
+
+class CompanySynthesisResponse(CamelModel):
+    """GET /deals/{id}/company-synthesis — grounded AI summaries for the Company
+    tab's narrative sections (Business Overview, Risks, ...), each point verified
+    against a real document span and carrying its citation. Comes back with an
+    empty `sections` list when the LLM pass is unavailable (no key / usage limit)
+    or the deal has no ingested chunks -- the FE then falls back to the
+    claims-driven section rendering."""
+
+    sections: list[CompanySynthSectionResponse] = []
+
+
 class MarketFactResponse(CamelModel):
     """One Market-tab fact copied from the claims spine (build_market_view): a
     market-size figure's formatted value, or a qualitative market/competition
