@@ -88,12 +88,40 @@ async def test_resolves_a_bare_name_without_the_legal_suffix():
 
 
 async def test_disagrees_on_material_delta_and_records_both_values():
-    src = SecEdgarSource(fetch=_fake_fetch(_facts("Revenues", 2023, 2000.0)))
-    v = await src.check(None, _claim(normalized=1000.0))
+    # A balance-sheet total (total_assets) is a single consolidated value with no
+    # sub-line siblings, so a material mismatch there is a real conflict, recorded.
+    src = SecEdgarSource(fetch=_fake_fetch(_facts("Assets", 2023, 2000.0)))
+    v = await src.check(None, _claim(attribute="total_assets", normalized=1000.0))
     assert v is not None and v.agrees is False
     assert v.result["claim_value"] == 1000.0
     assert v.result["edgar_value"] == 2000.0
     assert v.result["discrepancy_delta"] == pytest.approx(0.5)
+
+
+async def test_revenue_mismatch_is_no_signal_not_a_conflict():
+    # A revenue claim that does not equal EDGAR's consolidated annual total is
+    # almost always a benign sub-line (product/services), segment, or interim
+    # figure -- extraction tags all of them attribute="revenue". Declining
+    # (no-signal) instead of conflicting is what stops the false-conflict flood
+    # that flipped those claims to `conflicted`.
+    src = SecEdgarSource(fetch=_fake_fetch(_facts("Revenues", 2023, 2065659000.0)))
+    v = await src.check(None, _claim(attribute="revenue", normalized=1938783000.0))
+    assert v is None
+
+
+async def test_revenue_match_still_confirms():
+    src = SecEdgarSource(fetch=_fake_fetch(_facts("Revenues", 2023, 2065659000.0)))
+    v = await src.check(None, _claim(attribute="revenue", normalized=2065659000.0))
+    assert isinstance(v, CorroborationVerdict)
+    assert v.agrees is True
+
+
+async def test_net_income_mismatch_is_no_signal_not_a_conflict():
+    # Same sub-line/interim ambiguity applies to net_income (a segment or quarter
+    # measured against the consolidated annual figure).
+    src = SecEdgarSource(fetch=_fake_fetch(_facts("NetIncomeLoss", 2023, -796705000.0)))
+    v = await src.check(None, _claim(attribute="net_income", normalized=90412000.0))
+    assert v is None
 
 
 async def test_no_signal_when_company_is_not_an_edgar_filer():
