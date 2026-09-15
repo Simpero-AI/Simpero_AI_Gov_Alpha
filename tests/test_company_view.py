@@ -172,6 +172,29 @@ def test_untrusted_and_unlabelled_claims_are_excluded():
     assert [f.value for f in view.overview] == ["Real ops note."]
 
 
+def test_conflicted_and_inconclusive_claims_surface_with_their_status():
+    # The analysis pages surface conflicted + inconclusive claims WITH their true
+    # label (via _DISPLAY_STATUSES) instead of silently dropping them -- so an
+    # externally-conflicted or low-confidence fact shows as such rather than
+    # vanishing. A genuinely-untrusted status (proposed) still stays out.
+    claims = [
+        _qual("Revenue disputed by an external source.", "operating_model", status="conflicted"),
+        _qual("Ambiguous single-source claim.", "risk_or_dependency", status="inconclusive"),
+        _qual("Draft, not yet trusted.", "operating_model", status="proposed"),
+    ]
+
+    view = build_company_view(claims, filenames={})
+
+    assert ("Revenue disputed by an external source.", "conflicted") in {
+        (f.value, f.status) for f in view.overview
+    }
+    assert [(f.value, f.status) for f in view.risks] == [
+        ("Ambiguous single-source claim.", "inconclusive")
+    ]
+    # proposed is not a display status -> still excluded.
+    assert "Draft, not yet trusted." not in [f.value for f in view.overview]
+
+
 def test_internal_controls_attestation_is_dropped_from_overview():
     # An auditor's ICFR / COSO attestation is mis-filed as operating_model but is
     # not a business fact -- dropped, never shown in Business Overview.
