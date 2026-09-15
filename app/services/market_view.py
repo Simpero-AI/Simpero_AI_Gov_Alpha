@@ -26,12 +26,17 @@ from app.models.claim import Claim
 from app.services.entity_resolution.resolved import normalize_name
 from app.services.screening_materials import (
     _STATUS_RANK,
-    _TRUSTED,
     _citation,
     _fmt_value,
     _source_url,
 )
-from app.services.subject_fold import UNMATCHED, fold_subjects, strip_legal_suffix, subject_of
+from app.services.subject_fold import (
+    _DISPLAY_STATUSES,
+    UNMATCHED,
+    fold_subjects,
+    strip_legal_suffix,
+    subject_of,
+)
 
 # An UNMATCHED sizing entity is either a legitimate market descriptor ("the UK
 # student housing market") -- whose figure IS the deal's market and may fill an
@@ -375,7 +380,7 @@ def build_market_view(
     # reading as separate competitors.
     qual_display: dict[str, str] = {}
     for claim in claims:
-        if claim.claim_kind == "qualitative" and claim.entity and claim.status in _TRUSTED:
+        if claim.claim_kind == "qualitative" and claim.entity and claim.status in _DISPLAY_STATUSES:
             # Key on the suffix-stripped core (normalize_name keeps legal suffixes,
             # so "Acme Corp." / "ACME" / "Acme Corporation" would NOT fold under it);
             # fall back to normalize_name for a name that is all-suffix.
@@ -390,7 +395,10 @@ def build_market_view(
     competition: list[MarketFact] = []
 
     for claim in claims:
-        if claim.status not in _TRUSTED:
+        # _DISPLAY_STATUSES (not _TRUSTED): surface conflicted + inconclusive market
+        # facts with their true label rather than dropping them; parity with the
+        # endpoint query and company_view.
+        if claim.status not in _DISPLAY_STATUSES:
             continue
         if _fmt_value(claim.value) == "—":
             continue

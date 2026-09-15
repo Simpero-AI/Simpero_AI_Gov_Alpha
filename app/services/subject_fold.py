@@ -40,10 +40,22 @@ from app.services.entity_resolution.resolved import normalize_name
 # which had exactly that latent collision.)
 UNMATCHED = "\x00unmatched"
 
-# Trust-earned statuses -- the only ones a decision surface shows, and the only
-# ones that vote in the frequency fallback. Single-sourced here; screening_materials
+# Trust-earned statuses -- the only ones a DECISION surface shows (screening
+# materials/insights), the only ones that vote in the frequency fallback, and the
+# only ones subject election counts. Single-sourced here; screening_materials
 # re-exports it as _TRUSTED so the existing view imports keep working.
 _TRUSTED = frozenset({"verified", "partially_verified", "cited"})
+
+# Statuses shown on the DEAL-ANALYSIS surfaces (Company / Market / Financials).
+# A superset of _TRUSTED that ALSO surfaces `conflicted` and `inconclusive`, so a
+# fact's external-corroboration outcome (verified vs partially_verified vs
+# CONFLICTED) and its low-confidence state are visible with their TRUE label
+# instead of being silently dropped from the page. Deliberately SEPARATE from
+# _TRUSTED: _TRUSTED is a trust invariant that governs screening auto-decisions
+# and the subject-election frequency vote, where a conflicted/inconclusive claim
+# must NOT count. Display may show more than screening trusts -- so the analysis
+# reader uses this set, and every screening/election path keeps _TRUSTED.
+_DISPLAY_STATUSES = _TRUSTED | frozenset({"conflicted", "inconclusive"})
 
 # Trailing legal-form tokens dropped for company-name comparison only (promoted
 # from the trademark corroboration source so a third divergent copy can't

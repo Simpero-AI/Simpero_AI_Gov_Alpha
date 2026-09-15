@@ -98,6 +98,7 @@ from app.services.screening.rule_view import enrich_rule_results
 from app.services.screening.rulebook import load_rulebook
 from app.services.screening_insights import derive_screening_insights
 from app.services.screening_materials import build_screening_materials
+from app.services.subject_fold import _DISPLAY_STATUSES
 from app.services.subject_fold import _TRUSTED as _TRUSTED_STATUSES
 
 logger = logging.getLogger(__name__)
@@ -618,7 +619,7 @@ async def get_deal_market(
             await db.execute(
                 select(Claim)
                 .where(Claim.deal_id == deal_id)
-                .where(Claim.status.in_(sorted(_TRUSTED_STATUSES)))
+                .where(Claim.status.in_(sorted(_DISPLAY_STATUSES)))
                 .order_by(Claim.id)
             )
         )
@@ -667,7 +668,7 @@ async def get_deal_financials(
             await db.execute(
                 select(Claim)
                 .where(Claim.deal_id == deal_id)
-                .where(Claim.status.in_(sorted(_TRUSTED_STATUSES)))
+                .where(Claim.status.in_(sorted(_DISPLAY_STATUSES)))
                 .order_by(Claim.id)
             )
         )
@@ -724,7 +725,7 @@ async def get_deal_company(
             await db.execute(
                 select(Claim)
                 .where(Claim.deal_id == deal_id)
-                .where(Claim.status.in_(sorted(_TRUSTED_STATUSES)))
+                .where(Claim.status.in_(sorted(_DISPLAY_STATUSES)))
                 .order_by(Claim.id)
             )
         )
