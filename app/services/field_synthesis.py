@@ -152,6 +152,14 @@ class SynthCitation:
     document_id: str
     page: int | None
 
+    def to_json(self) -> dict[str, Any]:
+        return {"document_id": self.document_id, "page": self.page}
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any]) -> "SynthCitation":
+        page = data.get("page")
+        return cls(document_id=str(data.get("document_id", "")), page=page)
+
 
 @dataclass(frozen=True)
 class SynthPoint:
@@ -163,12 +171,58 @@ class SynthPoint:
     citations: list[SynthCitation]
     chunk_ids: list[str]
 
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "text": self.text,
+            "citations": [c.to_json() for c in self.citations],
+            "chunk_ids": list(self.chunk_ids),
+        }
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any]) -> "SynthPoint":
+        raw_cites = data.get("citations")
+        citations = [
+            SynthCitation.from_json(c)
+            for c in (raw_cites if isinstance(raw_cites, list) else [])
+            if isinstance(c, dict)
+        ]
+        raw_chunks = data.get("chunk_ids")
+        chunk_ids = [str(c) for c in raw_chunks] if isinstance(raw_chunks, list) else []
+        return cls(text=str(data.get("text", "")), citations=citations, chunk_ids=chunk_ids)
+
 
 @dataclass(frozen=True)
 class SectionSynthesis:
     key: str
     title: str
     points: list[SynthPoint] = field(default_factory=list)
+
+    def to_json(self) -> dict[str, Any]:
+        return {"key": self.key, "title": self.title, "points": [p.to_json() for p in self.points]}
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any]) -> "SectionSynthesis":
+        raw_points = data.get("points")
+        points = [
+            SynthPoint.from_json(p)
+            for p in (raw_points if isinstance(raw_points, list) else [])
+            if isinstance(p, dict)
+        ]
+        return cls(key=str(data.get("key", "")), title=str(data.get("title", "")), points=points)
+
+
+def sections_to_json(sections: Sequence[SectionSynthesis]) -> list[dict[str, Any]]:
+    """Serialize a synthesis result to the JSONB shape stored in synthesis_snapshot."""
+    return [s.to_json() for s in sections]
+
+
+def sections_from_json(data: Any) -> list[SectionSynthesis]:
+    """Deserialize the synthesis_snapshot JSONB back into SectionSynthesis objects.
+    Tolerant of a malformed row (returns what it can) -- a corrupt snapshot must
+    fail soft to the claims-driven fallback, never 500 the page."""
+    if not isinstance(data, list):
+        return []
+    return [SectionSynthesis.from_json(s) for s in data if isinstance(s, dict)]
 
 
 _SYSTEM = (
@@ -338,26 +392,22 @@ def _verify_points(raw: Any, hits: Sequence[ChunkHit]) -> list[SynthPoint]:
     return out
 
 
-async def synthesize_company_sections(
+async def retrieve(
     session: "AsyncSession",
     *,
     org_id: str,
     document_ids: Sequence[str],
-    company: str,
-) -> list[SectionSynthesis]:
-    """Grounded AI summaries for the Company tab's narrative sections. Returns only
-    sections that produced at least one verified point; a section with no chunks or
-    no grounded answer is simply absent. Fails soft: no API key or any error yields
-    an empty list, never an exception to the caller."""
-    settings = get_settings()
-    if not settings.anthropic_api_key or not document_ids:
-        return []
+) -> list[tuple[SectionSpec, list[ChunkHit]]]:
+    """Phase A (DB-only): the per-section chunk retrieval for every COMPANY_SECTION.
 
-    api_key = settings.anthropic_api_key
-    model = settings.field_synthesis_model
+    Kept separate from `generate` so the persist stage can hold the org-scoped
+    read transaction ONLY here and run the LLM gather with no transaction open --
+    running the ~45s-per-section gather inside a worker txn would pin a pooled
+    PgBouncer backend and can trip idle_in_transaction_session_timeout.
 
-    # Retrieval first, SEQUENTIALLY -- a single AsyncSession is not concurrency
-    # safe, so the per-section DB queries cannot overlap.
+    SEQUENTIAL: a single AsyncSession is not concurrency-safe, so the per-section
+    DB queries cannot overlap. A section whose retrieval raises is dropped (logged)
+    and simply absent from the result -- the pass fails soft per section."""
     retrieved: list[tuple[SectionSpec, list[ChunkHit]]] = []
     for spec in COMPANY_SECTIONS:
         try:
@@ -377,11 +427,21 @@ async def synthesize_company_sections(
             )
             retrieved.append((spec, hits))
         except Exception:
-            logger.warning(
-                "field-synthesis retrieval failed for %r/%s", company, spec.key, exc_info=True
-            )
+            logger.warning("field-synthesis retrieval failed for %s", spec.key, exc_info=True)
+    return retrieved
 
-    # Then the LLM calls in parallel -- network-bound, and each is independent.
+
+async def generate(
+    *,
+    api_key: str,
+    model: str,
+    company: str,
+    retrieved: Sequence[tuple[SectionSpec, list[ChunkHit]]],
+) -> list[SectionSynthesis]:
+    """Phase B (no DB): the parallel, grounded LLM pass over the retrieved chunks.
+    Returns only sections that produced at least one verified point. Network-bound
+    and independent per section, so run concurrently; holds no transaction."""
+
     async def _run(spec: SectionSpec, hits: list[ChunkHit]) -> SectionSynthesis | None:
         if not hits:
             return None
@@ -406,3 +466,45 @@ async def synthesize_company_sections(
 
     results = await asyncio.gather(*(_run(spec, hits) for spec, hits in retrieved))
     return [r for r in results if r is not None]
+
+
+def snapshot_reason(
+    *, has_api_key: bool, has_documents: bool, sections: Sequence[SectionSynthesis]
+) -> str:
+    """The deal-level sentinel persisted with a snapshot (SynthesisSnapshot.REASONS):
+    why an empty snapshot is empty, so a blank page is a recorded fact rather than
+    indistinguishable from a not-yet-computed one. Pure."""
+    if not has_api_key:
+        return "no_api_key"
+    if not has_documents:
+        return "no_documents"
+    if not sections:
+        return "no_sections_grounded"
+    return "ok"
+
+
+async def synthesize_company_sections(
+    session: "AsyncSession",
+    *,
+    org_id: str,
+    document_ids: Sequence[str],
+    company: str,
+) -> list[SectionSynthesis]:
+    """Grounded AI summaries for the Company tab's narrative sections (back-compat
+    convenience over retrieve + generate on one session). Returns only sections
+    that produced at least one verified point. Fails soft: no API key or no
+    documents yields an empty list, never an exception to the caller.
+
+    The persist stage (start_deal_synthesis) does NOT use this -- it calls
+    retrieve() and generate() in separate transaction phases so the LLM gather
+    never runs inside a held DB transaction."""
+    settings = get_settings()
+    if not settings.anthropic_api_key or not document_ids:
+        return []
+    retrieved = await retrieve(session, org_id=org_id, document_ids=document_ids)
+    return await generate(
+        api_key=settings.anthropic_api_key,
+        model=settings.field_synthesis_model,
+        company=company,
+        retrieved=retrieved,
+    )

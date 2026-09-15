@@ -20,6 +20,7 @@ from app.models.organisation import Funds, Organisation, Users
 from app.models.resolved_entity import ResolvedEntity
 from app.models.screening_result import ScreeningResult
 from app.models.session import Session
+from app.models.synthesis_snapshot import SynthesisSnapshot
 
 __all__ = [
     "AdminType",
@@ -44,6 +45,7 @@ __all__ = [
     "ResolvedEntity",
     "ScreeningResult",
     "Session",
+    "SynthesisSnapshot",
     "Organisation",
     "Funds",
     "Users",
