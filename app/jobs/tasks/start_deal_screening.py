@@ -28,6 +28,7 @@ from saq.types import Context
 from sqlalchemy import text
 
 from app.core.database import AsyncSessionLocal
+from app.jobs.queue import get_queue
 from app.repo.AnalysisRunRepo import AnalysisRunRepo
 from app.repo.DealRepo import DealRepo
 from app.repo.HumanAuditRepo import HumanAuditRepo
@@ -44,6 +45,12 @@ logger = logging.getLogger(__name__)
 # (caught and recorded as `failed` by the wrapper) instead of hanging the job --
 # and the UI -- indefinitely. Mirrors start_deal_verification._STATEMENT_TIMEOUT.
 _STATEMENT_TIMEOUT = "120s"
+
+# How the synthesis snapshot (pipeline tail) is enqueued after a successful
+# screening. Generous timeout: up to 6 sections x ~45s LLM + retrieval. Sized in
+# the same family as corroboration=7200 / screening=3600.
+_SYNTHESIS_TIMEOUT = 900
+_SYNTHESIS_TTL = 86400
 
 
 async def _set_org(session, clerk_org_id: str) -> None:
@@ -154,6 +161,30 @@ async def _run_screening(*, analysis_run_id: str, clerk_org_id: str) -> None:
                     "rule_results": [r.to_json() for r in decision.results],
                 },
             }
+        )
+
+    # Screening committed successfully (the early returns above -- redelivery
+    # guard, deal-not-found -- exit before here, so this runs ONLY on a real
+    # success). Chain the synthesis snapshot: the pipeline tail computes + freezes
+    # the Company/Summary sections once, so GET /company-synthesis is a pure
+    # reader. Best-effort and OUTSIDE the transaction: an enqueue failure must not
+    # fail a screening that already committed, and the GET falls back to the
+    # claims-driven view when no snapshot exists.
+    try:
+        await get_queue().enqueue(
+            "start_deal_synthesis",
+            analysis_run_id=analysis_run_id,
+            clerk_org_id=clerk_org_id,
+            timeout=_SYNTHESIS_TIMEOUT,
+            retries=1,
+            ttl=_SYNTHESIS_TTL,
+        )
+    except Exception:
+        logger.warning(
+            "failed to enqueue synthesis snapshot for run %s; deal stays complete, "
+            "GET falls back to the claims-driven view",
+            run_id,
+            exc_info=True,
         )
 
 
