@@ -41,12 +41,11 @@ from app.models.claim import Claim
 from app.services.entity_resolution.resolved import normalize_name
 from app.services.screening_materials import (
     _STATUS_RANK,
-    _TRUSTED,
     _citation,
     _fmt_value,
     _source_url,
 )
-from app.services.subject_fold import UNMATCHED, fold_subjects, subject_of
+from app.services.subject_fold import _DISPLAY_STATUSES, UNMATCHED, fold_subjects, subject_of
 
 # The status shown for a sector/HQ fact that came from the deal-profile
 # classifier rather than a cited claim -- honest about its (weaker) provenance.
@@ -400,7 +399,11 @@ def build_company_view(
     sections: dict[str, list[CompanyFact]] = {name: [] for name in set(_SECTION_BY_CLASS.values())}
 
     for claim in claims:
-        if claim.status not in _TRUSTED:
+        # _DISPLAY_STATUSES (not _TRUSTED): the analysis pages surface conflicted +
+        # inconclusive claims WITH their true label, not silently drop them. The
+        # endpoint query is already scoped to the same set; this keeps the view in
+        # step so it never re-filters them out.
+        if claim.status not in _DISPLAY_STATUSES:
             continue
         # A related-party assertion's `entity` is the party the relationship names
         # -- for the disclosures that matter (a director, an affiliate, a connected
