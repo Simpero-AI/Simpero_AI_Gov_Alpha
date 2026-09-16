@@ -8,14 +8,21 @@ ones, found=false yields nothing, and the excerpt-labelling the model cites
 against is deterministic.
 """
 
+import logging
 import uuid
+from types import SimpleNamespace
+from typing import cast
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.services import field_synthesis
 from app.services.field_synthesis import (
     _MAX_POINT_CHARS,
     _MAX_POINTS,
     COMPANY_SECTIONS,
     _build_user_message,
     _verify_points,
+    synthesize_company_sections,
 )
 from app.services.retrieval import ChunkHit
 
@@ -150,3 +157,91 @@ def test_company_sections_include_executive_summary_with_unique_keys():
     assert "executive_summary" in keys
     assert "overview" in keys and "risks" in keys and "commercial" in keys
     assert len(keys) == len(set(keys))
+
+
+def _settings(*, key: str) -> SimpleNamespace:
+    """Minimal stand-in for the app settings synthesize_company_sections reads --
+    only the two attributes it touches. Patched in via monkeypatch so the early-
+    return branch is chosen DETERMINISTICALLY (get_settings is lru_cached and CI
+    sets no ANTHROPIC_API_KEY, so relying on ambient env picks the wrong branch)."""
+    return SimpleNamespace(anthropic_api_key=key, field_synthesis_model="test-model")
+
+
+async def test_no_documents_returns_empty_and_logs_the_reason(monkeypatch, caplog):
+    # A chunk-less deal (with a key present) must fail soft to [] AND leave a
+    # reason=no_documents line in the logs -- an empty page is otherwise
+    # indistinguishable from a failed synthesis ("the search didn't fire"). The
+    # early return never touches the session, so a dummy stands in.
+    monkeypatch.setattr(field_synthesis, "get_settings", lambda: _settings(key="test-key"))
+    with caplog.at_level(logging.INFO, logger="app.services.field_synthesis"):
+        out = await synthesize_company_sections(
+            cast(AsyncSession, object()),
+            org_id="org-1",
+            document_ids=[],
+            company="Acme",
+        )
+    assert out == []
+    assert any("field-synthesis skipped" in m and "no_documents" in m for m in caplog.messages)
+
+
+async def test_no_api_key_returns_empty_and_logs_the_reason(monkeypatch, caplog):
+    # The symmetric early return: documents present but no key -> reason=no_api_key.
+    monkeypatch.setattr(field_synthesis, "get_settings", lambda: _settings(key=""))
+    with caplog.at_level(logging.INFO, logger="app.services.field_synthesis"):
+        out = await synthesize_company_sections(
+            cast(AsyncSession, object()),
+            org_id="org-1",
+            document_ids=["doc-1"],
+            company="Acme",
+        )
+    assert out == []
+    assert any("field-synthesis skipped" in m and "no_api_key" in m for m in caplog.messages)
+
+
+async def test_synthesize_classifies_each_empty_reason_and_logs_the_summary(monkeypatch, caplog):
+    # End-to-end pin of the Wave 2 reason-code classification: drive one section
+    # into each empty bucket and one into ok, and assert (1) only ok sections are
+    # returned and (2) the summary log records the right per-section code. Retrieval
+    # and the model are stubbed so this stays a pure unit test (no DB, no network).
+    monkeypatch.setattr(field_synthesis, "get_settings", lambda: _settings(key="test-key"))
+
+    q_of = {s.key: s.question for s in COMPANY_SECTIONS}
+    plans_query = next(s.query for s in COMPANY_SECTIONS if s.key == "plans")
+
+    async def fake_search(
+        _session, *, org_id, query_text, document_ids, weights, top_k, match_mode
+    ):
+        # "plans" retrieves nothing (-> no_hits); every other section gets one hit.
+        return [] if query_text == plans_query else [_hit(page=1)]
+
+    def fake_call(*, api_key, model, question, company, hits):
+        if question == q_of["risks"]:
+            return None  # no structured tool call -> model_no_tool_call
+        if question == q_of["commercial"]:
+            return {"found": False, "points": []}  # answered nothing -> model_no_answer
+        if question == q_of["related_parties"]:
+            # answered, but the only citation is an id we never retrieved -> the
+            # grounding gate drops it -> ungrounded.
+            return {"found": True, "points": [{"text": "invented", "chunk_ids": ["c99"]}]}
+        # executive_summary + overview: a real, grounded point -> ok.
+        return {"found": True, "points": [{"text": "A real grounded fact.", "chunk_ids": ["c1"]}]}
+
+    monkeypatch.setattr(field_synthesis, "org_scoped_search", fake_search)
+    monkeypatch.setattr(field_synthesis, "_call_model", fake_call)
+
+    with caplog.at_level(logging.INFO, logger="app.services.field_synthesis"):
+        out = await synthesize_company_sections(
+            cast(AsyncSession, object()),
+            org_id="org-1",
+            document_ids=["doc-1"],
+            company="Acme",
+        )
+
+    assert {s.key for s in out} == {"executive_summary", "overview"}
+    summary = next(m for m in caplog.messages if "sections grounded" in m)
+    assert "executive_summary=ok" in summary
+    assert "overview=ok" in summary
+    assert "risks=model_no_tool_call" in summary
+    assert "commercial=model_no_answer" in summary
+    assert "related_parties=ungrounded" in summary
+    assert "plans=no_hits" in summary

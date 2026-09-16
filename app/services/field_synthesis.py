@@ -275,6 +275,13 @@ def _call_model(
                 "content": _build_user_message(question=question, company=company, hits=hits),
             }
         ],
+        # temperature=0 for reproducibility: this synthesis runs at request time on
+        # every page load, so a non-zero temperature makes the Business Overview /
+        # Risks / Commercial / Executive Summary text drift between two loads of the
+        # same deal. The Messages API has no seed. This SDK build exposes no
+        # `temperature` kwarg, so it goes through extra_body -- the documented escape
+        # hatch that merges straight into the request body.
+        extra_body={"temperature": 0},
     )
     for block in message.content:
         # getattr throughout: message.content is a union of block types and only
@@ -348,9 +355,21 @@ async def synthesize_company_sections(
     """Grounded AI summaries for the Company tab's narrative sections. Returns only
     sections that produced at least one verified point; a section with no chunks or
     no grounded answer is simply absent. Fails soft: no API key or any error yields
-    an empty list, never an exception to the caller."""
+    an empty list, never an exception to the caller.
+
+    Every empty path is LOGGED with a reason code (no_api_key / no_documents, and
+    per section: retrieval_error / no_hits / model_no_tool_call / model_no_answer /
+    ungrounded / llm_error / ok). An empty page is otherwise indistinguishable from
+    a failed one ("the search didn't fire"); the reason line makes it diagnosable
+    from logs without changing the wire contract."""
     settings = get_settings()
     if not settings.anthropic_api_key or not document_ids:
+        logger.info(
+            "field-synthesis skipped for %r: reason=%s -- no grounded sections; the FE "
+            "renders the claims-driven fallback",
+            company,
+            "no_api_key" if not settings.anthropic_api_key else "no_documents",
+        )
         return []
 
     api_key = settings.anthropic_api_key
@@ -382,9 +401,11 @@ async def synthesize_company_sections(
             )
 
     # Then the LLM calls in parallel -- network-bound, and each is independent.
-    async def _run(spec: SectionSpec, hits: list[ChunkHit]) -> SectionSynthesis | None:
+    # Each returns (reason_code, section-or-None); the reason distinguishes the
+    # empty paths so the summary log below explains a blank section.
+    async def _run(spec: SectionSpec, hits: list[ChunkHit]) -> tuple[str, SectionSynthesis | None]:
         if not hits:
-            return None
+            return ("no_hits", None)
         try:
             raw = await asyncio.to_thread(
                 _call_model,
@@ -398,11 +419,43 @@ async def synthesize_company_sections(
             logger.warning(
                 "field-synthesis LLM call failed for %r/%s", company, spec.key, exc_info=True
             )
-            return None
+            return ("llm_error", None)
         points = _verify_points(raw, hits)
-        if not points:
-            return None
-        return SectionSynthesis(key=spec.key, title=spec.title, points=points)
+        if points:
+            return ("ok", SectionSynthesis(key=spec.key, title=spec.title, points=points))
+        # No point survived. Separate the three distinct empty causes -- they point
+        # at different fixes: model_no_tool_call (the model returned no structured
+        # tool call at all -> prompt/model), model_no_answer (it answered found=false
+        # -> retrieval/query didn't surface the section), and ungrounded (it answered
+        # with points but the grounding gate dropped every one as citing an
+        # unretrieved id -> prompt/gate).
+        if raw is None:
+            return ("model_no_tool_call", None)
+        model_answered = (
+            isinstance(raw, dict)
+            and bool(raw.get("found"))
+            and isinstance(raw.get("points"), list)
+            and bool(raw.get("points"))
+        )
+        return ("ungrounded" if model_answered else "model_no_answer", None)
 
-    results = await asyncio.gather(*(_run(spec, hits) for spec, hits in retrieved))
-    return [r for r in results if r is not None]
+    # Sections whose retrieval raised never entered `retrieved`; default them to
+    # retrieval_error so the summary accounts for every COMPANY_SECTION.
+    outcomes: dict[str, str] = {spec.key: "retrieval_error" for spec in COMPANY_SECTIONS}
+    run_results = await asyncio.gather(*(_run(spec, hits) for spec, hits in retrieved))
+    sections: list[SectionSynthesis] = []
+    for (spec, _hits), (reason, section) in zip(retrieved, run_results, strict=True):
+        outcomes[spec.key] = reason
+        if section is not None:
+            sections.append(section)
+
+    n_ok = sum(1 for r in outcomes.values() if r == "ok")
+    summary = ", ".join(f"{spec.key}={outcomes[spec.key]}" for spec in COMPANY_SECTIONS)
+    logger.info(
+        "field-synthesis for %r: %d/%d sections grounded (%s)",
+        company,
+        n_ok,
+        len(COMPANY_SECTIONS),
+        summary,
+    )
+    return sections

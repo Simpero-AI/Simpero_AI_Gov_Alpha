@@ -112,6 +112,13 @@ def _call_model(*, api_key: str, model: str, company: str, facts: list[str]) -> 
         tools=[_TOOL],
         tool_choice={"type": "tool", "name": _TOOL["name"]},
         messages=[{"role": "user", "content": user}],
+        # temperature=0 for reproducibility: derive_screening_insights runs at
+        # request time on every GET /deals/{id}/screening-insights, so a non-zero
+        # temperature makes the Screening tab's Agent Highlights / Risk Flags drift
+        # between two loads of the same deal. This SDK build exposes no `temperature`
+        # kwarg, so it goes through extra_body -- the documented escape hatch that
+        # merges into the request body.
+        extra_body={"temperature": 0},
     )
     for block in message.content:
         # getattr throughout: message.content is a union of block types and only

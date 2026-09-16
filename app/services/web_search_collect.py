@@ -417,6 +417,14 @@ def _call_web_search(
         # through verbatim. The report tool is a normal ToolParam.
         tools=cast("Any", [web_search_tool, _report_tool()]),
         messages=[{"role": "user", "content": user}],
+        # temperature=0 for reproducibility: it stabilises the model's query choices
+        # and how it adjudicates results into facts. The live web itself still varies
+        # run-to-run, so this does not make web-collect fully deterministic -- the
+        # durable fix is snapshotting the result once per analysis (persist wave) --
+        # but it removes the model as an extra, avoidable source of drift. This SDK
+        # build exposes no `temperature` kwarg, so it goes through extra_body (the
+        # documented escape hatch that merges into the request body).
+        extra_body={"temperature": 0},
     )
     for block in message.content:
         if getattr(block, "type", None) != "tool_use":
@@ -455,6 +463,11 @@ async def gather_web_facts(
     allowlist-passed candidates. Fails soft to [] on any error. `_call` is an
     injection point for tests (defaults to the real Anthropic call)."""
     if not api_key or not company:
+        logger.info(
+            "web-collect skipped for %r: reason=%s -- no web facts minted this run",
+            company,
+            "no_api_key" if not api_key else "no_company",
+        )
         return []
     allowed = tuple(allowed_domains)
     call = _call or _call_web_search

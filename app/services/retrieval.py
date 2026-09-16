@@ -181,7 +181,7 @@ async def hybrid_search(
             f"""
             SELECT id FROM chunks
             WHERE embedding IS NOT NULL {doc_filter}
-            ORDER BY embedding <=> (:qvec)::vector
+            ORDER BY embedding <=> (:qvec)::vector, id
             LIMIT :leg_k
             """
         )
@@ -189,12 +189,16 @@ async def hybrid_search(
 
     # Sparse leg: full-text match ranked by ts_rank_cd. websearch_to_tsquery is the
     # forgiving parser (it never raises on user punctuation), which matters because
-    # an Ask Me query is typed by a human.
+    # an Ask Me query is typed by a human. The `, id` secondary sort makes the LIMIT
+    # boundary deterministic: short chunks routinely tie on ts_rank_cd, and without a
+    # tiebreak Postgres returns an arbitrary subset of the tied rows each call, so two
+    # loads of the same page retrieve different chunks and synthesis drifts. Same on
+    # the dense leg above.
     sparse_sql = text(
         f"""
         SELECT id FROM chunks
         WHERE content_tsv @@ websearch_to_tsquery('english', :q) {doc_filter}
-        ORDER BY ts_rank_cd(content_tsv, websearch_to_tsquery('english', :q)) DESC
+        ORDER BY ts_rank_cd(content_tsv, websearch_to_tsquery('english', :q)) DESC, id
         LIMIT :leg_k
         """
     )
