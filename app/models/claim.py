@@ -74,6 +74,14 @@ _ASSERTION_CLASSES = (
     "commercial_terms",
     "risk_or_dependency",
     "plan_or_commitment",
+    # Company-tab firmographic sections (previously permanent-empty on the FE):
+    # who else invested, funding rounds, named customers, and where the business
+    # operates. geographic_presence populates for a public 10-K's geo segments;
+    # co_investor/funding_history are private-deal (CIM) concepts.
+    "co_investor",
+    "funding_history",
+    "key_customer",
+    "geographic_presence",
 )
 
 
