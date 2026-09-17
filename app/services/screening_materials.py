@@ -592,29 +592,66 @@ def render_claim_facts(
     return lines
 
 
+# Raw-label tokens that mark a claim as a per-segment / sub-entity figure vs a
+# consolidated one, used to prefer the consolidated figure for a metric (see
+# _consolidated_rank). Consolidated tokens win even when a segment token is also
+# present (Apple's "Total products and services ..."), so they are checked first.
+_CONSOLIDATED_RAW_TOKENS = frozenset({"total", "consolidated", "companywide"})
+_SEGMENT_RAW_TOKENS = frozenset({"services", "products", "segment"})
+
+
+def _consolidated_rank(claim: Claim) -> int:
+    """Prefer a consolidated/total figure over a per-segment one when several
+    claims share a metric. The case that bites is a PERCENT metric: Apple reports
+    Products/Services segment gross margins (75.4% Services) beside the ~46%
+    consolidated one, all canonicalized to `gross_margin` with the disambiguator
+    kept in attribute_raw -- and without this, _rank_key's magnitude tiebreak
+    shows the largest segment margin as THE gross margin. A canonical claim with
+    no attribute_raw (never a segment breakout) ranks as consolidated-neutral."""
+    raw = normalize_name(claim.attribute_raw or "")
+    if not raw:
+        return 1
+    tokens = set(raw.split())
+    if tokens & _CONSOLIDATED_RAW_TOKENS:
+        return 2
+    if tokens & _SEGMENT_RAW_TOKENS:
+        return 0
+    return 1
+
+
 def _prefer(candidate: Claim, current: Claim) -> bool:
     """True when `candidate` is the better figure to show for its metric: a
     historical period beats a forecast, then a later year, then a more
-    corroborated status, then the larger magnitude."""
+    corroborated status, then a consolidated figure over a segment one, then the
+    larger magnitude."""
     return _rank_key(candidate) > _rank_key(current)
 
 
-def _rank_key(claim: Claim) -> tuple[int, int, int, float]:
+def _rank_key(claim: Claim) -> tuple[int, int, int, int, float]:
     # A forecast (Estimate/Projection) ranks below any historical figure; an
     # unmarked period counts as historical, not a forecast -- so a latest actual
     # is never passed over for a later-year estimate even when the actuals carry
-    # no explicit "A" kind. The magnitude is the final tiebreak: when a metric's
-    # figures carry no year (period_year None -> -1 for all), preferring the
-    # larger magnitude is a stable, deterministic choice instead of insertion
-    # order. It is the ABSOLUTE value: for a loss (a negative figure) the bigger
-    # number is the more negative one, so a signed comparison would wrongly prefer
-    # the smaller loss.
+    # no explicit "A" kind. consolidated_rank then prefers a total over a segment
+    # breakout. The magnitude is the final tiebreak: when a metric's figures carry
+    # no year (period_year None -> -1 for all), preferring the larger magnitude is
+    # a stable, deterministic choice instead of insertion order. It is the
+    # ABSOLUTE value: for a loss (a negative figure) the bigger number is the more
+    # negative one, so a signed comparison would wrongly prefer the smaller loss.
+    #
+    # For a percent/ratio metric (a margin) magnitude is NOT a quality signal -- a
+    # bigger percentage is not a "better" figure -- so it is neutralized; using it
+    # was exactly what surfaced Apple's 75.4% Services gross margin over the ~46%
+    # consolidated one. consolidated_rank, above, is what picks the right figure.
     is_historical = 0 if claim.period_kind in ("E", "P") else 1
     year = claim.period_year if claim.period_year is not None else -1
     normalized = claim.value.get("normalized") if isinstance(claim.value, dict) else None
-    magnitude = (
-        abs(normalized)
-        if isinstance(normalized, (int, float)) and not isinstance(normalized, bool)
-        else float("-inf")
+    has_number = isinstance(normalized, (int, float)) and not isinstance(normalized, bool)
+    is_ratio = _value_type(claim) in ("percent", "ratio")
+    magnitude = 0.0 if is_ratio else (abs(normalized) if has_number else float("-inf"))
+    return (
+        is_historical,
+        year,
+        _STATUS_RANK.get(claim.status, 0),
+        _consolidated_rank(claim),
+        magnitude,
     )
-    return (is_historical, year, _STATUS_RANK.get(claim.status, 0), magnitude)
