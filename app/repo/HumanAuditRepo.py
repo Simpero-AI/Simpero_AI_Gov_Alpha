@@ -36,6 +36,20 @@ class HumanAuditRepo(BaseRepo[HumanAuditLog, dict]):
         )
         return list(result.scalars().all())
 
+    async def list_for_deal(self, deal_id: object, limit: int) -> list[HumanAuditLog]:
+        """Backs GET /deals/{id}/audit -- the deal-scoped audit trail (Logs
+        drawer's Audit Trail tab), newest first. Filters on deal_id; the id
+        tiebreak keeps ordering stable when two rows share a created_at (a
+        chained job can append several within one clock_timestamp()). RLS still
+        scopes to the org, so this cannot read another org's rows."""
+        result = await self.session.execute(
+            select(HumanAuditLog)
+            .where(HumanAuditLog.deal_id == deal_id)
+            .order_by(HumanAuditLog.created_at.desc(), HumanAuditLog.id.desc())
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
     async def all_event_types(self) -> list[str]:
         """Every event_type in the org's audit trail (RLS-scoped), for
         logs.recentActivity's total/warnings/critical counts — those are

@@ -5,7 +5,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any, TypeVar, cast
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ValidationError
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -81,6 +81,7 @@ from app.schemas.intake_response import (
     IntakeResponseAnswerResponse,
     IntakeResponseResponse,
 )
+from app.schemas.logs import ActivityRowResponse
 from app.services.company_view import build_company_view
 from app.services.corroboration_citation import corroboration_source_url
 from app.services.dashboard_stats import compute_month_bounds, compute_pipeline_value_delta
@@ -1079,6 +1080,38 @@ async def list_deal_documents(
             created_at=document.created_at,
         )
         for document in documents
+    ]
+
+
+@router.get("/{deal_id}/audit", response_model=list[ActivityRowResponse])
+async def list_deal_audit(
+    deal_id: uuid.UUID,
+    limit: int = Query(default=100, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+) -> list[ActivityRowResponse]:
+    """The deal-scoped audit trail behind the Logs drawer's "Audit Trail" tab.
+    Migrated off the retired tRPC `logs.auditTrail` -- that route keyed on a
+    legacy NUMERIC deal id, so the current UUID deal space coerced to Number()
+    reached it as NaN and every deal failed to load. This reads the claims-era
+    human_audit_log directly: newest first, org-scoped by RLS (a deal in another
+    org 404s via the DealRepo lookup, never leaks rows). Returns [] for a deal
+    with no audit rows yet -- the drawer renders its own empty state."""
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    rows = await HumanAuditRepo(db).list_for_deal(deal_id, limit)
+    return [
+        ActivityRowResponse(
+            id=str(row.id),
+            created_at=row.created_at,
+            action=row.event_type,
+            session_id=str(row.session_id) if row.session_id else None,
+            job_id=None,
+            actor_email=row.actor_email,
+            payload=row.payload,
+        )
+        for row in rows
     ]
 
 
