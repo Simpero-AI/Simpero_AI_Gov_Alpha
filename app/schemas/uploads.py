@@ -36,7 +36,10 @@ class CompleteRequest(CamelModel):
 
 class CompleteResponse(CamelModel):
     """POST /uploads/{upload_id}/complete response -- the created row's
-    id/status."""
+    id/status, plus a best-effort page count for the frontend's upload-time
+    page-cap check. None when the file isn't a PDF or its page count
+    couldn't be determined -- never fails the request."""
 
     id: UUID
     status: str
+    page_count: int | None = None

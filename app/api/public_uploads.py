@@ -17,7 +17,14 @@ from app.repo.DataSourceRepo import DataSourceRepo
 from app.repo.HumanAuditRepo import HumanAuditRepo
 from app.schemas.public_uploads import PublicCompleteRequest, PublicPresignRequest
 from app.schemas.uploads import CompleteResponse, PresignResponse
-from app.services.uploads.spaces import build_object_key, head_object_size, presign_put
+from app.services.uploads.pdf import count_pdf_pages
+from app.services.uploads.spaces import (
+    ObjectTooLargeError,
+    build_object_key,
+    get_object_bytes,
+    head_object_size,
+    presign_put,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -206,6 +213,13 @@ async def complete_upload(
             },
         )
 
+    page_count = None
+    if body.filename.lower().endswith(".pdf"):
+        try:
+            page_count = count_pdf_pages(get_object_bytes(storage_key, MAX_UPLOAD_BYTES))
+        except ObjectTooLargeError:
+            page_count = None
+
     # The real ceiling enforcement (advisory-locked) -- /presigned-url's own
     # check above is a courtesy only and can't prevent a race between two
     # concurrent /complete calls for the same link.
@@ -258,4 +272,4 @@ async def complete_upload(
         }
     )
 
-    return CompleteResponse(id=data_source.id, status=data_source.status)
+    return CompleteResponse(id=data_source.id, status=data_source.status, page_count=page_count)

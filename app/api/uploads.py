@@ -12,7 +12,14 @@ from app.repo.DataSourceRepo import DataSourceRepo
 from app.repo.HumanAuditRepo import HumanAuditRepo
 from app.repo.UserRepo import UserRepo
 from app.schemas.uploads import CompleteRequest, CompleteResponse, PresignRequest, PresignResponse
-from app.services.uploads.spaces import build_object_key, head_object, presign_put
+from app.services.uploads.pdf import count_pdf_pages
+from app.services.uploads.spaces import (
+    ObjectTooLargeError,
+    build_object_key,
+    get_object_bytes,
+    head_object,
+    presign_put,
+)
 
 router = APIRouter(prefix="/uploads", tags=["uploads"])
 
@@ -139,6 +146,13 @@ async def complete_upload(
             detail="Uploaded object not found -- the presigned PUT may not have completed",
         )
 
+    page_count = None
+    if body.filename.lower().endswith(".pdf"):
+        try:
+            page_count = count_pdf_pages(get_object_bytes(storage_key, MAX_UPLOAD_BYTES))
+        except ObjectTooLargeError:
+            page_count = None
+
     data_source = await DataSourceRepo(db).create(
         {
             "id": upload_id,
@@ -184,4 +198,4 @@ async def complete_upload(
         }
     )
 
-    return CompleteResponse(id=data_source.id, status=data_source.status)
+    return CompleteResponse(id=data_source.id, status=data_source.status, page_count=page_count)
