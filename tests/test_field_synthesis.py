@@ -17,10 +17,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services import field_synthesis
 from app.services.field_synthesis import (
+    _MAX_NAME_CHARS,
+    _MAX_PEOPLE,
     _MAX_POINT_CHARS,
     _MAX_POINTS,
+    _MAX_TITLE_CHARS,
     COMPANY_SECTIONS,
+    SectionSynthesis,
+    SynthCitation,
+    SynthPerson,
     _build_user_message,
+    _verify_people,
     _verify_points,
     synthesize_company_sections,
 )
@@ -214,7 +221,7 @@ async def test_synthesize_classifies_each_empty_reason_and_logs_the_summary(monk
         # "plans" retrieves nothing (-> no_hits); every other section gets one hit.
         return [] if query_text == plans_query else [_hit(page=1)]
 
-    def fake_call(*, api_key, model, question, company, hits):
+    def fake_call(*, api_key, model, question, company, hits, system, tool, max_tokens):
         if question == q_of["risks"]:
             return None  # no structured tool call -> model_no_tool_call
         if question == q_of["commercial"]:
@@ -245,3 +252,192 @@ async def test_synthesize_classifies_each_empty_reason_and_logs_the_summary(monk
     assert "commercial=model_no_answer" in summary
     assert "related_parties=ungrounded" in summary
     assert "plans=no_hits" in summary
+
+
+def test_verifies_a_grounded_person_and_maps_citation():
+    h1 = _hit(
+        page=7, document_id="doc-a", content="Jane Smith is the CEO with 10 years in fintech."
+    )
+    raw = {
+        "found": True,
+        "people": [
+            {
+                "name": "Jane Smith",
+                "title": "CEO",
+                "background": "10 years in fintech",
+                "chunk_ids": ["c1"],
+            }
+        ],
+    }
+
+    (person,) = _verify_people(raw, [h1])
+
+    assert person.name == "Jane Smith"
+    assert person.title == "CEO"
+    assert person.background == "10 years in fintech"
+    assert [(c.document_id, c.page) for c in person.citations] == [("doc-a", 7)]
+    assert person.chunk_ids == [str(h1.chunk_id)]
+
+
+def test_drops_a_person_citing_only_an_invented_id():
+    h1 = _hit(page=7, content="Jane Smith is the CEO.")
+    raw = {
+        "found": True,
+        "people": [{"name": "Jane Smith", "chunk_ids": ["c9"]}],
+    }
+    assert _verify_people(raw, [h1]) == []
+
+
+def test_keeps_only_valid_citations_when_a_person_mixes_real_and_invented_ids():
+    h1 = _hit(page=7, document_id="doc-a", content="Jane Smith is the CEO.")
+    h2 = _hit(page=8, document_id="doc-a", content="Jane Smith previously worked at Acme.")
+    raw = {"found": True, "people": [{"name": "Jane Smith", "chunk_ids": ["c2", "c99"]}]}
+
+    (person,) = _verify_people(raw, [h1, h2])
+
+    assert [(c.document_id, c.page) for c in person.citations] == [("doc-a", 8)]
+    assert person.chunk_ids == [str(h2.chunk_id)]
+
+
+def test_people_found_false_yields_nothing():
+    h1 = _hit(page=1, content="Jane Smith is the CEO.")
+    raw = {"found": False, "people": [{"name": "Jane Smith", "chunk_ids": ["c1"]}]}
+    assert _verify_people(raw, [h1]) == []
+
+
+def test_dedups_person_by_name_case_and_whitespace():
+    h1 = _hit(page=1, content="Jane Smith is the CEO.")
+    raw = {
+        "found": True,
+        "people": [
+            {"name": "Jane   Smith", "chunk_ids": ["c1"]},
+            {"name": "jane smith", "chunk_ids": ["c1"]},
+        ],
+    }
+    assert len(_verify_people(raw, [h1])) == 1
+
+
+def test_drops_empty_or_missing_name():
+    h1 = _hit(page=1, content="Some content.")
+    raw = {
+        "found": True,
+        "people": [{"name": "   ", "chunk_ids": ["c1"]}, {"chunk_ids": ["c1"]}],
+    }
+    assert _verify_people(raw, [h1]) == []
+
+
+def test_drops_overlong_name_title_or_background():
+    h1 = _hit(page=1, content="Jane Smith bio.")
+    raw = {
+        "found": True,
+        "people": [
+            {"name": "x" * (_MAX_NAME_CHARS + 1), "chunk_ids": ["c1"]},
+            {"name": "Jane Smith", "title": "x" * (_MAX_TITLE_CHARS + 1), "chunk_ids": ["c1"]},
+            {"name": "Jane Smith", "background": "x" * (_MAX_POINT_CHARS + 1), "chunk_ids": ["c1"]},
+        ],
+    }
+    assert _verify_people(raw, [h1]) == []
+
+
+def test_caps_number_of_people():
+    hits = [
+        _hit(page=i + 1, content=f"Person Lastname{i} works here.") for i in range(_MAX_PEOPLE + 5)
+    ]
+    raw = {
+        "found": True,
+        "people": [
+            {"name": f"Person Lastname{i}", "chunk_ids": [f"c{i + 1}"]} for i in range(len(hits))
+        ],
+    }
+    assert len(_verify_people(raw, hits)) == _MAX_PEOPLE
+
+
+def test_malformed_people_raw_yields_nothing():
+    h1 = _hit(page=1)
+    assert _verify_people(None, [h1]) == []
+    assert _verify_people({"found": True, "people": "not-a-list"}, [h1]) == []
+    assert _verify_people({"found": True, "people": ["not-a-dict"]}, [h1]) == []
+
+
+def test_person_empty_title_and_background_become_none():
+    h1 = _hit(page=1, content="Jane Smith leads the company.")
+    raw = {
+        "found": True,
+        "people": [{"name": "Jane Smith", "title": "   ", "background": "", "chunk_ids": ["c1"]}],
+    }
+    (person,) = _verify_people(raw, [h1])
+    assert person.title is None
+    assert person.background is None
+
+
+def test_drops_a_person_whose_surname_is_not_in_the_cited_chunk_text():
+    # Citation is structurally valid (cites a real, retrieved chunk) but the
+    # chunk's text never actually mentions "Smith" -- the model attached the
+    # wrong citation (or invented the surname). The citation-grounding gate
+    # alone would let this through; only the surname-presence gate catches it.
+    h1 = _hit(page=7, content="The CEO has twenty years of industry experience.")
+    raw = {"found": True, "people": [{"name": "Jane Smith", "chunk_ids": ["c1"]}]}
+    assert _verify_people(raw, [h1]) == []
+
+
+async def test_leadership_section_reaches_ok_via_people_only_result(monkeypatch, caplog):
+    # The leadership section reports via `people`, not `points` -- pin that the
+    # reason-code classification treats a people-only result as "ok" (grounded),
+    # the same way a points-only result is for every other section.
+    monkeypatch.setattr(field_synthesis, "get_settings", lambda: _settings(key="test-key"))
+    q_of = {s.key: s.question for s in COMPANY_SECTIONS}
+
+    async def fake_search(
+        _session, *, org_id, query_text, document_ids, weights, top_k, match_mode
+    ):
+        return [_hit(page=1, content="Jane Smith is the CEO.")]
+
+    def fake_call(*, api_key, model, question, company, hits, system, tool, max_tokens):
+        if question == q_of["leadership"]:
+            return {
+                "found": True,
+                "people": [{"name": "Jane Smith", "title": "CEO", "chunk_ids": ["c1"]}],
+            }
+        return {"found": False, "points": []}
+
+    monkeypatch.setattr(field_synthesis, "org_scoped_search", fake_search)
+    monkeypatch.setattr(field_synthesis, "_call_model", fake_call)
+
+    with caplog.at_level(logging.INFO, logger="app.services.field_synthesis"):
+        out = await synthesize_company_sections(
+            cast(AsyncSession, object()),
+            org_id="org-1",
+            document_ids=["doc-1"],
+            company="Acme",
+        )
+
+    (section,) = [s for s in out if s.key == "leadership"]
+    assert section.points == []
+    assert [p.name for p in section.people] == ["Jane Smith"]
+    summary = next(m for m in caplog.messages if "sections grounded" in m)
+    assert "leadership=ok" in summary
+
+
+def test_sections_round_trip_preserves_people():
+    section = SectionSynthesis(
+        key="leadership",
+        title="Leadership",
+        people=[
+            SynthPerson(
+                name="Jane Smith",
+                title="CEO",
+                background="Ex-Acme",
+                citations=[SynthCitation(document_id="doc-a", page=3)],
+                chunk_ids=["chunk-1"],
+            )
+        ],
+    )
+    (restored,) = field_synthesis.sections_from_json(field_synthesis.sections_to_json([section]))
+    assert restored.people == section.people
+    assert restored.points == []
+
+
+def test_old_shape_section_without_people_key_deserializes_to_empty_list():
+    old_row = {"key": "overview", "title": "Business Overview", "points": []}
+    (restored,) = field_synthesis.sections_from_json([old_row])
+    assert restored.people == []

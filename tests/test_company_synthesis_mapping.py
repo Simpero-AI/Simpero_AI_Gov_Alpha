@@ -4,7 +4,7 @@ formatting). The endpoint itself is a thin wrapper around synthesize_company_sec
 (fail-soft) + this mapper."""
 
 from app.api.deals import _synthesis_to_response
-from app.services.field_synthesis import SectionSynthesis, SynthCitation, SynthPoint
+from app.services.field_synthesis import SectionSynthesis, SynthCitation, SynthPerson, SynthPoint
 
 _DOC_A = "11111111-1111-1111-1111-111111111111"
 _DOC_B = "22222222-2222-2222-2222-222222222222"
@@ -13,6 +13,10 @@ _FILENAMES = {_DOC_A: "apple-10k-2024.pdf", _DOC_B: "apple-investor-deck.pdf"}
 
 def _section(*points: SynthPoint) -> SectionSynthesis:
     return SectionSynthesis(key="overview", title="Business Overview", points=list(points))
+
+
+def _leadership_section(*people: SynthPerson) -> SectionSynthesis:
+    return SectionSynthesis(key="leadership", title="Leadership", people=list(people))
 
 
 def test_maps_a_single_cited_point_to_file_and_page():
@@ -82,3 +86,54 @@ def test_unknown_document_id_falls_back_to_the_id():
 
 def test_empty_sections_map_to_empty_response():
     assert _synthesis_to_response([], _FILENAMES).sections == []
+
+
+def test_maps_a_person_with_deduped_citation_label():
+    section = _leadership_section(
+        SynthPerson(
+            name="Jane Smith",
+            title="CEO",
+            background="10 years in fintech.",
+            citations=[
+                SynthCitation(document_id=_DOC_A, page=3),
+                SynthCitation(document_id=_DOC_A, page=3),  # duplicate -> collapsed
+            ],
+            chunk_ids=["c1", "c2"],
+        )
+    )
+    (out,) = _synthesis_to_response([section], _FILENAMES).sections
+    assert out.key == "leadership"
+    assert out.points == []
+    (person,) = out.people
+    assert person.name == "Jane Smith"
+    assert person.title == "CEO"
+    assert person.background == "10 years in fintech."
+    assert person.citation == "apple-10k-2024.pdf · p.3"
+
+
+def test_person_with_unresolvable_citations_gets_null_citation():
+    section = _leadership_section(
+        SynthPerson(
+            name="Jane Smith",
+            title=None,
+            background=None,
+            citations=[],
+            chunk_ids=[],
+        )
+    )
+    (out,) = _synthesis_to_response([section], _FILENAMES).sections
+    assert out.people[0].citation is None
+
+
+def test_person_page_less_citation_renders_as_filename_only():
+    section = _leadership_section(
+        SynthPerson(
+            name="Jane Smith",
+            title=None,
+            background=None,
+            citations=[SynthCitation(document_id=_DOC_B, page=None)],
+            chunk_ids=["c9"],
+        )
+    )
+    (out,) = _synthesis_to_response([section], _FILENAMES).sections
+    assert out.people[0].citation == "apple-investor-deck.pdf"

@@ -2,6 +2,7 @@ import json
 import logging
 import secrets
 import uuid
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, TypeVar, cast
 
@@ -37,6 +38,7 @@ from app.schemas.deals import (
     AvgAiScoreStat,
     CompanyFactResponse,
     CompanySynthesisResponse,
+    CompanySynthPersonResponse,
     CompanySynthPointResponse,
     CompanySynthSectionResponse,
     CompanyViewResponse,
@@ -87,7 +89,7 @@ from app.services.corroboration_citation import corroboration_source_url
 from app.services.dashboard_stats import compute_month_bounds, compute_pipeline_value_delta
 from app.services.entity_resolution import get_resolver
 from app.services.entity_resolution.types import EntityResolutionError
-from app.services.field_synthesis import SectionSynthesis, sections_from_json
+from app.services.field_synthesis import SectionSynthesis, SynthCitation, sections_from_json
 from app.services.financials_view import build_financials_trend, build_financials_view
 from app.services.intake_links import (
     compute_intake_link_effective_status,
@@ -544,30 +546,48 @@ async def get_deal_screening_insights(
     return ScreeningInsightsResponse(highlights=highlights, risk_flags=risk_flags)
 
 
+def _citation_label(citations: Sequence[SynthCitation], filenames: dict[str, str]) -> str | None:
+    """Resolve (document_id, page) citations to human "file · p.N" strings
+    (deduped, in order, joined by '; '). A page-less citation renders as just the
+    filename; an empty/unresolved citation list yields None."""
+    seen: set[str] = set()
+    labels: list[str] = []
+    for cite in citations:
+        name = filenames.get(cite.document_id, cite.document_id)
+        label = f"{name} · p.{cite.page}" if cite.page is not None else name
+        if label not in seen:
+            seen.add(label)
+            labels.append(label)
+    return "; ".join(labels) or None
+
+
 def _synthesis_to_response(
     sections: list[SectionSynthesis], filenames: dict[str, str]
 ) -> CompanySynthesisResponse:
-    """Map grounded synthesis sections to the wire shape, resolving each point's
-    (document_id, page) citations to human "file · p.N" strings (deduped, in
-    order, joined by '; '). A page-less citation renders as just the filename; a
-    point whose citations resolve to nothing gets a null citation."""
+    """Map grounded synthesis sections to the wire shape, resolving each point's/
+    person's (document_id, page) citations to human "file · p.N" strings. A
+    section carries either points or people (the "leadership" section)."""
     out_sections: list[CompanySynthSectionResponse] = []
     for section in sections:
-        points: list[CompanySynthPointResponse] = []
-        for point in section.points:
-            seen: set[str] = set()
-            labels: list[str] = []
-            for cite in point.citations:
-                name = filenames.get(cite.document_id, cite.document_id)
-                label = f"{name} · p.{cite.page}" if cite.page is not None else name
-                if label not in seen:
-                    seen.add(label)
-                    labels.append(label)
-            points.append(
-                CompanySynthPointResponse(text=point.text, citation="; ".join(labels) or None)
+        points = [
+            CompanySynthPointResponse(
+                text=point.text, citation=_citation_label(point.citations, filenames)
             )
+            for point in section.points
+        ]
+        people = [
+            CompanySynthPersonResponse(
+                name=person.name,
+                title=person.title,
+                background=person.background,
+                citation=_citation_label(person.citations, filenames),
+            )
+            for person in section.people
+        ]
         out_sections.append(
-            CompanySynthSectionResponse(key=section.key, title=section.title, points=points)
+            CompanySynthSectionResponse(
+                key=section.key, title=section.title, points=points, people=people
+            )
         )
     return CompanySynthesisResponse(sections=out_sections)
 
