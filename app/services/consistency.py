@@ -6,7 +6,10 @@ operand claims, and compares -- this is what the FinGround paper's 43%
 missed-computational-error number is about: a uniform detector that only
 checks a claim against its own citation never catches the case where the
 citation is byte-exact but the ARITHMETIC connecting it to other claims is
-wrong. Routes on `claim_type == "computational"` (SIM-364).
+wrong. Runs over both `computational` claims (parser-derived) and the
+`numerical` claims that financial-statement TABLE cells are emitted as --
+originally `computational`-only (SIM-364), but that made the pass inert on
+real income statements / balance sheets, whose figures are `numerical`.
 
 Match -> DERIVED_FROM edges, one row per operand (derived -> operand),
 `metadata_={"rule": ..., "operands": [...]}`, `created_by="consistency"`.
@@ -28,9 +31,11 @@ fixed-arity, single-entity relationships that fit that shape against the real
 `$defs/canonicalAttribute` vocabulary SIM-375 published
 (contracts/claims.schema.json) -- revenue x margin = gross profit; revenue -
 cogs = gross profit (the same relationship, two independent ways to check
-it); ebitda / revenue = ebitda_margin; gross profit - opex = ebitda. No
-valuation rule: `pre_money`/`investment`/`post_money` aren't in the 26
-`CoreAttribute` names -- they fall into the `operating_metric` escape valve,
+it); ebitda / revenue = ebitda_margin; gross profit - opex = ebitda;
+total_liabilities + total_equity = total_assets (the balance-sheet identity,
+also fixed-arity single-entity). No valuation rule:
+`pre_money`/`investment`/`post_money` aren't in the 26 `CoreAttribute` names
+-- they fall into the `operating_metric` escape valve,
 which isn't a fixed-arity formula target, so that relationship is dropped
 rather than hardcoded against names the vocabulary doesn't have. Deliberately
 NOT implemented, and not faked: "segments sum to total" (variable arity,
@@ -109,6 +114,18 @@ DEFAULT_RULES: tuple[Rule, ...] = (
         operand_attributes=("gross_profit", "opex"),
         formula=lambda o: o["gross_profit"] - o["opex"],
     ),
+    # The balance-sheet identity: total_assets = total_liabilities +
+    # total_equity. Fixed-arity, single-entity -- the exact shape this engine
+    # handles -- and all three names are canonical. Catches the staging-test
+    # NVDA break where Total Liabilities was extracted ~100x too small, so
+    # Assets != Liabilities + Equity by far more than the 5% tolerance; the
+    # total_assets claim is then flagged formula_mismatch (-> conflicted).
+    Rule(
+        name="total_assets_from_liabilities_and_equity",
+        derived_attribute="total_assets",
+        operand_attributes=("total_liabilities", "total_equity"),
+        formula=lambda o: o["total_liabilities"] + o["total_equity"],
+    ),
 )
 
 
@@ -186,12 +203,28 @@ async def reconcile_consistency(
 
     edges: list[dict] = []
     for attribute, attribute_rules in rules_by_attribute.items():
+        # Include `numerical` claims, not just `computational`. SIM-372's model
+        # assumed the parser tags a re-derivable figure `computational`, but in
+        # practice financial-statement TABLE cells are emitted `numerical`
+        # (emit.py), so restricting to `computational` made this pass inert on
+        # exactly the income-statement / balance-sheet figures whose identities
+        # we most need to check -- e.g. a 10-K whose extracted Revenue - COGS
+        # does not equal its extracted Gross Profit went unflagged. A figure is
+        # only ever a DERIVATION TARGET when its attribute is a rule's
+        # derived_attribute (gross_profit/ebitda/total_assets/...), so widening
+        # here cannot make an operand like `revenue` spuriously "derived"; it
+        # only lets an extracted derivable figure be checked against its
+        # operands. Matches still write derived_from edges only (no
+        # verification_method is set, so an internally-consistent figure is NOT
+        # promoted to a STRONG/verified status -- internal arithmetic is weaker
+        # evidence than external corroboration). A mismatch flags the derived
+        # claim formula_mismatch, which status_rollup demotes to conflicted.
         derived_candidates = [
             c
             for key, group in by_key.items()
             if key[3] == attribute and len(group) == 1
             for c in group
-            if c.claim_type == "computational"
+            if c.claim_type in ("computational", "numerical")
         ]
         for derived in derived_candidates:
             _check_derived(

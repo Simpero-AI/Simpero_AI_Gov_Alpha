@@ -203,6 +203,98 @@ async def test_mismatched_formula_flags_and_contradicts_never_resolves() -> None
         _delete_org(ORG)
 
 
+def _numerical_gross_profit_claims(*, derived_value: float) -> dict[str, Claim]:
+    """Like _gross_profit_claims, but the derived Gross Profit is a `numerical`
+    table cell -- how financial-statement figures are actually emitted -- not a
+    `computational` claim. Exercises the widened routing: an extracted figure
+    that violates revenue - cogs = gross_profit must still be flagged (the
+    staging-test NVDA case; before the widening this pass ignored it)."""
+    return {
+        "revenue": _claim(attribute="revenue", normalized=1_000_000),
+        "cogs": _claim(attribute="cogs", normalized=400_000),
+        "derived": _claim(
+            attribute="gross_profit", normalized=derived_value, claim_type="numerical"
+        ),
+    }
+
+
+@requires_db
+async def test_numerical_table_figure_flagged_on_mismatch() -> None:
+    """revenue - cogs = 600_000, but the extracted (numerical) Gross Profit
+    reads 150_000 -> flagged formula_mismatch, exactly as a computational one."""
+    _delete_org(ORG)
+    try:
+        ids = await _seed(ORG, _numerical_gross_profit_claims(derived_value=150_000))
+        summary = await _run_consistency(ORG, "run-1")
+        assert summary.contradicts_edges == 2
+        assert summary.claims_flagged == 1
+
+        _, claims = await _edges_and_claims(ORG)
+        assert "formula_mismatch" in (claims[ids["derived"]].flags or [])
+    finally:
+        _delete_org(ORG)
+
+
+@requires_db
+async def test_numerical_table_figure_match_does_not_promote_trust() -> None:
+    """A numerical Gross Profit that satisfies revenue - cogs writes
+    derived_from edges and is not flagged -- and, crucially for the trust
+    ladder, is NOT promoted: internal arithmetic consistency must never set a
+    STRONG verification_method (that is external corroboration's job)."""
+    _delete_org(ORG)
+    try:
+        ids = await _seed(ORG, _numerical_gross_profit_claims(derived_value=600_000))
+        summary = await _run_consistency(ORG, "run-1")
+        assert summary.derived_from_edges == 2
+        assert summary.contradicts_edges == 0
+        assert summary.claims_flagged == 0
+
+        _, claims = await _edges_and_claims(ORG)
+        assert not claims[ids["derived"]].flags
+        assert claims[ids["derived"]].verification_method is None
+    finally:
+        _delete_org(ORG)
+
+
+def _balance_sheet_claims(*, assets: float) -> dict[str, Claim]:
+    return {
+        "liabilities": _claim(attribute="total_liabilities", normalized=40_000_000),
+        "equity": _claim(attribute="total_equity", normalized=60_000_000),
+        "derived": _claim(attribute="total_assets", normalized=assets),
+    }
+
+
+@requires_db
+async def test_balance_sheet_identity_flags_when_it_does_not_balance() -> None:
+    """Assets 5_000_000 != Liabilities 40M + Equity 60M = 100M (far beyond
+    tolerance) -> total_assets flagged formula_mismatch. The staging-test NVDA
+    case: Total Liabilities extracted ~100x too small breaks A = L + E."""
+    _delete_org(ORG)
+    try:
+        ids = await _seed(ORG, _balance_sheet_claims(assets=5_000_000))
+        summary = await _run_consistency(ORG, "run-1")
+        assert summary.contradicts_edges == 2
+        assert summary.claims_flagged == 1
+
+        _, claims = await _edges_and_claims(ORG)
+        assert "formula_mismatch" in (claims[ids["derived"]].flags or [])
+    finally:
+        _delete_org(ORG)
+
+
+@requires_db
+async def test_balance_sheet_identity_holds_writes_derived_from() -> None:
+    _delete_org(ORG)
+    try:
+        await _seed(ORG, _balance_sheet_claims(assets=100_000_000))
+        summary = await _run_consistency(ORG, "run-1")
+        assert summary.derived_from_edges == 2
+        assert summary.contradicts_edges == 0
+        assert summary.claims_flagged == 0
+    finally:
+        _delete_org(ORG)
+
+
 @requires_db
 async def test_within_tolerance_still_matches() -> None:
     """currency = relative 5%: 201_000 is within 5% of the recomputed 200_000."""
@@ -248,14 +340,15 @@ async def test_missing_operand_skips_the_rule() -> None:
 
 
 @requires_db
-async def test_non_computational_derived_claim_is_not_routed() -> None:
-    """Routing is on claim_type == computational -- a claim that merely HAS
-    the derived attribute name but isn't typed computational must be
-    ignored, not treated as a formula result to verify."""
+async def test_derived_claim_outside_routed_types_is_not_routed() -> None:
+    """The pass routes claim_type in {computational, numerical} (numerical was
+    added so extracted table figures are checked). The gate is still selective:
+    a claim that merely HAS the derived attribute name but is typed OUTSIDE that
+    set (here "unknown") is ignored, not treated as a formula result to verify."""
     _delete_org(ORG)
     try:
         claims = _gross_profit_claims(derived_value=999_999)  # would mismatch if checked
-        claims["derived"].claim_type = "numerical"
+        claims["derived"].claim_type = "unknown"
         await _seed(ORG, claims)
         summary = await _run_consistency(ORG, "run-1")
         assert summary.derived_from_edges == 0
