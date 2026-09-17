@@ -340,14 +340,15 @@ async def test_missing_operand_skips_the_rule() -> None:
 
 
 @requires_db
-async def test_non_computational_derived_claim_is_not_routed() -> None:
-    """Routing is on claim_type == computational -- a claim that merely HAS
-    the derived attribute name but isn't typed computational must be
-    ignored, not treated as a formula result to verify."""
+async def test_derived_claim_outside_routed_types_is_not_routed() -> None:
+    """The pass routes claim_type in {computational, numerical} (numerical was
+    added so extracted table figures are checked). The gate is still selective:
+    a claim that merely HAS the derived attribute name but is typed OUTSIDE that
+    set (here "unknown") is ignored, not treated as a formula result to verify."""
     _delete_org(ORG)
     try:
         claims = _gross_profit_claims(derived_value=999_999)  # would mismatch if checked
-        claims["derived"].claim_type = "numerical"
+        claims["derived"].claim_type = "unknown"
         await _seed(ORG, claims)
         summary = await _run_consistency(ORG, "run-1")
         assert summary.derived_from_edges == 0
