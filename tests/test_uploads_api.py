@@ -392,7 +392,7 @@ def test_complete_happy_path_creates_row_enqueues_one_job_writes_one_audit_row(
 
     assert resp.status_code == 200
     body = resp.json()
-    assert body == {"id": upload_id, "status": "pending"}
+    assert body == {"id": upload_id, "status": "pending", "pageCount": None}
 
     # Exactly one data_source row, status='pending'.
     with owner_conn.cursor() as cur:

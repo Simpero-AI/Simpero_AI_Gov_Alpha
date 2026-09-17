@@ -134,4 +134,4 @@ def test_complete_reachable_through_real_app(
     )
 
     assert resp.status_code == 200, resp.text
-    assert resp.json() == {"id": upload_id, "status": "pending"}
+    assert resp.json() == {"id": upload_id, "status": "pending", "pageCount": None}
