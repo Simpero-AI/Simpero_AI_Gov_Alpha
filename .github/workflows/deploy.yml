@@ -284,7 +284,7 @@ jobs:
       - name: Health check
         run: |
           for path in /api/health /api/health/db /api/health/queue; do
-            curl --fail -L --retry 5 --retry-delay 5 \
+            curl --fail -L --retry 5 --retry-delay 5 --retry-connrefused \
               --resolve "${{ secrets.BACKEND_HOSTNAME }}:443:${{ secrets.DROPLET_HOST }}" \
               --resolve "${{ secrets.BACKEND_HOSTNAME }}:80:${{ secrets.DROPLET_HOST }}" \
               "https://${{ secrets.BACKEND_HOSTNAME }}${path}"
