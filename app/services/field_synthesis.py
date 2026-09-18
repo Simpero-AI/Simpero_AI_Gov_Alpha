@@ -24,6 +24,7 @@ the section is simply absent. The claims-driven view is never affected.
 
 import asyncio
 import logging
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -380,13 +381,18 @@ _PEOPLE_SYSTEM = (
     "single entry citing all the excerpts that mention them.\n"
     "- Report people at the TARGET company only, not an advisor, investor, or "
     "customer mentioned in passing.\n"
+    f"- Report at most {_MAX_PEOPLE} people. If more are named, choose the "
+    f"{_MAX_PEOPLE} most senior (by title) or most clearly described -- never "
+    "truncate an entry mid-way to fit more people in.\n"
     "- If the excerpts do not name any people, set found=false and return no people."
 )
 
 _PEOPLE_TOOL: "ToolParam" = {
     "name": "report_people",
     "description": (
-        "Report the grounded people (founders, executives, directors), each citing its excerpt ids."
+        "Report the grounded people (founders, executives, directors), each citing "
+        f"its excerpt ids. At most {_MAX_PEOPLE} people -- if more are named, report "
+        "only the most senior/clearly described ones."
     ),
     "input_schema": {
         "type": "object",
@@ -399,7 +405,10 @@ _PEOPLE_TOOL: "ToolParam" = {
             },
             "people": {
                 "type": "array",
-                "description": "Grounded people; empty when found is false.",
+                "description": (
+                    f"Grounded people, at most {_MAX_PEOPLE}; empty when found is false."
+                ),
+                "maxItems": _MAX_PEOPLE,
                 "items": {
                     "type": "object",
                     "properties": {
@@ -596,8 +605,14 @@ def _verify_people(raw: Any, hits: Sequence[ChunkHit]) -> list[SynthPerson]:
         matched = [by_id[c] for c in cited if isinstance(c, str) and c in by_id]
         if not matched:
             continue  # every cited id was invented -> ungrounded -> drop
+        # Word-boundary match (not raw substring) so this applies uniformly
+        # regardless of surname length -- a short surname like "Li" or "Wu"
+        # would otherwise skip the gate entirely (raw substring would also
+        # false-positive inside an unrelated word like "liability"; \b avoids
+        # both problems without needing a length cutoff).
         surname = name.split()[-1].casefold()
-        if len(surname) >= 3 and not any(surname in h.content.casefold() for h in matched):
+        surname_re = re.compile(r"\b" + re.escape(surname) + r"\b")
+        if not any(surname_re.search(h.content.casefold()) for h in matched):
             continue  # citation resolves, but the name isn't actually in the text -> drop
         key = name.casefold()
         if key in seen:
@@ -692,7 +707,11 @@ async def generate(
                 hits=hits,
                 system=_PEOPLE_SYSTEM if spec.people else _SYSTEM,
                 tool=_PEOPLE_TOOL if spec.people else _TOOL,
-                max_tokens=2048 if spec.people else 1024,
+                # People budget sized for _MAX_PEOPLE (12) entries at up to
+                # _MAX_NAME_CHARS+_MAX_TITLE_CHARS+_MAX_POINT_CHARS chars each
+                # plus JSON/chunk_ids overhead -- 2048 could truncate a
+                # leadership-heavy document (board/team page) mid-tool-call.
+                max_tokens=4096 if spec.people else 1024,
             )
         except Exception:
             logger.warning(

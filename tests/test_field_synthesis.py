@@ -380,6 +380,29 @@ def test_drops_a_person_whose_surname_is_not_in_the_cited_chunk_text():
     assert _verify_people(raw, [h1]) == []
 
 
+def test_surname_gate_applies_to_short_surnames_too():
+    # A short surname (< 3 chars) must not bypass the gate: it's still
+    # invented/misattributed here, just as it would be for a longer name.
+    h1 = _hit(page=7, content="The CEO has twenty years of industry experience.")
+    raw = {"found": True, "people": [{"name": "John Wu", "chunk_ids": ["c1"]}]}
+    assert _verify_people(raw, [h1]) == []
+
+
+def test_surname_gate_matches_on_word_boundary_not_raw_substring():
+    # A real, standalone "Li" (word-boundary match) passes...
+    h1 = _hit(page=3, document_id="doc-a", content="Li is the founder and CEO.")
+    raw = {"found": True, "people": [{"name": "James Li", "chunk_ids": ["c1"]}]}
+    (person,) = _verify_people(raw, [h1])
+    assert person.name == "James Li"
+
+    # ...but "Li" appearing only as a substring of an unrelated word
+    # ("liability") must NOT count as a match -- a raw `in` substring check
+    # would false-positive here and let an invented "James Li" through.
+    h2 = _hit(page=4, document_id="doc-b", content="The company disclosed a contingent liability.")
+    raw2 = {"found": True, "people": [{"name": "James Li", "chunk_ids": ["c1"]}]}
+    assert _verify_people(raw2, [h2]) == []
+
+
 async def test_leadership_section_reaches_ok_via_people_only_result(monkeypatch, caplog):
     # The leadership section reports via `people`, not `points` -- pin that the
     # reason-code classification treats a people-only result as "ok" (grounded),
