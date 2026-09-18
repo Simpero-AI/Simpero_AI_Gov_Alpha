@@ -17,6 +17,7 @@ from app.repo.DataSourceRepo import DataSourceRepo
 from app.repo.HumanAuditRepo import HumanAuditRepo
 from app.schemas.public_uploads import PublicCompleteRequest, PublicPresignRequest
 from app.schemas.uploads import CompleteResponse, PresignResponse
+from app.services.uploads.pdf import resolve_page_count
 from app.services.uploads.spaces import build_object_key, head_object_size, presign_put
 
 logger = logging.getLogger(__name__)
@@ -206,6 +207,8 @@ async def complete_upload(
             },
         )
 
+    page_count = await resolve_page_count(body.filename, storage_key, MAX_UPLOAD_BYTES)
+
     # The real ceiling enforcement (advisory-locked) -- /presigned-url's own
     # check above is a courtesy only and can't prevent a race between two
     # concurrent /complete calls for the same link.
@@ -258,4 +261,4 @@ async def complete_upload(
         }
     )
 
-    return CompleteResponse(id=data_source.id, status=data_source.status)
+    return CompleteResponse(id=data_source.id, status=data_source.status, page_count=page_count)

@@ -154,8 +154,12 @@ Document parsing (Docling-based PDF/XLSX/DOCX parsing, formerly
 standalone repo, **Simpero_Gov_AI_Services**, as a separate FastAPI service
 with its own Dockerfile, dependency lockfile, and CI (the actual split was
 done with `git filter-repo`, preserving history — see that repo's own
-commits). This app no longer imports Docling, pypdf, openpyxl, or boto3 —
-see the note next to `dependencies` in `pyproject.toml`.
+commits). This app does not import Docling or openpyxl. `pypdf` is a narrow,
+sanctioned exception: it's a direct dependency here solely for
+`app/services/uploads/pdf.py`'s synchronous page count on
+`/uploads/{id}/complete` (so the frontend can reject an over-length PDF at
+upload time) — never for document parsing/extraction, which stays split out.
+See the note next to `dependencies` in `pyproject.toml`.
 
 **Integration today: none, wired up.** As of this repo's copy of
 Simpero_Gov_AI_Services, that service exposes only a synchronous

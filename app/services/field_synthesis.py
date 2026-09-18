@@ -24,6 +24,7 @@ the section is simply absent. The claims-driven view is never affected.
 
 import asyncio
 import logging
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -46,6 +47,10 @@ _EXCERPT_CHARS = 1500
 # Display caps per section: a snapshot, not an essay.
 _MAX_POINTS = 8
 _MAX_POINT_CHARS = 320
+# Leadership (people) section caps. Background reuses _MAX_POINT_CHARS.
+_MAX_PEOPLE = 12
+_MAX_NAME_CHARS = 120
+_MAX_TITLE_CHARS = 160
 # Sparse-only until embeddings are backfilled (every chunk's embedding is NULL
 # today, so the dense leg matches nothing regardless). Retrieval is built so
 # flipping this to include a dense weight + a query vector is the only change.
@@ -65,6 +70,7 @@ class SectionSpec:
     title: str
     question: str
     query: str
+    people: bool = False
 
 
 # The narrative sections synthesized per deal. The first five feed the Company
@@ -141,6 +147,15 @@ COMPANY_SECTIONS: tuple[SectionSpec, ...] = (
             "guidance capital allocation initiatives"
         ),
     ),
+    SectionSpec(
+        "leadership",
+        "Leadership",
+        "Who are the company's founders, executives, and directors -- their names, "
+        "roles, and stated background?",
+        "founders chief executive officer chairman managing director management team "
+        "executives directors appointed biography background prior experience career role",
+        people=True,
+    ),
 )
 
 
@@ -192,13 +207,65 @@ class SynthPoint:
 
 
 @dataclass(frozen=True)
+class SynthPerson:
+    """One grounded leadership entry: name/title/background plus the same
+    (document, page) citation + chunk-id provenance pattern as SynthPoint."""
+
+    name: str
+    title: str | None
+    background: str | None
+    citations: list[SynthCitation]
+    chunk_ids: list[str]
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "title": self.title,
+            "background": self.background,
+            "citations": [c.to_json() for c in self.citations],
+            "chunk_ids": list(self.chunk_ids),
+        }
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any]) -> "SynthPerson":
+        raw_cites = data.get("citations")
+        citations = [
+            SynthCitation.from_json(c)
+            for c in (raw_cites if isinstance(raw_cites, list) else [])
+            if isinstance(c, dict)
+        ]
+        raw_chunks = data.get("chunk_ids")
+        chunk_ids = [str(c) for c in raw_chunks] if isinstance(raw_chunks, list) else []
+        title = data.get("title")
+        background = data.get("background")
+        return cls(
+            name=str(data.get("name", "")),
+            title=title if isinstance(title, str) else None,
+            background=background if isinstance(background, str) else None,
+            citations=citations,
+            chunk_ids=chunk_ids,
+        )
+
+
+@dataclass(frozen=True)
 class SectionSynthesis:
+    """A section carries `points` (the six prose sections) or `people` (the
+    leadership section) -- never conceptually both -- but both fields always
+    exist so an old persisted row with no `people` key still degrades
+    gracefully to an empty list rather than raising."""
+
     key: str
     title: str
     points: list[SynthPoint] = field(default_factory=list)
+    people: list[SynthPerson] = field(default_factory=list)
 
     def to_json(self) -> dict[str, Any]:
-        return {"key": self.key, "title": self.title, "points": [p.to_json() for p in self.points]}
+        return {
+            "key": self.key,
+            "title": self.title,
+            "points": [p.to_json() for p in self.points],
+            "people": [p.to_json() for p in self.people],
+        }
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> "SectionSynthesis":
@@ -208,7 +275,18 @@ class SectionSynthesis:
             for p in (raw_points if isinstance(raw_points, list) else [])
             if isinstance(p, dict)
         ]
-        return cls(key=str(data.get("key", "")), title=str(data.get("title", "")), points=points)
+        raw_people = data.get("people")
+        people = [
+            SynthPerson.from_json(p)
+            for p in (raw_people if isinstance(raw_people, list) else [])
+            if isinstance(p, dict)
+        ]
+        return cls(
+            key=str(data.get("key", "")),
+            title=str(data.get("title", "")),
+            points=points,
+            people=people,
+        )
 
 
 def sections_to_json(sections: Sequence[SectionSynthesis]) -> list[dict[str, Any]]:
@@ -286,6 +364,87 @@ _TOOL: "ToolParam" = {
 }
 
 
+_PEOPLE_SYSTEM = (
+    "You are a private-equity diligence analyst. You are given numbered excerpts "
+    "from a target company's OWN documents and asked to identify its leadership.\n\n"
+    "Hard rules:\n"
+    "- Use ONLY the excerpts provided. Extract only people actually named in them; "
+    "never infer, guess, or introduce a person, title, or background fact not "
+    "stated in the excerpts.\n"
+    "- Ground every person in specific excerpts and cite their [c#] id(s). Never "
+    "cite an id that is not in the list, and never report a person you cannot cite.\n"
+    "- `title` is the person's stated role (e.g. Chief Executive Officer, Chairman, "
+    "Director); leave it null if no title is stated.\n"
+    "- `background` is a short, concrete summary of their stated prior experience "
+    "or biography; leave it null if the excerpts state none.\n"
+    "- One entry per person -- merge duplicate mentions of the same person into a "
+    "single entry citing all the excerpts that mention them.\n"
+    "- Report people at the TARGET company only, not an advisor, investor, or "
+    "customer mentioned in passing.\n"
+    f"- Report at most {_MAX_PEOPLE} people. If more are named, choose the "
+    f"{_MAX_PEOPLE} most senior (by title) or most clearly described -- never "
+    "truncate an entry mid-way to fit more people in.\n"
+    "- If the excerpts do not name any people, set found=false and return no people."
+)
+
+_PEOPLE_TOOL: "ToolParam" = {
+    "name": "report_people",
+    "description": (
+        "Report the grounded people (founders, executives, directors), each citing "
+        f"its excerpt ids. At most {_MAX_PEOPLE} people -- if more are named, report "
+        "only the most senior/clearly described ones."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "found": {
+                "type": "boolean",
+                "description": (
+                    "true if the excerpts name people at the company; false otherwise."
+                ),
+            },
+            "people": {
+                "type": "array",
+                "description": (
+                    f"Grounded people, at most {_MAX_PEOPLE}; empty when found is false."
+                ),
+                "maxItems": _MAX_PEOPLE,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "The person's full name, as stated in the excerpts.",
+                        },
+                        "title": {
+                            "type": ["string", "null"],
+                            "description": "Their stated title/role, or null if not stated.",
+                        },
+                        "background": {
+                            "type": ["string", "null"],
+                            "description": (
+                                "A short summary of their stated prior experience/biography, "
+                                "or null if not stated."
+                            ),
+                        },
+                        "chunk_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "The [c#] excerpt id(s) this person is grounded in; "
+                                "never invent one."
+                            ),
+                        },
+                    },
+                    "required": ["name", "chunk_ids"],
+                },
+            },
+        },
+        "required": ["found", "people"],
+    },
+}
+
+
 def _excerpt_id(index: int) -> str:
     """The short, model-facing id for the index-th retrieved chunk ("c1", "c2")."""
     return f"c{index + 1}"
@@ -308,21 +467,32 @@ def _build_user_message(*, question: str, company: str, hits: Sequence[ChunkHit]
 
 
 def _call_model(
-    *, api_key: str, model: str, question: str, company: str, hits: list[ChunkHit]
+    *,
+    api_key: str,
+    model: str,
+    question: str,
+    company: str,
+    hits: list[ChunkHit],
+    system: str,
+    tool: "ToolParam",
+    max_tokens: int,
 ) -> Any:
     """Blocking Anthropic call -- forced tool use gives a structured result
     without relying on the model to format JSON in free text. Run via
     asyncio.to_thread so it never blocks the event loop. Returns the tool input
-    dict ({found, points}) or None if the model did not call the tool."""
+    dict (e.g. {found, points} or {found, people}) or None if the model did not
+    call the tool. `system`/`tool`/`max_tokens` are passed explicitly since the
+    people (leadership) call uses a different prompt, tool, and token budget
+    than the points call."""
     import anthropic
 
     client = anthropic.Anthropic(api_key=api_key, timeout=_LLM_TIMEOUT_S)
     message = client.messages.create(
         model=model,
-        max_tokens=1024,
-        system=_SYSTEM,
-        tools=[_TOOL],
-        tool_choice={"type": "tool", "name": _TOOL["name"]},
+        max_tokens=max_tokens,
+        system=system,
+        tools=[tool],
+        tool_choice={"type": "tool", "name": tool["name"]},
         messages=[
             {
                 "role": "user",
@@ -343,7 +513,7 @@ def _call_model(
         # runtime `type` check, so read defensively (mirrors screening_insights).
         if getattr(block, "type", None) != "tool_use":
             continue
-        if getattr(block, "name", None) != _TOOL["name"]:
+        if getattr(block, "name", None) != tool["name"]:
             continue
         data = getattr(block, "input", None)
         if isinstance(data, dict):
@@ -395,6 +565,78 @@ def _verify_points(raw: Any, hits: Sequence[ChunkHit]) -> list[SynthPoint]:
         chunk_ids = [str(h.chunk_id) for h in matched]
         out.append(SynthPoint(text=text, citations=citations, chunk_ids=chunk_ids))
         if len(out) >= _MAX_POINTS:
+            break
+    return out
+
+
+def _verify_people(raw: Any, hits: Sequence[ChunkHit]) -> list[SynthPerson]:
+    """Deterministic grounding gate for the leadership section, structured like
+    _verify_points with one extra gate: a person survives only if (1) they cite a
+    real retrieved excerpt id AND (2) their surname actually appears in the text
+    of at least one of those resolved chunks -- a person whose citation is
+    structurally valid but whose name the model invented (or attached to the
+    wrong excerpt) is still dropped."""
+    if not isinstance(raw, dict) or not raw.get("found"):
+        return []
+    people = raw.get("people")
+    if not isinstance(people, list):
+        return []
+    by_id = {_excerpt_id(i): hit for i, hit in enumerate(hits)}
+    out: list[SynthPerson] = []
+    seen: set[str] = set()
+    for person in people:
+        if not isinstance(person, dict):
+            continue
+        name = person.get("name")
+        cited = person.get("chunk_ids")
+        if not isinstance(name, str) or not isinstance(cited, list):
+            continue
+        name = " ".join(name.split()).strip()
+        if not name or len(name) > _MAX_NAME_CHARS:
+            continue
+        title = person.get("title")
+        title = " ".join(title.split()).strip() if isinstance(title, str) else ""
+        if len(title) > _MAX_TITLE_CHARS:
+            continue
+        background = person.get("background")
+        background = " ".join(background.split()).strip() if isinstance(background, str) else ""
+        if len(background) > _MAX_POINT_CHARS:
+            continue
+        matched = [by_id[c] for c in cited if isinstance(c, str) and c in by_id]
+        if not matched:
+            continue  # every cited id was invented -> ungrounded -> drop
+        # Word-boundary match (not raw substring) so this applies uniformly
+        # regardless of surname length -- a short surname like "Li" or "Wu"
+        # would otherwise skip the gate entirely (raw substring would also
+        # false-positive inside an unrelated word like "liability"; \b avoids
+        # both problems without needing a length cutoff).
+        surname = name.split()[-1].casefold()
+        surname_re = re.compile(r"\b" + re.escape(surname) + r"\b")
+        if not any(surname_re.search(h.content.casefold()) for h in matched):
+            continue  # citation resolves, but the name isn't actually in the text -> drop
+        key = name.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        citations: list[SynthCitation] = []
+        cite_seen: set[tuple[str, int | None]] = set()
+        for h in matched:
+            ck = (str(h.document_id), h.page)
+            if ck in cite_seen:
+                continue
+            cite_seen.add(ck)
+            citations.append(SynthCitation(document_id=str(h.document_id), page=h.page))
+        chunk_ids = [str(h.chunk_id) for h in matched]
+        out.append(
+            SynthPerson(
+                name=name,
+                title=title or None,
+                background=background or None,
+                citations=citations,
+                chunk_ids=chunk_ids,
+            )
+        )
+        if len(out) >= _MAX_PEOPLE:
             break
     return out
 
@@ -463,28 +705,44 @@ async def generate(
                 question=spec.question,
                 company=company,
                 hits=hits,
+                system=_PEOPLE_SYSTEM if spec.people else _SYSTEM,
+                tool=_PEOPLE_TOOL if spec.people else _TOOL,
+                # People budget sized for _MAX_PEOPLE (12) entries at up to
+                # _MAX_NAME_CHARS+_MAX_TITLE_CHARS+_MAX_POINT_CHARS chars each
+                # plus JSON/chunk_ids overhead -- 2048 could truncate a
+                # leadership-heavy document (board/team page) mid-tool-call.
+                max_tokens=4096 if spec.people else 1024,
             )
         except Exception:
             logger.warning(
                 "field-synthesis LLM call failed for %r/%s", company, spec.key, exc_info=True
             )
             return ("llm_error", None)
-        points = _verify_points(raw, hits)
-        if points:
-            return ("ok", SectionSynthesis(key=spec.key, title=spec.title, points=points))
-        # No point survived. Separate the three distinct empty causes -- they point
+        # The leadership section verifies/reports via `people` instead of `points`;
+        # everything else about the reason-code classification below is shared.
+        result_key = "people" if spec.people else "points"
+        if spec.people:
+            people = _verify_people(raw, hits)
+            if people:
+                return ("ok", SectionSynthesis(key=spec.key, title=spec.title, people=people))
+        else:
+            points = _verify_points(raw, hits)
+            if points:
+                return ("ok", SectionSynthesis(key=spec.key, title=spec.title, points=points))
+        # Nothing survived. Separate the three distinct empty causes -- they point
         # at different fixes: model_no_tool_call (the model returned no structured
         # tool call at all -> prompt/model), model_no_answer (it answered found=false
         # -> retrieval/query didn't surface the section), and ungrounded (it answered
-        # with points but the grounding gate dropped every one as citing an
-        # unretrieved id -> prompt/gate).
+        # with points/people but the grounding gate dropped every one as citing an
+        # unretrieved id, or (people only) failing the surname-presence gate ->
+        # prompt/gate).
         if raw is None:
             return ("model_no_tool_call", None)
         model_answered = (
             isinstance(raw, dict)
             and bool(raw.get("found"))
-            and isinstance(raw.get("points"), list)
-            and bool(raw.get("points"))
+            and isinstance(raw.get(result_key), list)
+            and bool(raw.get(result_key))
         )
         return ("ungrounded" if model_answered else "model_no_answer", None)
 

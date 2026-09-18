@@ -320,15 +320,30 @@ class CompanySynthPointResponse(CamelModel):
     citation: str | None = None
 
 
+class CompanySynthPersonResponse(CamelModel):
+    """One grounded leadership entry (field_synthesis "leadership" section): a
+    person's name plus their stated title/background and the "file · p.N"
+    citation(s) they were verified against. `title`/`background`/`citation` are
+    null when the excerpts didn't state them or a citation resolved to nothing."""
+
+    name: str
+    title: str | None = None
+    background: str | None = None
+    citation: str | None = None
+
+
 class CompanySynthSectionResponse(CamelModel):
     """One synthesized narrative section of the Company tab (e.g. overview,
     risks). `key` matches the build_company_view section names so the FE can slot
     it into the same box; a section absent from the list produced no grounded
-    point (no chunks, no answer, or the LLM pass was unavailable)."""
+    point (no chunks, no answer, or the LLM pass was unavailable). A section
+    carries `points` (the six prose sections) or `people` (the "leadership"
+    section) -- never conceptually both -- but both fields are always present."""
 
     key: str
     title: str
     points: list[CompanySynthPointResponse] = []
+    people: list[CompanySynthPersonResponse] = []
 
 
 class CompanySynthesisResponse(CamelModel):

@@ -243,7 +243,7 @@ async def test_complete_creates_row_matching_authenticated_shape_sets_intake_lin
     )
 
     assert resp.status_code == 200
-    assert resp.json() == {"id": upload_id, "status": "pending"}
+    assert resp.json() == {"id": upload_id, "status": "pending", "pageCount": None}
 
     with owner_conn.cursor() as cur:
         cur.execute(

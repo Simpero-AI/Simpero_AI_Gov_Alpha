@@ -149,6 +149,28 @@ def get_json_object(bucket: str, key: str) -> dict:
     return json.loads(response["Body"].read())
 
 
+def get_object_bytes(key: str, max_bytes: int) -> bytes:
+    """Chunked GET into memory, bounded by max_bytes -- same
+    ObjectTooLargeError contract as stream_and_hash, so a caller reading the
+    whole object (e.g. for a synchronous page count) never buffers more than
+    the upload cap regardless of what's actually stored.
+    """
+    settings = get_settings()
+    response = _client().get_object(Bucket=settings.spaces_bucket, Key=key)
+    body = response["Body"]
+    chunks: list[bytes] = []
+    bytes_read = 0
+    while True:
+        chunk = body.read(_CHUNK_SIZE)
+        if not chunk:
+            break
+        bytes_read += len(chunk)
+        if bytes_read > max_bytes:
+            raise ObjectTooLargeError(f"object {key!r} exceeds {max_bytes} bytes")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 def stream_and_hash(key: str, max_bytes: int | None = None) -> str:
     """Chunked GET + SHA-256 over the object body, reading in fixed
     _CHUNK_SIZE reads -- never buffers the whole object in memory.

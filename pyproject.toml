@@ -30,12 +30,17 @@ dependencies = [
     # dependencies-not-dev-group reasoning as jsonschema above.
     "pyyaml>=6.0",
     "anthropic>=1.2.0",
+    # Narrow re-add after the Docling split note below -- only used for
+    # PdfReader(...).pages length in app/services/uploads/pdf.py, the
+    # synchronous page-count gate on /uploads/{id}/complete. Never used for
+    # document parsing/extraction, which stays split out.
+    "pypdf>=5.0.0",
 ]
-# Docling/pypdf/openpyxl (the parse-service-only deps) left with
-# services/parser + tests/parser in the Simpero_Gov_AI_Services split
-# (2026-07-17) — this app never imports them. boto3 stays: kept for future
-# Spaces access from this app (e.g. an upload path), not because anything
-# here uses it yet.
+# Docling/openpyxl (the parse-service-only deps) left with services/parser +
+# tests/parser in the Simpero_Gov_AI_Services split (2026-07-17) — this app
+# doesn't import them. pypdf came back above, scoped to page-count only.
+# boto3 stays: kept for future Spaces access from this app (e.g. an upload
+# path), not because anything here uses it yet.
 
 [dependency-groups]
 dev = [
