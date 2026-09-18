@@ -645,9 +645,15 @@ def _rank_key(claim: Claim) -> tuple[int, int, int, int, float]:
     is_historical = 0 if claim.period_kind in ("E", "P") else 1
     year = claim.period_year if claim.period_year is not None else -1
     normalized = claim.value.get("normalized") if isinstance(claim.value, dict) else None
-    has_number = isinstance(normalized, (int, float)) and not isinstance(normalized, bool)
     is_ratio = _value_type(claim) in ("percent", "ratio")
-    magnitude = 0.0 if is_ratio else (abs(normalized) if has_number else float("-inf"))
+    if is_ratio:
+        # A bigger percentage is not a "better" figure; neutralize magnitude for
+        # ratios so consolidated_rank (above) is what picks the right one.
+        magnitude = 0.0
+    elif isinstance(normalized, (int, float)) and not isinstance(normalized, bool):
+        magnitude = abs(normalized)
+    else:
+        magnitude = float("-inf")
     return (
         is_historical,
         year,
