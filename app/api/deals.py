@@ -81,6 +81,7 @@ from app.schemas.deals import (
     UpdateDealRequest,
     ValueDelta,
 )
+from app.schemas.ic_sign_off import IcSignOffResponse, RecordIcSignOffRequest
 from app.schemas.intake_link import (
     CreateIntakeLinkRequest,
     CreateIntakeLinkResponse,
@@ -1259,6 +1260,73 @@ async def list_deal_documents(
         )
         for document in documents
     ]
+
+
+@router.get("/{deal_id}/ic-sign-off", response_model=IcSignOffResponse | None)
+async def get_ic_sign_off(
+    deal_id: uuid.UUID, db: AsyncSession = Depends(get_db)
+) -> IcSignOffResponse | None:
+    """The current IC decision for a deal — the latest `ic_sign_off` audit
+    event, or null when none has been recorded yet (the UI shows its empty
+    state). Org-scoped by RLS; a deal in another org 404s via the DealRepo
+    lookup rather than leaking rows."""
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    row = await HumanAuditRepo(db).latest_for_deal_by_event(deal_id, "ic_sign_off")
+    if row is None:
+        return None
+    payload = row.payload or {}
+    return IcSignOffResponse(
+        decision=cast(Any, payload.get("decision")),
+        notes=payload.get("notes"),
+        actor_email=row.actor_email,
+        created_at=row.created_at,
+    )
+
+
+@router.post(
+    "/{deal_id}/ic-sign-off",
+    response_model=IcSignOffResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def record_ic_sign_off(
+    deal_id: uuid.UUID,
+    body: RecordIcSignOffRequest,
+    claims: dict[str, Any] = Depends(get_claims),
+    db: AsyncSession = Depends(get_db),
+) -> IcSignOffResponse:
+    """Record an IC approve/decline on a deal. Append-only: each call writes a
+    new `ic_sign_off` row in human_audit_log (decision + notes in the payload),
+    so the decision history is preserved and the latest row is the current
+    verdict. Mirrors PUT /mandate's actor+audit pattern."""
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    org_id, actor_id, actor_email, _user_id = await _actor(db, claims)
+    row = await HumanAuditRepo(db).append(
+        {
+            "org_id": org_id,
+            "actor_id": actor_id,
+            "actor_email": actor_email,
+            "event_type": "ic_sign_off",
+            "deal_id": deal_id,
+            "payload": {"decision": body.decision, "notes": body.notes},
+        }
+    )
+    # Flush then refresh created_at: it is a server default (func.now()), so it is
+    # unpopulated until fetched, and touching it lazily would raise MissingGreenlet
+    # under async. Load it explicitly in the async context, as public_intake does.
+    await db.flush()
+    await db.refresh(row, attribute_names=["created_at"])
+    return IcSignOffResponse(
+        decision=body.decision,
+        notes=body.notes,
+        actor_email=actor_email,
+        created_at=row.created_at,
+    )
 
 
 @router.get("/{deal_id}/audit", response_model=list[ActivityRowResponse])
