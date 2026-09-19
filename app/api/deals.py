@@ -1224,7 +1224,10 @@ async def record_deal_checklist_item(
             "payload": {"item_id": item_id, "description": description, "assignee": assignee},
         }
     )
+    # Refresh created_at (a server default) in the async context; touching it lazily
+    # after flush would raise MissingGreenlet. See public_intake's submitted_at.
     await db.flush()
+    await db.refresh(row, attribute_names=["created_at"])
     return ChecklistItemResponse(
         item_id=item_id,
         description=description,
