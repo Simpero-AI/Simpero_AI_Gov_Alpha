@@ -441,6 +441,9 @@ def test_findings_empty_when_absent(client, owner_conn, seeded_org):
 def test_findings_log_then_read(client, owner_conn, seeded_org):
     deal_id = _seed_deal(owner_conn, seeded_org["org_pk"])
     _authed(seeded_org["clerk_org_id"], "user-1")
+    # Give the actor an email so the "logged by" surfacing is exercised (the
+    # JIT-provisioned test user has none until a profile is synced).
+    client.post("/auth/sync-profile", json={"name": "Ana Lyst", "email": "ana@example.com"})
 
     post = client.post(
         f"/deals/{deal_id}/findings",
@@ -455,7 +458,7 @@ def test_findings_log_then_read(client, owner_conn, seeded_org):
     created = post.json()
     assert created["status"] == "open"
     assert created["findingId"]
-    assert created["actorEmail"]
+    assert created["actorEmail"] == "ana@example.com"
 
     body = client.get(f"/deals/{deal_id}/findings").json()
     assert body["openCount"] == 1
@@ -470,6 +473,8 @@ def test_findings_log_then_read(client, owner_conn, seeded_org):
 def test_findings_resolve_moves_to_resolved(client, owner_conn, seeded_org):
     deal_id = _seed_deal(owner_conn, seeded_org["org_pk"])
     _authed(seeded_org["clerk_org_id"], "user-1")
+    # Give the actor an email so the "resolved by" surfacing is exercised.
+    client.post("/auth/sync-profile", json={"name": "Ana Lyst", "email": "ana@example.com"})
 
     finding_id = client.post(
         f"/deals/{deal_id}/findings",
@@ -479,7 +484,7 @@ def test_findings_resolve_moves_to_resolved(client, owner_conn, seeded_org):
     resolve = client.post(f"/deals/{deal_id}/findings/{finding_id}/resolve")
     assert resolve.status_code == 200
     assert resolve.json()["status"] == "resolved"
-    assert resolve.json()["resolvedBy"]
+    assert resolve.json()["resolvedBy"] == "ana@example.com"
 
     body = client.get(f"/deals/{deal_id}/findings").json()
     assert body["openCount"] == 0
