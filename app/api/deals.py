@@ -40,6 +40,11 @@ from app.schemas.checklist import (
     SetChecklistItemStatusRequest,
 )
 from app.schemas.common import SuccessResponse
+from app.schemas.deal_note import (
+    DealNoteKind,
+    DealNoteResponse,
+    RecordDealNoteRequest,
+)
 from app.schemas.deals import (
     AvgAiScoreStat,
     CompanyFactResponse,
@@ -86,6 +91,7 @@ from app.schemas.finding import (
     FindingsResponse,
     RecordFindingRequest,
 )
+from app.schemas.ic_sign_off import IcSignOffResponse, RecordIcSignOffRequest
 from app.schemas.intake_link import (
     CreateIntakeLinkRequest,
     CreateIntakeLinkResponse,
@@ -1273,6 +1279,73 @@ async def list_deal_documents(
     ]
 
 
+@router.get("/{deal_id}/ic-sign-off", response_model=IcSignOffResponse | None)
+async def get_ic_sign_off(
+    deal_id: uuid.UUID, db: AsyncSession = Depends(get_db)
+) -> IcSignOffResponse | None:
+    """The current IC decision for a deal — the latest `ic_sign_off` audit
+    event, or null when none has been recorded yet (the UI shows its empty
+    state). Org-scoped by RLS; a deal in another org 404s via the DealRepo
+    lookup rather than leaking rows."""
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    row = await HumanAuditRepo(db).latest_for_deal_by_event(deal_id, "ic_sign_off")
+    if row is None:
+        return None
+    payload = row.payload or {}
+    return IcSignOffResponse(
+        decision=cast(Any, payload.get("decision")),
+        notes=payload.get("notes"),
+        actor_email=row.actor_email,
+        created_at=row.created_at,
+    )
+
+
+@router.post(
+    "/{deal_id}/ic-sign-off",
+    response_model=IcSignOffResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def record_ic_sign_off(
+    deal_id: uuid.UUID,
+    body: RecordIcSignOffRequest,
+    claims: dict[str, Any] = Depends(get_claims),
+    db: AsyncSession = Depends(get_db),
+) -> IcSignOffResponse:
+    """Record an IC approve/decline on a deal. Append-only: each call writes a
+    new `ic_sign_off` row in human_audit_log (decision + notes in the payload),
+    so the decision history is preserved and the latest row is the current
+    verdict. Mirrors PUT /mandate's actor+audit pattern."""
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    org_id, actor_id, actor_email, _user_id = await _actor(db, claims)
+    row = await HumanAuditRepo(db).append(
+        {
+            "org_id": org_id,
+            "actor_id": actor_id,
+            "actor_email": actor_email,
+            "event_type": "ic_sign_off",
+            "deal_id": deal_id,
+            "payload": {"decision": body.decision, "notes": body.notes},
+        }
+    )
+    # Flush then refresh created_at: it is a server default (func.now()), so it is
+    # unpopulated until fetched, and touching it lazily would raise MissingGreenlet
+    # under async. Load it explicitly in the async context, as public_intake does.
+    await db.flush()
+    await db.refresh(row, attribute_names=["created_at"])
+    return IcSignOffResponse(
+        decision=body.decision,
+        notes=body.notes,
+        actor_email=actor_email,
+        created_at=row.created_at,
+    )
+
+
 @router.get("/{deal_id}/audit", response_model=list[ActivityRowResponse])
 async def list_deal_audit(
     deal_id: uuid.UUID,
@@ -1437,6 +1510,98 @@ async def set_deal_checklist_item_status(
     )
     item = {i.item_id: i for i in build_checklist(events).items}[item_id]
     return _checklist_item_response(item)
+
+
+# Analyst Notes and Interview Log are one append-only note surface under two
+# kinds; each kind maps to its own human_audit_log event_type.
+_NOTE_EVENT_BY_KIND: dict[str, str] = {
+    "analyst": "analyst_note",
+    "interview": "interview_note",
+}
+
+
+@router.get("/{deal_id}/notes", response_model=list[DealNoteResponse])
+async def list_deal_notes(
+    deal_id: uuid.UUID,
+    kind: DealNoteKind,
+    limit: int = Query(default=100, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+) -> list[DealNoteResponse]:
+    """The deal's Analyst Notes or Interview Log (selected by `kind`), newest
+    first. An append-only running log stored in human_audit_log; returns [] before
+    any note is logged. Org-scoped by RLS -- a deal in another org 404s via the
+    DealRepo lookup rather than leaking rows."""
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    rows = await HumanAuditRepo(db).list_for_deal_by_event(
+        deal_id, _NOTE_EVENT_BY_KIND[kind], limit
+    )
+    return [
+        DealNoteResponse(
+            kind=kind,
+            body=(row.payload or {}).get("body", ""),
+            interviewee=(row.payload or {}).get("interviewee"),
+            actor_email=row.actor_email,
+            created_at=row.created_at,
+        )
+        for row in rows
+    ]
+
+
+@router.post(
+    "/{deal_id}/notes",
+    response_model=DealNoteResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def record_deal_note(
+    deal_id: uuid.UUID,
+    body: RecordDealNoteRequest,
+    claims: dict[str, Any] = Depends(get_claims),
+    db: AsyncSession = Depends(get_db),
+) -> DealNoteResponse:
+    """Log an analyst note or interview note on a deal. Append-only: each call
+    writes a new human_audit_log row (body + interviewee in the payload) under
+    the kind's event_type. Mirrors the IC sign-off / PUT /mandate actor+audit
+    pattern."""
+    text = body.body.strip()
+    if not text:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Note body must not be empty",
+        )
+    interviewee: str | None = None
+    if body.kind == "interview" and body.interviewee:
+        interviewee = body.interviewee.strip() or None
+
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    org_id, actor_id, actor_email, _user_id = await _actor(db, claims)
+    row = await HumanAuditRepo(db).append(
+        {
+            "org_id": org_id,
+            "actor_id": actor_id,
+            "actor_email": actor_email,
+            "event_type": _NOTE_EVENT_BY_KIND[body.kind],
+            "deal_id": deal_id,
+            "payload": {"body": text, "interviewee": interviewee},
+        }
+    )
+    # Flush then refresh created_at: it is a server default (func.now()), so it is
+    # unpopulated until fetched, and touching it lazily would raise MissingGreenlet
+    # under async. Load it explicitly in the async context, as public_intake does.
+    await db.flush()
+    await db.refresh(row, attribute_names=["created_at"])
+    return DealNoteResponse(
+        kind=body.kind,
+        body=text,
+        interviewee=interviewee,
+        actor_email=actor_email,
+        created_at=row.created_at,
+    )
 
 
 # Ceiling on finding events folded per read -- far above any real deal's register.
