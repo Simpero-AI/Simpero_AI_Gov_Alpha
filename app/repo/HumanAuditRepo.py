@@ -73,10 +73,11 @@ class HumanAuditRepo(BaseRepo[HumanAuditLog, dict]):
         self, deal_id: object, event_type: str
     ) -> HumanAuditLog | None:
         """The most recent audit row for one deal of one event_type, or None.
-        Backs the IC Sign-off read: sign-off is append-only (each decision is a
-        new row), so "the current decision" is simply the latest ic_sign_off
-        event. Same deal_id + stable created_at/id ordering as list_for_deal;
-        RLS scopes it to the org."""
+        Backs latest-wins reads where the current value is simply the newest row
+        of that event_type: the IC Sign-off decision (sign-off is append-only,
+        each decision a new row) and the draft-memo Recommendation override. Same
+        deal_id + stable created_at/id ordering as list_for_deal; RLS scopes it to
+        the org."""
         result = await self.session.execute(
             select(HumanAuditLog)
             .where(HumanAuditLog.deal_id == deal_id)

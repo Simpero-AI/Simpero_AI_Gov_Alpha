@@ -844,6 +844,72 @@ def test_findings_404_for_missing_deal(client, seeded_org):
     assert resp.status_code == 404
 
 
+# --- draft memo (Recommendation override) ---------------------------------
+
+
+def test_memo_draft_null_when_absent(client, owner_conn, seeded_org):
+    deal_id = _seed_deal(owner_conn, seeded_org["org_pk"])
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    resp = client.get(f"/deals/{deal_id}/memo-draft")
+    assert resp.status_code == 200
+    assert resp.json() == {"recommendation": None}
+
+
+def test_memo_draft_save_then_read(client, owner_conn, seeded_org):
+    deal_id = _seed_deal(owner_conn, seeded_org["org_pk"])
+    _authed(seeded_org["clerk_org_id"], "user-1")
+    # Give the actor an email so the "edited by" surfacing is exercised (the
+    # JIT-provisioned test user has none until a profile is synced).
+    client.post("/auth/sync-profile", json={"name": "Ana Lyst", "email": "ana@example.com"})
+
+    post = client.post(
+        f"/deals/{deal_id}/memo-draft/recommendation",
+        json={"content": "Proceed to IC with conditions."},
+    )
+    assert post.status_code == 201
+    assert post.json()["content"] == "Proceed to IC with conditions."
+    assert post.json()["actorEmail"] == "ana@example.com"
+
+    got = client.get(f"/deals/{deal_id}/memo-draft").json()["recommendation"]
+    assert got["content"] == "Proceed to IC with conditions."
+
+
+def test_memo_draft_latest_override_wins(client, owner_conn, seeded_org):
+    deal_id = _seed_deal(owner_conn, seeded_org["org_pk"])
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    client.post(f"/deals/{deal_id}/memo-draft/recommendation", json={"content": "First take"})
+    client.post(f"/deals/{deal_id}/memo-draft/recommendation", json={"content": "Revised take"})
+
+    assert (
+        client.get(f"/deals/{deal_id}/memo-draft").json()["recommendation"]["content"]
+        == "Revised take"
+    )
+    # Append-only: both saves persist as rows.
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM human_audit_log WHERE deal_id = %s "
+            "AND event_type = 'memo_recommendation_saved'",
+            (deal_id,),
+        )
+        assert cur.fetchone()[0] == 2
+
+
+def test_memo_draft_reject_empty(client, owner_conn, seeded_org):
+    deal_id = _seed_deal(owner_conn, seeded_org["org_pk"])
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    resp = client.post(f"/deals/{deal_id}/memo-draft/recommendation", json={"content": "  "})
+    assert resp.status_code == 422
+
+
+def test_memo_draft_404_for_missing_deal(client, seeded_org):
+    _authed(seeded_org["clerk_org_id"], "user-1")
+    resp = client.post(f"/deals/{uuid.uuid4()}/memo-draft/recommendation", json={"content": "x"})
+    assert resp.status_code == 404
+
+
 # --- auth flow (post UserRepo refactor) -----------------------------------
 
 
