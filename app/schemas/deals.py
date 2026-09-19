@@ -343,12 +343,13 @@ class CompanySynthPersonResponse(CamelModel):
 
 
 class CompanySynthSectionResponse(CamelModel):
-    """One synthesized narrative section of the Company tab (e.g. overview,
-    risks). `key` matches the build_company_view section names so the FE can slot
-    it into the same box; a section absent from the list produced no grounded
-    point (no chunks, no answer, or the LLM pass was unavailable). A section
-    carries `points` (the six prose sections) or `people` (the "leadership"
-    section) -- never conceptually both -- but both fields are always present."""
+    """One synthesized narrative section of a deal (e.g. overview, risks for the
+    Company tab; market_risks / market_growth_strategy for the Market tab). `key`
+    identifies the section so the FE can slot it into the matching box; a section
+    absent from the list produced no grounded point (no chunks, no answer, or the
+    LLM pass was unavailable). A section carries `points` (the prose sections) or
+    `people` (the "leadership" section) -- never conceptually both -- but both
+    fields are always present."""
 
     key: str
     title: str
