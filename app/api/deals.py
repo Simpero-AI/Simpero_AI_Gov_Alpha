@@ -52,6 +52,8 @@ from app.schemas.deals import (
     DealDocumentStatus,
     DealRowResponse,
     DealStatusResponse,
+    DealTermFactResponse,
+    DealTermsViewResponse,
     DealWithLatestMemoResponse,
     EntityResolutionResponse,
     FinancialFactResponse,
@@ -91,6 +93,7 @@ from app.services.dashboard_stats import (
     compute_month_bounds,
     compute_pipeline_value_delta,
 )
+from app.services.deal_terms_view import build_deal_terms_view
 from app.services.entity_resolution import get_resolver
 from app.services.entity_resolution.types import EntityResolutionError
 from app.services.field_synthesis import SectionSynthesis, SynthCitation, sections_from_json
@@ -839,6 +842,52 @@ async def get_deal_company(
         key_customers=_to_responses(company.key_customers, CompanyFactResponse),
         geographic_presence=_to_responses(company.geographic_presence, CompanyFactResponse),
     )
+
+
+@router.get("/{deal_id}/deal-terms", response_model=DealTermsViewResponse)
+async def get_deal_terms(
+    deal_id: uuid.UUID, db: AsyncSession = Depends(get_db)
+) -> DealTermsViewResponse:
+    """The Cap Table tab's Key Deal Terms, derived from the deal's claims spine
+    (build_deal_terms_view): the deal-structure figures (valuation, investment
+    amount, ownership %, price per share, share counts, option pool, liquidation
+    preference) recovered by label from the operating_metric/core_unmapped
+    catch-all buckets, one best figure per term with its citation and trust
+    status. Claims-only and LLM-free; RLS-scoped by get_db; returns an empty
+    `terms` list (never 404) for a deal with no recognizable deal terms, so the
+    tab renders its own "information not available" state. Per-holder cap table
+    rows are a separate, re-analysis-dependent track and are not returned here."""
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    # Deterministic row order for the per-term best-claim tiebreak, same as the
+    # market, financials and company routes.
+    claims = list(
+        (
+            await db.execute(
+                select(Claim)
+                .where(Claim.deal_id == deal_id)
+                .where(Claim.status.in_(sorted(_DISPLAY_STATUSES)))
+                .order_by(Claim.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    data_sources = await DataSourceRepo(db).list_for_deal(deal_id)
+    filenames = {ds.id: ds.filename for ds in data_sources}
+    source_urls = {ds.id: ds.source_url for ds in data_sources if ds.source_url}
+
+    view = build_deal_terms_view(
+        claims,
+        filenames=filenames,
+        source_urls=source_urls,
+        dashboard_structure=deal.dashboard_structure,
+        company=deal.name,
+    )
+
+    return DealTermsViewResponse(terms=_to_responses(view.terms, DealTermFactResponse))
 
 
 async def _compute_deal_status(db: AsyncSession, deal_id: uuid.UUID) -> DealStatusResponse:

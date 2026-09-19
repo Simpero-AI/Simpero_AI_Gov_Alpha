@@ -492,6 +492,37 @@ class CompanyViewResponse(CamelModel):
     geographic_presence: list[CompanyFactResponse]
 
 
+class DealTermFactResponse(CamelModel):
+    """One Key Deal Terms figure copied from the claims spine (build_deal_terms_view):
+    a deal-structure scalar recovered by label from the operating_metric/core_unmapped
+    catch-all buckets. `label` is the term name (e.g. "Pre-Money Valuation",
+    "Ownership Stake"); `value` is PRE-FORMATTED ("$40.00M", "16.7%", "1×") and the FE
+    renders it verbatim; `status` is the trust status (verified/partially_verified/
+    cited/conflicted/inconclusive) so the tab can badge it; `citation` is the human
+    "file · p.N" string, null when unlocatable; `sourceUrl` is the web source URL for
+    a kind='web' fact, null for a document claim."""
+
+    label: str
+    value: str
+    citation: str | None = None
+    status: str
+    entity: str | None = None
+    source_url: str | None = None
+
+
+class DealTermsViewResponse(CamelModel):
+    """GET /deals/{id}/deal-terms — the Cap Table tab's "Key Deal Terms" content:
+    the deal-structure figures (valuation, investment amount, ownership %, price per
+    share, share counts, option pool, liquidation preference) recovered by label from
+    the claims spine, one best figure per term. `terms` is empty when the deal states
+    no recognizable deal terms (the tab renders "information not available"); never
+    404s for a claim-less deal. Per-holder capitalization rows are a separate,
+    re-analysis-dependent track (a dedicated per-shareholder parser extractor) and are
+    intentionally not part of this response."""
+
+    terms: list[DealTermFactResponse]
+
+
 class CorroborationEventResponse(CamelModel):
     """One outside-source check against one claim, for the corroboration display
     ("show the result, cite the cite"). `agrees` is the source's judgment
