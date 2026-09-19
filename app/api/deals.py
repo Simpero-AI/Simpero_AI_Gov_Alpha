@@ -278,21 +278,38 @@ async def list_pipeline(db: AsyncSession = Depends(get_db)) -> list[LivePipeline
     """deals.listPipeline — Dashboard's Live Pipeline table."""
     deal_repo = DealRepo(db)
     session_repo = SessionRepo(db)
+    run_repo = AnalysisRunRepo(db)
     deals = await deal_repo.list()
+    deal_ids = [deal.id for deal in deals]
 
-    # One query for the whole grid, not one per row -- see
-    # IntakeLinkRepo.latest_for_deals on why this one is batched while the
-    # two below are not.
-    latest_links = await IntakeLinkRepo(db).latest_for_deals([deal.id for deal in deals])
+    # The whole grid resolves in a fixed number of queries, not O(N) per row.
+    # This endpoint previously ran ~4 queries PER deal (latest session + latest
+    # run + up to two latest-by-job-name lookups inside _compute_deal_status),
+    # unbounded because DealRepo.list() has no limit -- the dashboard's app-wide
+    # hang. Each lookup is now a single DISTINCT ON query keyed by deal_id, and
+    # the per-deal status is computed by the pure _deal_status_from_runs from the
+    # prefetched rows. See IntakeLinkRepo.latest_for_deals for the shared
+    # bind-parameter ceiling this inherits.
+    latest_links = await IntakeLinkRepo(db).latest_for_deals(deal_ids)
+    latest_sessions = await session_repo.latest_for_deals(deal_ids)
+    latest_runs = await run_repo.latest_for_deals(deal_ids)
+    latest_parsing = await run_repo.latest_by_job_name_for_deals(deal_ids, "parsing")
+    latest_verification = await run_repo.latest_by_job_name_for_deals(deal_ids, "verification")
 
     rows: list[LivePipelineRowResponse] = []
     for deal in deals:
-        # ponytail: one query per deal for its latest session, and one more
-        # for its analysis-run status (N+1 x2) — fine at pipeline-table
-        # scale; batch this (single query with a lateral join or window
-        # function) if the pipeline table gets large.
-        latest_session = await session_repo.latest_for_deal(deal.id)
+        latest_session = latest_sessions.get(deal.id)
         metrics = derive_pipeline_metrics(latest_session.memo_json if latest_session else None)
+        run = latest_runs.get(deal.id)
+        agent_status = (
+            _no_job_status()
+            if run is None
+            else _deal_status_from_runs(
+                run,
+                latest_parsing.get(deal.id),
+                latest_verification.get(deal.id),
+            )
+        )
         rows.append(
             LivePipelineRowResponse(
                 deal_id=str(deal.id),
@@ -301,7 +318,7 @@ async def list_pipeline(db: AsyncSession = Depends(get_db)) -> list[LivePipeline
                 sector_tags=deal.sector_tags or [],
                 state=deal.status,
                 created_at=deal.created_at,
-                agent_status=await _compute_deal_status(db, deal.id),
+                agent_status=agent_status,
                 intake_status=cast(
                     IntakePipelineStatus,
                     compute_pipeline_intake_status(latest_links.get(deal.id)),
@@ -811,29 +828,52 @@ async def _compute_deal_status(db: AsyncSession, deal_id: uuid.UUID) -> DealStat
     screening yet. Shared by GET /{deal_id}/status and GET /pipeline —
     the pipeline table must show the same real status this endpoint does,
     not a hardcoded placeholder."""
-    run = await AnalysisRunRepo(db).latest_for_deal(deal_id)
+    repo = AnalysisRunRepo(db)
+    run = await repo.latest_for_deal(deal_id)
     if run is None:
         return _no_job_status()
+    # The parsing branch needs no other rows; every later stage needs the
+    # chain's parsing + verification rows (different rows -- a later run carries
+    # no FK back to them). Fetch them here and hand the pure mapper the three
+    # rows, so GET /pipeline can batch these same lookups across the whole grid
+    # (latest_for_deals / latest_by_job_name_for_deals) and reuse this logic
+    # without a query per row.
+    if run.job_name == "parsing":
+        return _deal_status_from_runs(run, None, None)
+    parsing_run = await repo.latest_by_job_name(deal_id, "parsing")
+    verification_run = (
+        run
+        if run.job_name == "verification"
+        else await repo.latest_by_job_name(deal_id, "verification")
+    )
+    return _deal_status_from_runs(run, parsing_run, verification_run)
 
-    # started_at is the whole CHAIN's start (the parsing run's own
-    # started_at), not just this latest row's own started_at -- once the
-    # latest row is a verification run, its own started_at is well after
-    # the chain actually began. step_durations only ever gets an entry for
-    # a step whose own run has a real ended_at -- i.e. one that's actually
-    # finished, never a guess at one still in progress.
+
+def _deal_status_from_runs(
+    run: AnalysisRun,
+    parsing_run: AnalysisRun | None,
+    verification_run: AnalysisRun | None,
+) -> DealStatusResponse:
+    """Pure mapping of a deal's chain rows -> DealStatusResponse, shared by the
+    single-deal status endpoint (_compute_deal_status) and the batched pipeline
+    grid (list_pipeline). `run` is the latest run of any job; `parsing_run` /
+    `verification_run` are that deal's latest rows of those jobs (both ignored
+    when `run` is itself the parsing run). No DB access -- the caller supplies the
+    rows, which is what lets the grid resolve every deal in a fixed number of
+    queries instead of one per row."""
+    # started_at is the whole CHAIN's start (the parsing run's own started_at),
+    # not just this latest row's own started_at -- once the latest row is a
+    # verification run, its own started_at is well after the chain actually
+    # began. step_durations only ever gets an entry for a step whose own run has
+    # a real ended_at -- i.e. one that's actually finished, never a guess at one
+    # still in progress.
     step_durations: dict[str, int] = {}
-    # Bound here, not only in the else-branch below: the screening branch
-    # reads it, and while that branch is only reachable when job_name is not
-    # "parsing", relying on that coupling would break the moment either
-    # condition moved.
-    verification_run: AnalysisRun | None = None
     if run.job_name == "parsing":
         chain_started_at = run.started_at
         parsing_seconds = _run_seconds(run)
         if parsing_seconds is not None:
             step_durations["parsing"] = parsing_seconds
     else:
-        parsing_run = await AnalysisRunRepo(db).latest_by_job_name(deal_id, "parsing")
         chain_started_at = parsing_run.started_at if parsing_run is not None else run.started_at
         parsing_seconds = _run_seconds(parsing_run) if parsing_run is not None else None
         if parsing_seconds is not None:
@@ -842,11 +882,6 @@ async def _compute_deal_status(db: AsyncSession, deal_id: uuid.UUID) -> DealStat
         # from `run` -- once screening became the latest row (SIM-404),
         # `_run_seconds(run)` would file screening's own elapsed time under
         # step_durations["verification"] and misreport it.
-        verification_run = (
-            run
-            if run.job_name == "verification"
-            else await AnalysisRunRepo(db).latest_by_job_name(deal_id, "verification")
-        )
         verification_seconds = _run_seconds(verification_run) if verification_run else None
         if verification_seconds is not None:
             step_durations["verification"] = verification_seconds
