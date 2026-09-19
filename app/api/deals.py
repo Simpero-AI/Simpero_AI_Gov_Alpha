@@ -33,6 +33,12 @@ from app.repo.ScreeningResultRepo import ScreeningResultRepo
 from app.repo.SessionRepo import SessionRepo
 from app.repo.SynthesisSnapshotRepo import SynthesisSnapshotRepo
 from app.repo.UserRepo import UserRepo
+from app.schemas.checklist import (
+    ChecklistItemResponse,
+    ChecklistResponse,
+    RecordChecklistItemRequest,
+    SetChecklistItemStatusRequest,
+)
 from app.schemas.common import SuccessResponse
 from app.schemas.deal_note import (
     DealNoteKind,
@@ -57,6 +63,8 @@ from app.schemas.deals import (
     DealDocumentStatus,
     DealRowResponse,
     DealStatusResponse,
+    DealTermFactResponse,
+    DealTermsViewResponse,
     DealWithLatestMemoResponse,
     EntityResolutionResponse,
     FinancialFactResponse,
@@ -89,9 +97,21 @@ from app.schemas.intake_response import (
     IntakeResponseResponse,
 )
 from app.schemas.logs import ActivityRowResponse
+from app.services.checklist_view import (
+    CHECKLIST_ADDED,
+    CHECKLIST_EVENT_TYPES,
+    CHECKLIST_STATUS,
+    ChecklistItem,
+    build_checklist,
+)
 from app.services.company_view import build_company_view
 from app.services.corroboration_citation import corroboration_source_url
-from app.services.dashboard_stats import compute_month_bounds, compute_pipeline_value_delta
+from app.services.dashboard_stats import (
+    compute_dd_completion_pct,
+    compute_month_bounds,
+    compute_pipeline_value_delta,
+)
+from app.services.deal_terms_view import build_deal_terms_view
 from app.services.entity_resolution import get_resolver
 from app.services.entity_resolution.types import EntityResolutionError
 from app.services.field_synthesis import SectionSynthesis, SynthCitation, sections_from_json
@@ -283,21 +303,38 @@ async def list_pipeline(db: AsyncSession = Depends(get_db)) -> list[LivePipeline
     """deals.listPipeline — Dashboard's Live Pipeline table."""
     deal_repo = DealRepo(db)
     session_repo = SessionRepo(db)
+    run_repo = AnalysisRunRepo(db)
     deals = await deal_repo.list()
+    deal_ids = [deal.id for deal in deals]
 
-    # One query for the whole grid, not one per row -- see
-    # IntakeLinkRepo.latest_for_deals on why this one is batched while the
-    # two below are not.
-    latest_links = await IntakeLinkRepo(db).latest_for_deals([deal.id for deal in deals])
+    # The whole grid resolves in a fixed number of queries, not O(N) per row.
+    # This endpoint previously ran ~4 queries PER deal (latest session + latest
+    # run + up to two latest-by-job-name lookups inside _compute_deal_status),
+    # unbounded because DealRepo.list() has no limit -- the dashboard's app-wide
+    # hang. Each lookup is now a single DISTINCT ON query keyed by deal_id, and
+    # the per-deal status is computed by the pure _deal_status_from_runs from the
+    # prefetched rows. See IntakeLinkRepo.latest_for_deals for the shared
+    # bind-parameter ceiling this inherits.
+    latest_links = await IntakeLinkRepo(db).latest_for_deals(deal_ids)
+    latest_sessions = await session_repo.latest_for_deals(deal_ids)
+    latest_runs = await run_repo.latest_for_deals(deal_ids)
+    latest_parsing = await run_repo.latest_by_job_name_for_deals(deal_ids, "parsing")
+    latest_verification = await run_repo.latest_by_job_name_for_deals(deal_ids, "verification")
 
     rows: list[LivePipelineRowResponse] = []
     for deal in deals:
-        # ponytail: one query per deal for its latest session, and one more
-        # for its analysis-run status (N+1 x2) — fine at pipeline-table
-        # scale; batch this (single query with a lateral join or window
-        # function) if the pipeline table gets large.
-        latest_session = await session_repo.latest_for_deal(deal.id)
+        latest_session = latest_sessions.get(deal.id)
         metrics = derive_pipeline_metrics(latest_session.memo_json if latest_session else None)
+        run = latest_runs.get(deal.id)
+        agent_status = (
+            _no_job_status()
+            if run is None
+            else _deal_status_from_runs(
+                run,
+                latest_parsing.get(deal.id),
+                latest_verification.get(deal.id),
+            )
+        )
         rows.append(
             LivePipelineRowResponse(
                 deal_id=str(deal.id),
@@ -306,7 +343,7 @@ async def list_pipeline(db: AsyncSession = Depends(get_db)) -> list[LivePipeline
                 sector_tags=deal.sector_tags or [],
                 state=deal.status,
                 created_at=deal.created_at,
-                agent_status=await _compute_deal_status(db, deal.id),
+                agent_status=agent_status,
                 intake_status=cast(
                     IntakePipelineStatus,
                     compute_pipeline_intake_status(latest_links.get(deal.id)),
@@ -322,7 +359,20 @@ async def dashboard_stats(db: AsyncSession = Depends(get_db)) -> DashboardStatsR
     """deals.dashboardStats. See app/services/dashboard_stats.py for the
     "best-effort read against a types-only contract" caveat."""
     current_start, prior_start, prior_end = compute_month_bounds()
-    agg = await DealRepo(db).dashboard_aggregates(current_start, prior_start, prior_end)
+    deal_repo = DealRepo(db)
+    run_repo = AnalysisRunRepo(db)
+    agg = await deal_repo.dashboard_aggregates(current_start, prior_start, prior_end)
+
+    # DD Completion is a real read of the analysis pipeline, not a stub. Resolve
+    # the whole org in a fixed number of queries -- the same batched fetch +
+    # pure _deal_status_from_runs mapper the Live Pipeline grid uses, so a deal
+    # counts as "complete" here exactly when its row shows "complete" there.
+    deals = await deal_repo.list()
+    deal_ids = [deal.id for deal in deals]
+    latest_runs = await run_repo.latest_for_deals(deal_ids)
+    latest_parsing = await run_repo.latest_by_job_name_for_deals(deal_ids, "parsing")
+    latest_verification = await run_repo.latest_by_job_name_for_deals(deal_ids, "verification")
+    completed = _completed_deal_count(deals, latest_runs, latest_parsing, latest_verification)
 
     return DashboardStatsResponse(
         window="month",
@@ -336,10 +386,25 @@ async def dashboard_stats(db: AsyncSession = Depends(get_db)) -> DashboardStatsR
                 agg["current_window_value"], agg["prior_window_value"]
             ),
         ),
-        # No scoring/completion data in Phase 1 — there's no analyse pipeline
-        # writing memo_json.scoringResult yet.
+        # avg_ai_score has no producer: scoring is memo-dead -- nothing writes
+        # memo_json.scoringResult yet -- so value stays None (FE shows "—")
+        # rather than fabricating a number. Wire this up when a scoring writer
+        # ships.
         avg_ai_score=AvgAiScoreStat(value=None, delta=None),
-        dd_completion_pct=DdCompletionStat(value=0, delta_pp=0),
+        # delta_pp stays None on purpose: a truthful month-over-month
+        # completion-rate delta needs point-in-time run state we don't retain,
+        # so we report the real rate and no delta rather than a fake "+0pp".
+        #
+        # Denominator is len(deals), not agg["total_deals"]: `completed` was
+        # counted over this same list() snapshot, so the ratio is always valid
+        # (0..100%). agg["total_deals"] is a separate COUNT (another snapshot
+        # under READ COMMITTED) feeding the Total Deals KPI; the two can differ
+        # by one under a concurrent write, which is cosmetic and self-heals on
+        # the next poll -- pairing numerator and denominator matters more here.
+        dd_completion_pct=DdCompletionStat(
+            value=compute_dd_completion_pct(completed, len(deals)),
+            delta_pp=None,
+        ),
     )
 
 
@@ -790,7 +855,57 @@ async def get_deal_company(
         commercial=_to_responses(company.commercial, CompanyFactResponse),
         related_parties=_to_responses(company.related_parties, CompanyFactResponse),
         plans=_to_responses(company.plans, CompanyFactResponse),
+        co_investors=_to_responses(company.co_investors, CompanyFactResponse),
+        funding_history=_to_responses(company.funding_history, CompanyFactResponse),
+        key_customers=_to_responses(company.key_customers, CompanyFactResponse),
+        geographic_presence=_to_responses(company.geographic_presence, CompanyFactResponse),
     )
+
+
+@router.get("/{deal_id}/deal-terms", response_model=DealTermsViewResponse)
+async def get_deal_terms(
+    deal_id: uuid.UUID, db: AsyncSession = Depends(get_db)
+) -> DealTermsViewResponse:
+    """The Cap Table tab's Key Deal Terms, derived from the deal's claims spine
+    (build_deal_terms_view): the deal-structure figures (valuation, investment
+    amount, ownership %, price per share, share counts, option pool, liquidation
+    preference) recovered by label from the operating_metric/core_unmapped
+    catch-all buckets, one best figure per term with its citation and trust
+    status. Claims-only and LLM-free; RLS-scoped by get_db; returns an empty
+    `terms` list (never 404) for a deal with no recognizable deal terms, so the
+    tab renders its own "information not available" state. Per-holder cap table
+    rows are a separate, re-analysis-dependent track and are not returned here."""
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    # Deterministic row order for the per-term best-claim tiebreak, same as the
+    # market, financials and company routes.
+    claims = list(
+        (
+            await db.execute(
+                select(Claim)
+                .where(Claim.deal_id == deal_id)
+                .where(Claim.status.in_(sorted(_DISPLAY_STATUSES)))
+                .order_by(Claim.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    data_sources = await DataSourceRepo(db).list_for_deal(deal_id)
+    filenames = {ds.id: ds.filename for ds in data_sources}
+    source_urls = {ds.id: ds.source_url for ds in data_sources if ds.source_url}
+
+    view = build_deal_terms_view(
+        claims,
+        filenames=filenames,
+        source_urls=source_urls,
+        dashboard_structure=deal.dashboard_structure,
+        company=deal.name,
+    )
+
+    return DealTermsViewResponse(terms=_to_responses(view.terms, DealTermFactResponse))
 
 
 async def _compute_deal_status(db: AsyncSession, deal_id: uuid.UUID) -> DealStatusResponse:
@@ -812,29 +927,52 @@ async def _compute_deal_status(db: AsyncSession, deal_id: uuid.UUID) -> DealStat
     screening yet. Shared by GET /{deal_id}/status and GET /pipeline —
     the pipeline table must show the same real status this endpoint does,
     not a hardcoded placeholder."""
-    run = await AnalysisRunRepo(db).latest_for_deal(deal_id)
+    repo = AnalysisRunRepo(db)
+    run = await repo.latest_for_deal(deal_id)
     if run is None:
         return _no_job_status()
+    # The parsing branch needs no other rows; every later stage needs the
+    # chain's parsing + verification rows (different rows -- a later run carries
+    # no FK back to them). Fetch them here and hand the pure mapper the three
+    # rows, so GET /pipeline can batch these same lookups across the whole grid
+    # (latest_for_deals / latest_by_job_name_for_deals) and reuse this logic
+    # without a query per row.
+    if run.job_name == "parsing":
+        return _deal_status_from_runs(run, None, None)
+    parsing_run = await repo.latest_by_job_name(deal_id, "parsing")
+    verification_run = (
+        run
+        if run.job_name == "verification"
+        else await repo.latest_by_job_name(deal_id, "verification")
+    )
+    return _deal_status_from_runs(run, parsing_run, verification_run)
 
-    # started_at is the whole CHAIN's start (the parsing run's own
-    # started_at), not just this latest row's own started_at -- once the
-    # latest row is a verification run, its own started_at is well after
-    # the chain actually began. step_durations only ever gets an entry for
-    # a step whose own run has a real ended_at -- i.e. one that's actually
-    # finished, never a guess at one still in progress.
+
+def _deal_status_from_runs(
+    run: AnalysisRun,
+    parsing_run: AnalysisRun | None,
+    verification_run: AnalysisRun | None,
+) -> DealStatusResponse:
+    """Pure mapping of a deal's chain rows -> DealStatusResponse, shared by the
+    single-deal status endpoint (_compute_deal_status) and the batched pipeline
+    grid (list_pipeline). `run` is the latest run of any job; `parsing_run` /
+    `verification_run` are that deal's latest rows of those jobs (both ignored
+    when `run` is itself the parsing run). No DB access -- the caller supplies the
+    rows, which is what lets the grid resolve every deal in a fixed number of
+    queries instead of one per row."""
+    # started_at is the whole CHAIN's start (the parsing run's own started_at),
+    # not just this latest row's own started_at -- once the latest row is a
+    # verification run, its own started_at is well after the chain actually
+    # began. step_durations only ever gets an entry for a step whose own run has
+    # a real ended_at -- i.e. one that's actually finished, never a guess at one
+    # still in progress.
     step_durations: dict[str, int] = {}
-    # Bound here, not only in the else-branch below: the screening branch
-    # reads it, and while that branch is only reachable when job_name is not
-    # "parsing", relying on that coupling would break the moment either
-    # condition moved.
-    verification_run: AnalysisRun | None = None
     if run.job_name == "parsing":
         chain_started_at = run.started_at
         parsing_seconds = _run_seconds(run)
         if parsing_seconds is not None:
             step_durations["parsing"] = parsing_seconds
     else:
-        parsing_run = await AnalysisRunRepo(db).latest_by_job_name(deal_id, "parsing")
         chain_started_at = parsing_run.started_at if parsing_run is not None else run.started_at
         parsing_seconds = _run_seconds(parsing_run) if parsing_run is not None else None
         if parsing_seconds is not None:
@@ -843,11 +981,6 @@ async def _compute_deal_status(db: AsyncSession, deal_id: uuid.UUID) -> DealStat
         # from `run` -- once screening became the latest row (SIM-404),
         # `_run_seconds(run)` would file screening's own elapsed time under
         # step_durations["verification"] and misreport it.
-        verification_run = (
-            run
-            if run.job_name == "verification"
-            else await AnalysisRunRepo(db).latest_by_job_name(deal_id, "verification")
-        )
         verification_seconds = _run_seconds(verification_run) if verification_run else None
         if verification_seconds is not None:
             step_durations["verification"] = verification_seconds
@@ -960,6 +1093,31 @@ async def _compute_deal_status(db: AsyncSession, deal_id: uuid.UUID) -> DealStat
         error_message=run.error_message,
         job_comments=run.job_comments,
     )
+
+
+def _completed_deal_count(
+    deals: list[Deal],
+    latest_runs: dict[uuid.UUID, AnalysisRun],
+    latest_parsing: dict[uuid.UUID, AnalysisRun],
+    latest_verification: dict[uuid.UUID, AnalysisRun],
+) -> int:
+    """How many of `deals` have reached the terminal "complete" state, computed
+    from the prefetched chain rows with the same pure _deal_status_from_runs
+    mapper the pipeline grid and status endpoint use. No DB access -- the caller
+    batches the three latest-row lookups once for the whole org (dashboard_stats
+    / list_pipeline), so this is O(deals), not a query per deal. A deal with no
+    run is absent from `latest_runs` and simply isn't complete."""
+    complete = 0
+    for deal in deals:
+        run = latest_runs.get(deal.id)
+        if run is None:
+            continue
+        status = _deal_status_from_runs(
+            run, latest_parsing.get(deal.id), latest_verification.get(deal.id)
+        )
+        if status.job_status == "complete":
+            complete += 1
+    return complete
 
 
 def _entity_resolution_response(row: EntityResolution) -> EntityResolutionResponse:
@@ -1138,6 +1296,140 @@ async def list_deal_audit(
         )
         for row in rows
     ]
+
+
+# Ceiling on checklist events folded per read -- far above any real deal's list.
+_MAX_CHECKLIST_EVENTS = 1000
+
+
+def _checklist_item_response(item: ChecklistItem) -> ChecklistItemResponse:
+    return ChecklistItemResponse(
+        item_id=item.item_id,
+        description=item.description,
+        assignee=item.assignee,
+        status=cast(Any, item.status),
+        actor_email=item.actor_email,
+        created_at=item.created_at,
+    )
+
+
+@router.get("/{deal_id}/checklist", response_model=ChecklistResponse)
+async def get_deal_checklist(
+    deal_id: uuid.UUID, db: AsyncSession = Depends(get_db)
+) -> ChecklistResponse:
+    """The deal's diligence checklist, folded from its append-only checklist
+    events (checklist_item_added + checklist_item_status), oldest-added first,
+    with a complete/total count. Empty before any request. Org-scoped by RLS -- a
+    deal in another org 404s via the DealRepo lookup rather than leaking rows."""
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    events = await HumanAuditRepo(db).list_for_deal_by_events(
+        deal_id, CHECKLIST_EVENT_TYPES, _MAX_CHECKLIST_EVENTS
+    )
+    view = build_checklist(events)
+    return ChecklistResponse(
+        items=[_checklist_item_response(i) for i in view.items],
+        complete_count=view.complete_count,
+        total_count=view.total_count,
+    )
+
+
+@router.post(
+    "/{deal_id}/checklist",
+    response_model=ChecklistItemResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def record_deal_checklist_item(
+    deal_id: uuid.UUID,
+    body: RecordChecklistItemRequest,
+    claims: dict[str, Any] = Depends(get_claims),
+    db: AsyncSession = Depends(get_db),
+) -> ChecklistItemResponse:
+    """Add a diligence request. Append-only: writes one checklist_item_added row
+    with a server-generated item_id, so status changes can reference it without
+    ever mutating this row."""
+    description = body.description.strip()
+    if not description:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Checklist item description must not be empty",
+        )
+
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    item_id = uuid.uuid4().hex
+    assignee = (body.assignee or "").strip() or None
+    org_id, actor_id, actor_email, _user_id = await _actor(db, claims)
+    row = await HumanAuditRepo(db).append(
+        {
+            "org_id": org_id,
+            "actor_id": actor_id,
+            "actor_email": actor_email,
+            "event_type": CHECKLIST_ADDED,
+            "deal_id": deal_id,
+            "payload": {"item_id": item_id, "description": description, "assignee": assignee},
+        }
+    )
+    # Refresh created_at (a server default) in the async context; touching it lazily
+    # after flush would raise MissingGreenlet. See public_intake's submitted_at.
+    await db.flush()
+    await db.refresh(row, attribute_names=["created_at"])
+    return ChecklistItemResponse(
+        item_id=item_id,
+        description=description,
+        assignee=assignee,
+        status="not_started",
+        actor_email=actor_email,
+        created_at=row.created_at,
+    )
+
+
+@router.post("/{deal_id}/checklist/{item_id}/status", response_model=ChecklistItemResponse)
+async def set_deal_checklist_item_status(
+    deal_id: uuid.UUID,
+    item_id: str,
+    body: SetChecklistItemStatusRequest,
+    claims: dict[str, Any] = Depends(get_claims),
+    db: AsyncSession = Depends(get_db),
+) -> ChecklistItemResponse:
+    """Advance a checklist request's status (not_started / in_review / complete).
+    Append-only: writes a checklist_item_status row keyed on the item_id; the
+    original add row is untouched. 404s if the deal or the item is absent."""
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    repo = HumanAuditRepo(db)
+    events = await repo.list_for_deal_by_events(
+        deal_id, CHECKLIST_EVENT_TYPES, _MAX_CHECKLIST_EVENTS
+    )
+    if item_id not in {i.item_id for i in build_checklist(events).items}:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Checklist item not found"
+        )
+
+    org_id, actor_id, actor_email, _user_id = await _actor(db, claims)
+    await repo.append(
+        {
+            "org_id": org_id,
+            "actor_id": actor_id,
+            "actor_email": actor_email,
+            "event_type": CHECKLIST_STATUS,
+            "deal_id": deal_id,
+            "payload": {"item_id": item_id, "status": body.status},
+        }
+    )
+    await db.flush()
+    # Re-fold so the response reflects the status just written.
+    events = await repo.list_for_deal_by_events(
+        deal_id, CHECKLIST_EVENT_TYPES, _MAX_CHECKLIST_EVENTS
+    )
+    item = {i.item_id: i for i in build_checklist(events).items}[item_id]
+    return _checklist_item_response(item)
 
 
 # Analyst Notes and Interview Log are one append-only note surface under two
