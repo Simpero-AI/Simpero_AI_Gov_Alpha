@@ -130,6 +130,7 @@ def test_returns_income_statement_with_camelcase_wire_keys(
         "status",
         "entity",
         "sourceUrl",
+        "reconciliationMismatch",
     }
     assert fact["label"] == "Revenue"
     assert fact["value"] == "$497.20M"
@@ -137,6 +138,8 @@ def test_returns_income_statement_with_camelcase_wire_keys(
     assert fact["status"] == "cited"
     # A document (pdf) claim has no external source URL; the field is present but null.
     assert fact["sourceUrl"] is None
+    # A figure with no formula_mismatch flag is not marked as non-reconciling.
+    assert fact["reconciliationMismatch"] is False
 
 
 def test_scoped_to_the_caller_org(client, owner_conn, seeded_org, seeded_deal):
