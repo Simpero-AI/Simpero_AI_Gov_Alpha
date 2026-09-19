@@ -65,13 +65,21 @@ class PipelineValueStat(CamelModel):
 
 
 class AvgAiScoreStat(CamelModel):
+    # Both stay null until a scoring producer exists (scoring is memo-dead --
+    # nothing writes memo_json.scoringResult yet), so the front end shows "—"
+    # rather than a fabricated number. See dashboard_stats.
     value: float | None
     delta: float | None
 
 
 class DdCompletionStat(CamelModel):
+    # `value` is real (fraction of deals whose analysis chain reached the
+    # terminal "complete" state). `delta_pp` is null: a truthful
+    # month-over-month completion-rate delta needs point-in-time run state we
+    # don't store, so we report no delta rather than a fabricated "+0pp". The
+    # front end drops the sub-caption delta when this is null.
     value: int
-    delta_pp: int
+    delta_pp: int | None
 
 
 class DashboardStatsResponse(CamelModel):
@@ -81,8 +89,10 @@ class DashboardStatsResponse(CamelModel):
     no implementation body) in the frozen contract — the actual monorepo
     logic isn't available to port exactly. This is a best-effort read
     against the same shape: current-vs-prior calendar-month counts/sums,
-    "new" when prior is 0 and current isn't. avgAiScore/ddCompletionPct are
-    null/0 in Phase 1 — there's no scoring writer until the real pipeline.
+    "new" when prior is 0 and current isn't. ddCompletionPct.value is a real
+    completion rate (see dashboard_stats endpoint); its delta_pp stays null
+    (no stored point-in-time history to diff). avgAiScore stays null until a
+    scoring producer ships.
     """
 
     window: Literal["week", "month", "quarter"]
@@ -333,12 +343,13 @@ class CompanySynthPersonResponse(CamelModel):
 
 
 class CompanySynthSectionResponse(CamelModel):
-    """One synthesized narrative section of the Company tab (e.g. overview,
-    risks). `key` matches the build_company_view section names so the FE can slot
-    it into the same box; a section absent from the list produced no grounded
-    point (no chunks, no answer, or the LLM pass was unavailable). A section
-    carries `points` (the six prose sections) or `people` (the "leadership"
-    section) -- never conceptually both -- but both fields are always present."""
+    """One synthesized narrative section of a deal (e.g. overview, risks for the
+    Company tab; market_risks / market_growth_strategy for the Market tab). `key`
+    identifies the section so the FE can slot it into the matching box; a section
+    absent from the list produced no grounded point (no chunks, no answer, or the
+    LLM pass was unavailable). A section carries `points` (the prose sections) or
+    `people` (the "leadership" section) -- never conceptually both -- but both
+    fields are always present."""
 
     key: str
     title: str
@@ -414,7 +425,9 @@ class FinancialFactResponse(CamelModel):
     rendered string ("FY23", "FY23 Estimate", or ""); `status` is the trust status
     (verified/partially_verified/cited) so the tab can badge it; `citation` is the
     human "file · p.N" string, null when unlocatable; `sourceUrl` is the web
-    source URL for a kind='web' fact, null for a document claim."""
+    source URL for a kind='web' fact, null for a document claim;
+    `reconciliationMismatch` is true when this figure failed the arithmetic
+    consistency check (SIM-372) so the tab can flag a non-reconciling line."""
 
     label: str
     value: str
@@ -423,6 +436,7 @@ class FinancialFactResponse(CamelModel):
     status: str
     entity: str | None = None
     source_url: str | None = None
+    reconciliation_mismatch: bool = False
 
 
 class FinancialTrendPointResponse(CamelModel):
@@ -476,6 +490,41 @@ class CompanyViewResponse(CamelModel):
     commercial: list[CompanyFactResponse]
     related_parties: list[CompanyFactResponse]
     plans: list[CompanyFactResponse]
+    co_investors: list[CompanyFactResponse]
+    funding_history: list[CompanyFactResponse]
+    key_customers: list[CompanyFactResponse]
+    geographic_presence: list[CompanyFactResponse]
+
+
+class DealTermFactResponse(CamelModel):
+    """One Key Deal Terms figure copied from the claims spine (build_deal_terms_view):
+    a deal-structure scalar recovered by label from the operating_metric/core_unmapped
+    catch-all buckets. `label` is the term name (e.g. "Pre-Money Valuation",
+    "Ownership Stake"); `value` is PRE-FORMATTED ("$40.00M", "16.7%", "1×") and the FE
+    renders it verbatim; `status` is the trust status (verified/partially_verified/
+    cited/conflicted/inconclusive) so the tab can badge it; `citation` is the human
+    "file · p.N" string, null when unlocatable; `sourceUrl` is the web source URL for
+    a kind='web' fact, null for a document claim."""
+
+    label: str
+    value: str
+    citation: str | None = None
+    status: str
+    entity: str | None = None
+    source_url: str | None = None
+
+
+class DealTermsViewResponse(CamelModel):
+    """GET /deals/{id}/deal-terms — the Cap Table tab's "Key Deal Terms" content:
+    the deal-structure figures (valuation, investment amount, ownership %, price per
+    share, share counts, option pool, liquidation preference) recovered by label from
+    the claims spine, one best figure per term. `terms` is empty when the deal states
+    no recognizable deal terms (the tab renders "information not available"); never
+    404s for a claim-less deal. Per-holder capitalization rows are a separate,
+    re-analysis-dependent track (a dedicated per-shareholder parser extractor) and are
+    intentionally not part of this response."""
+
+    terms: list[DealTermFactResponse]
 
 
 class CorroborationEventResponse(CamelModel):

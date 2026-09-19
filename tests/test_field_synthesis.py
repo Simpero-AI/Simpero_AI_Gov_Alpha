@@ -166,6 +166,36 @@ def test_company_sections_include_executive_summary_with_unique_keys():
     assert len(keys) == len(set(keys))
 
 
+def test_market_sections_are_a_distinct_lens_from_the_company_operational_sections():
+    # The Market tab's Market Risks / Growth Strategy are served by the same pass
+    # (keyed market_risks / market_growth_strategy) so the FE can select them, and
+    # are prose (points) sections, not the people section. Crucially they must be a
+    # DIFFERENT lens from the Company tab's operational `risks` / `plans` -- not a
+    # relabel -- so their questions differ: this is the guard against someone later
+    # pointing them at the same operational question under a "market" heading.
+    by_key = {s.key: s for s in COMPANY_SECTIONS}
+    assert {"market_risks", "market_growth_strategy"} <= set(by_key)
+
+    market_risks = by_key["market_risks"]
+    market_growth = by_key["market_growth_strategy"]
+    assert market_risks.title == "Market Risks"
+    assert market_growth.title == "Growth Strategy"
+    # Prose sections (the leadership people path is not for these).
+    assert market_risks.people is False and market_growth.people is False
+
+    # A distinct lens: the Market questions must not be the Company ones verbatim,
+    # and must actually name the market/competitive frame the Company ones don't.
+    assert market_risks.question != by_key["risks"].question
+    assert market_growth.question != by_key["plans"].question
+    assert "market" in market_risks.question.lower()
+    assert "competi" in market_risks.question.lower()
+    assert "market" in market_growth.question.lower()
+    # The retrieval queries must differ too -- an accidental query collision is where
+    # BM25 (sparse-only, OR-recall) would actually surface the same chunks in both.
+    assert market_risks.query != by_key["risks"].query
+    assert market_growth.query != by_key["plans"].query
+
+
 def _settings(*, key: str) -> SimpleNamespace:
     """Minimal stand-in for the app settings synthesize_company_sections reads --
     only the two attributes it touches. Patched in via monkeypatch so the early-
@@ -213,13 +243,18 @@ async def test_synthesize_classifies_each_empty_reason_and_logs_the_summary(monk
     monkeypatch.setattr(field_synthesis, "get_settings", lambda: _settings(key="test-key"))
 
     q_of = {s.key: s.question for s in COMPANY_SECTIONS}
-    plans_query = next(s.query for s in COMPANY_SECTIONS if s.key == "plans")
+    # "plans" and the two Market-tab sections retrieve nothing (-> no_hits); every
+    # other section gets one hit. Holding the Market sections out of the grounded
+    # ("ok") set keeps this test on the reason-code classification, not their content.
+    no_hit_queries = {
+        next(s.query for s in COMPANY_SECTIONS if s.key == key)
+        for key in ("plans", "market_risks", "market_growth_strategy")
+    }
 
     async def fake_search(
         _session, *, org_id, query_text, document_ids, weights, top_k, match_mode
     ):
-        # "plans" retrieves nothing (-> no_hits); every other section gets one hit.
-        return [] if query_text == plans_query else [_hit(page=1)]
+        return [] if query_text in no_hit_queries else [_hit(page=1)]
 
     def fake_call(*, api_key, model, question, company, hits, system, tool, max_tokens):
         if question == q_of["risks"]:
@@ -252,6 +287,8 @@ async def test_synthesize_classifies_each_empty_reason_and_logs_the_summary(monk
     assert "commercial=model_no_answer" in summary
     assert "related_parties=ungrounded" in summary
     assert "plans=no_hits" in summary
+    assert "market_risks=no_hits" in summary
+    assert "market_growth_strategy=no_hits" in summary
 
 
 def test_verifies_a_grounded_person_and_maps_citation():
