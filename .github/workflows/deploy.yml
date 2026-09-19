@@ -216,7 +216,7 @@ jobs:
       # Quoted heredoc ('EOF') so secret values are written literally — no
       # shell expansion of $, backticks, etc. inside them.
       - name: Write .env from GitHub secrets
-        uses: appleboy/ssh-action@v1.2.0
+        uses: appleboy/ssh-action@v1.2.5
         with:
           host: ${{ secrets.DROPLET_HOST }}
           username: deploy
@@ -246,7 +246,7 @@ jobs:
             chmod 600 /opt/simpero/.env
 
       - name: Pull, migrate, restart
-        uses: appleboy/ssh-action@v1.2.0
+        uses: appleboy/ssh-action@v1.2.5
         with:
           host: ${{ secrets.DROPLET_HOST }}
           username: deploy
