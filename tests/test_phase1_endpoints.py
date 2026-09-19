@@ -456,6 +456,52 @@ def test_investment_profile_present(client, owner_conn, seeded_org):
     assert body["mandate"] == {"checkSize": "5-10m"}
 
 
+def test_investment_profile_put_creates_row(client, seeded_org):
+    # PUT on an org with no profile row creates it and returns JSON (not the
+    # HTML fallback the retired tRPC upsert produced).
+    _authed(seeded_org["clerk_org_id"], "user-1")
+    resp = client.put(
+        "/investment-profile",
+        json={"firmName": "Vistara", "mandate": {"checkSize": "5-10m"}},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["firmName"] == "Vistara"
+    assert body["mandate"] == {"checkSize": "5-10m"}
+    # Persisted: a subsequent GET reads it back.
+    assert client.get("/investment-profile").json()["firmName"] == "Vistara"
+
+
+def test_investment_profile_put_partial_merge_does_not_clobber(client, owner_conn, seeded_org):
+    # The Firm Profile editor and the Scoring Framework editor save different
+    # slices independently. A weights-only save must not blank the stored
+    # firm_name/mandate (and vice versa).
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO investment_profiles (org_id, firm_name, mandate, weights) "
+            "VALUES (%s, %s, %s::jsonb, %s::jsonb)",
+            (
+                seeded_org["org_pk"],
+                "Acme Capital",
+                json.dumps({"checkSize": "5-10m"}),
+                json.dumps({}),
+            ),
+        )
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    # Framework editor saves ONLY weights.
+    resp = client.put(
+        "/investment-profile",
+        json={"weights": {"framework": {"categories": []}}},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["weights"] == {"framework": {"categories": []}}
+    # firm_name + mandate survive the weights-only save.
+    assert body["firmName"] == "Acme Capital"
+    assert body["mandate"] == {"checkSize": "5-10m"}
+
+
 # --- diligence checklist --------------------------------------------------
 
 
@@ -541,6 +587,260 @@ def test_checklist_status_404_for_unknown_item(client, owner_conn, seeded_org):
 def test_checklist_404_for_missing_deal(client, seeded_org):
     _authed(seeded_org["clerk_org_id"], "user-1")
     resp = client.post(f"/deals/{uuid.uuid4()}/checklist", json={"description": "x"})
+    assert resp.status_code == 404
+
+
+# --- IC sign-off ----------------------------------------------------------
+
+
+def test_ic_sign_off_null_when_absent(client, owner_conn, seeded_org):
+    deal_id = _seed_deal(owner_conn, seeded_org["org_pk"])
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    resp = client.get(f"/deals/{deal_id}/ic-sign-off")
+    assert resp.status_code == 200
+    assert resp.json() is None
+
+
+def test_ic_sign_off_record_then_read(client, owner_conn, seeded_org):
+    deal_id = _seed_deal(owner_conn, seeded_org["org_pk"])
+    _authed(seeded_org["clerk_org_id"], "user-1")
+    # Give the actor an email so the "recorded by" surfacing is exercised (the
+    # JIT-provisioned test user has none until a profile is synced).
+    client.post("/auth/sync-profile", json={"name": "Ana Lyst", "email": "ana@example.com"})
+
+    post = client.post(
+        f"/deals/{deal_id}/ic-sign-off",
+        json={"decision": "approve", "notes": "Strong fit"},
+    )
+    assert post.status_code == 201
+    body = post.json()
+    assert body["decision"] == "approve"
+    assert body["notes"] == "Strong fit"
+
+    got = client.get(f"/deals/{deal_id}/ic-sign-off").json()
+    assert got["decision"] == "approve"
+    assert got["notes"] == "Strong fit"
+    assert got["actorEmail"] == "ana@example.com"  # the recording user's email is surfaced
+
+    # It is written to the append-only audit log as an ic_sign_off event.
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "SELECT event_type FROM human_audit_log WHERE deal_id = %s AND event_type = 'ic_sign_off'",
+            (deal_id,),
+        )
+        assert cur.fetchone() is not None
+
+
+def test_ic_sign_off_latest_decision_wins(client, owner_conn, seeded_org):
+    deal_id = _seed_deal(owner_conn, seeded_org["org_pk"])
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    assert (
+        client.post(f"/deals/{deal_id}/ic-sign-off", json={"decision": "approve"}).status_code
+        == 201
+    )
+    assert (
+        client.post(f"/deals/{deal_id}/ic-sign-off", json={"decision": "decline"}).status_code
+        == 201
+    )
+
+    # Append-only: both rows persist, and the latest (decline) is the current verdict.
+    assert client.get(f"/deals/{deal_id}/ic-sign-off").json()["decision"] == "decline"
+
+
+def test_ic_sign_off_404_for_missing_deal(client, seeded_org):
+    _authed(seeded_org["clerk_org_id"], "user-1")
+    resp = client.post(
+        f"/deals/{uuid.uuid4()}/ic-sign-off",
+        json={"decision": "approve"},
+    )
+    assert resp.status_code == 404
+
+
+# --- deal notes (Analyst Notes / Interview Log) ---------------------------
+
+
+def test_deal_notes_empty_when_absent(client, owner_conn, seeded_org):
+    deal_id = _seed_deal(owner_conn, seeded_org["org_pk"])
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    resp = client.get(f"/deals/{deal_id}/notes", params={"kind": "analyst"})
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+def test_deal_notes_record_then_read_newest_first(client, owner_conn, seeded_org):
+    deal_id = _seed_deal(owner_conn, seeded_org["org_pk"])
+    _authed(seeded_org["clerk_org_id"], "user-1")
+    # Give the actor an email so the "recorded by" surfacing is exercised (the
+    # JIT-provisioned test user has none until a profile is synced).
+    client.post("/auth/sync-profile", json={"name": "Ana Lyst", "email": "ana@example.com"})
+
+    assert (
+        client.post(
+            f"/deals/{deal_id}/notes",
+            json={"kind": "analyst", "body": "First call went well"},
+        ).status_code
+        == 201
+    )
+    assert (
+        client.post(
+            f"/deals/{deal_id}/notes",
+            json={"kind": "analyst", "body": "Follow-up scheduled"},
+        ).status_code
+        == 201
+    )
+
+    rows = client.get(f"/deals/{deal_id}/notes", params={"kind": "analyst"}).json()
+    assert [r["body"] for r in rows] == ["Follow-up scheduled", "First call went well"]
+    assert rows[0]["actorEmail"] == "ana@example.com"  # the recording user's email is surfaced
+
+    # Written to the append-only audit log as analyst_note events.
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM human_audit_log WHERE deal_id = %s AND event_type = 'analyst_note'",
+            (deal_id,),
+        )
+        assert cur.fetchone()[0] == 2
+
+
+def test_deal_notes_kinds_are_isolated(client, owner_conn, seeded_org):
+    deal_id = _seed_deal(owner_conn, seeded_org["org_pk"])
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    client.post(f"/deals/{deal_id}/notes", json={"kind": "analyst", "body": "an analyst note"})
+    client.post(
+        f"/deals/{deal_id}/notes",
+        json={"kind": "interview", "body": "founder call", "interviewee": "Jane Founder"},
+    )
+
+    analyst = client.get(f"/deals/{deal_id}/notes", params={"kind": "analyst"}).json()
+    interview = client.get(f"/deals/{deal_id}/notes", params={"kind": "interview"}).json()
+    assert [r["body"] for r in analyst] == ["an analyst note"]
+    assert [r["body"] for r in interview] == ["founder call"]
+    # interviewee is retained for interview notes, dropped for analyst notes.
+    assert interview[0]["interviewee"] == "Jane Founder"
+    assert analyst[0]["interviewee"] is None
+
+
+def test_deal_notes_reject_empty_body(client, owner_conn, seeded_org):
+    deal_id = _seed_deal(owner_conn, seeded_org["org_pk"])
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    resp = client.post(f"/deals/{deal_id}/notes", json={"kind": "analyst", "body": "   "})
+    assert resp.status_code == 422
+
+
+def test_deal_notes_404_for_missing_deal(client, seeded_org):
+    _authed(seeded_org["clerk_org_id"], "user-1")
+    resp = client.post(
+        f"/deals/{uuid.uuid4()}/notes",
+        json={"kind": "analyst", "body": "note"},
+    )
+    assert resp.status_code == 404
+
+
+# --- findings register ----------------------------------------------------
+
+
+def test_findings_empty_when_absent(client, owner_conn, seeded_org):
+    deal_id = _seed_deal(owner_conn, seeded_org["org_pk"])
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    resp = client.get(f"/deals/{deal_id}/findings")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body == {"findings": [], "openCount": 0, "resolvedCount": 0}
+
+
+def test_findings_log_then_read(client, owner_conn, seeded_org):
+    deal_id = _seed_deal(owner_conn, seeded_org["org_pk"])
+    _authed(seeded_org["clerk_org_id"], "user-1")
+    # Give the actor an email so the "logged by" surfacing is exercised (the
+    # JIT-provisioned test user has none until a profile is synced).
+    client.post("/auth/sync-profile", json={"name": "Ana Lyst", "email": "ana@example.com"})
+
+    post = client.post(
+        f"/deals/{deal_id}/findings",
+        json={
+            "title": "Customer concentration",
+            "category": "commercial",
+            "severity": "high",
+            "note": "Top 2 customers = 60% of revenue",
+        },
+    )
+    assert post.status_code == 201
+    created = post.json()
+    assert created["status"] == "open"
+    assert created["findingId"]
+    assert created["actorEmail"] == "ana@example.com"
+
+    body = client.get(f"/deals/{deal_id}/findings").json()
+    assert body["openCount"] == 1
+    assert body["resolvedCount"] == 0
+    (finding,) = body["findings"]
+    assert finding["title"] == "Customer concentration"
+    assert finding["category"] == "commercial"
+    assert finding["severity"] == "high"
+    assert finding["note"] == "Top 2 customers = 60% of revenue"
+
+
+def test_findings_resolve_moves_to_resolved(client, owner_conn, seeded_org):
+    deal_id = _seed_deal(owner_conn, seeded_org["org_pk"])
+    _authed(seeded_org["clerk_org_id"], "user-1")
+    # Give the actor an email so the "resolved by" surfacing is exercised.
+    client.post("/auth/sync-profile", json={"name": "Ana Lyst", "email": "ana@example.com"})
+
+    finding_id = client.post(
+        f"/deals/{deal_id}/findings",
+        json={"title": "Missing AML policy", "category": "legal", "severity": "medium"},
+    ).json()["findingId"]
+
+    resolve = client.post(f"/deals/{deal_id}/findings/{finding_id}/resolve")
+    assert resolve.status_code == 200
+    assert resolve.json()["status"] == "resolved"
+    assert resolve.json()["resolvedBy"] == "ana@example.com"
+
+    body = client.get(f"/deals/{deal_id}/findings").json()
+    assert body["openCount"] == 0
+    assert body["resolvedCount"] == 1
+
+    # Append-only: the log + the resolution are two rows, nothing updated in place.
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM human_audit_log WHERE deal_id = %s "
+            "AND event_type IN ('finding_logged', 'finding_resolved')",
+            (deal_id,),
+        )
+        assert cur.fetchone()[0] == 2
+
+
+def test_findings_reject_empty_title(client, owner_conn, seeded_org):
+    deal_id = _seed_deal(owner_conn, seeded_org["org_pk"])
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    resp = client.post(
+        f"/deals/{deal_id}/findings",
+        json={"title": "   ", "category": "financial", "severity": "low"},
+    )
+    assert resp.status_code == 422
+
+
+def test_findings_resolve_404_for_unknown_finding(client, owner_conn, seeded_org):
+    deal_id = _seed_deal(owner_conn, seeded_org["org_pk"])
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    resp = client.post(f"/deals/{deal_id}/findings/{uuid.uuid4().hex}/resolve")
+    assert resp.status_code == 404
+
+
+def test_findings_404_for_missing_deal(client, seeded_org):
+    _authed(seeded_org["clerk_org_id"], "user-1")
+    resp = client.post(
+        f"/deals/{uuid.uuid4()}/findings",
+        json={"title": "x", "category": "financial", "severity": "low"},
+    )
     assert resp.status_code == 404
 
 

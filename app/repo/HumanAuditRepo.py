@@ -52,13 +52,31 @@ class HumanAuditRepo(BaseRepo[HumanAuditLog, dict]):
         )
         return list(result.scalars().all())
 
+    async def list_for_deal_by_event(
+        self, deal_id: object, event_type: str, limit: int
+    ) -> list[HumanAuditLog]:
+        """Every audit row for one deal of one event_type, newest first. Backs
+        the deal-scoped notes surfaces (Analyst Notes / Interview Log), which are
+        append-only running logs: each entry is a new row, and the list is simply
+        every row of that event_type. Same deal_id filter + stable
+        created_at/id ordering as list_for_deal; RLS scopes it to the org."""
+        result = await self.session.execute(
+            select(HumanAuditLog)
+            .where(HumanAuditLog.deal_id == deal_id)
+            .where(HumanAuditLog.event_type == event_type)
+            .order_by(HumanAuditLog.created_at.desc(), HumanAuditLog.id.desc())
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
     async def latest_for_deal_by_event(
         self, deal_id: object, event_type: str
     ) -> HumanAuditLog | None:
         """The most recent audit row for one deal of one event_type, or None.
-        Backs latest-wins reads (the draft-memo Recommendation override): the
-        current value is simply the newest row of that event_type. Same deal_id
-        filter + stable created_at/id ordering as list_for_deal; RLS scopes it to
+        Backs latest-wins reads where the current value is simply the newest row
+        of that event_type: the IC Sign-off decision (sign-off is append-only,
+        each decision a new row) and the draft-memo Recommendation override. Same
+        deal_id + stable created_at/id ordering as list_for_deal; RLS scopes it to
         the org."""
         result = await self.session.execute(
             select(HumanAuditLog)
