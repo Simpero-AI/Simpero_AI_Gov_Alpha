@@ -33,6 +33,12 @@ from app.repo.ScreeningResultRepo import ScreeningResultRepo
 from app.repo.SessionRepo import SessionRepo
 from app.repo.SynthesisSnapshotRepo import SynthesisSnapshotRepo
 from app.repo.UserRepo import UserRepo
+from app.schemas.checklist import (
+    ChecklistItemResponse,
+    ChecklistResponse,
+    RecordChecklistItemRequest,
+    SetChecklistItemStatusRequest,
+)
 from app.schemas.common import SuccessResponse
 from app.schemas.deals import (
     AvgAiScoreStat,
@@ -86,6 +92,13 @@ from app.schemas.intake_response import (
     IntakeResponseResponse,
 )
 from app.schemas.logs import ActivityRowResponse
+from app.services.checklist_view import (
+    CHECKLIST_ADDED,
+    CHECKLIST_EVENT_TYPES,
+    CHECKLIST_STATUS,
+    ChecklistItem,
+    build_checklist,
+)
 from app.services.company_view import build_company_view
 from app.services.corroboration_citation import corroboration_source_url
 from app.services.dashboard_stats import (
@@ -1278,6 +1291,140 @@ async def list_deal_audit(
         )
         for row in rows
     ]
+
+
+# Ceiling on checklist events folded per read -- far above any real deal's list.
+_MAX_CHECKLIST_EVENTS = 1000
+
+
+def _checklist_item_response(item: ChecklistItem) -> ChecklistItemResponse:
+    return ChecklistItemResponse(
+        item_id=item.item_id,
+        description=item.description,
+        assignee=item.assignee,
+        status=cast(Any, item.status),
+        actor_email=item.actor_email,
+        created_at=item.created_at,
+    )
+
+
+@router.get("/{deal_id}/checklist", response_model=ChecklistResponse)
+async def get_deal_checklist(
+    deal_id: uuid.UUID, db: AsyncSession = Depends(get_db)
+) -> ChecklistResponse:
+    """The deal's diligence checklist, folded from its append-only checklist
+    events (checklist_item_added + checklist_item_status), oldest-added first,
+    with a complete/total count. Empty before any request. Org-scoped by RLS -- a
+    deal in another org 404s via the DealRepo lookup rather than leaking rows."""
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    events = await HumanAuditRepo(db).list_for_deal_by_events(
+        deal_id, CHECKLIST_EVENT_TYPES, _MAX_CHECKLIST_EVENTS
+    )
+    view = build_checklist(events)
+    return ChecklistResponse(
+        items=[_checklist_item_response(i) for i in view.items],
+        complete_count=view.complete_count,
+        total_count=view.total_count,
+    )
+
+
+@router.post(
+    "/{deal_id}/checklist",
+    response_model=ChecklistItemResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def record_deal_checklist_item(
+    deal_id: uuid.UUID,
+    body: RecordChecklistItemRequest,
+    claims: dict[str, Any] = Depends(get_claims),
+    db: AsyncSession = Depends(get_db),
+) -> ChecklistItemResponse:
+    """Add a diligence request. Append-only: writes one checklist_item_added row
+    with a server-generated item_id, so status changes can reference it without
+    ever mutating this row."""
+    description = body.description.strip()
+    if not description:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Checklist item description must not be empty",
+        )
+
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    item_id = uuid.uuid4().hex
+    assignee = (body.assignee or "").strip() or None
+    org_id, actor_id, actor_email, _user_id = await _actor(db, claims)
+    row = await HumanAuditRepo(db).append(
+        {
+            "org_id": org_id,
+            "actor_id": actor_id,
+            "actor_email": actor_email,
+            "event_type": CHECKLIST_ADDED,
+            "deal_id": deal_id,
+            "payload": {"item_id": item_id, "description": description, "assignee": assignee},
+        }
+    )
+    # Refresh created_at (a server default) in the async context; touching it lazily
+    # after flush would raise MissingGreenlet. See public_intake's submitted_at.
+    await db.flush()
+    await db.refresh(row, attribute_names=["created_at"])
+    return ChecklistItemResponse(
+        item_id=item_id,
+        description=description,
+        assignee=assignee,
+        status="not_started",
+        actor_email=actor_email,
+        created_at=row.created_at,
+    )
+
+
+@router.post("/{deal_id}/checklist/{item_id}/status", response_model=ChecklistItemResponse)
+async def set_deal_checklist_item_status(
+    deal_id: uuid.UUID,
+    item_id: str,
+    body: SetChecklistItemStatusRequest,
+    claims: dict[str, Any] = Depends(get_claims),
+    db: AsyncSession = Depends(get_db),
+) -> ChecklistItemResponse:
+    """Advance a checklist request's status (not_started / in_review / complete).
+    Append-only: writes a checklist_item_status row keyed on the item_id; the
+    original add row is untouched. 404s if the deal or the item is absent."""
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    repo = HumanAuditRepo(db)
+    events = await repo.list_for_deal_by_events(
+        deal_id, CHECKLIST_EVENT_TYPES, _MAX_CHECKLIST_EVENTS
+    )
+    if item_id not in {i.item_id for i in build_checklist(events).items}:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Checklist item not found"
+        )
+
+    org_id, actor_id, actor_email, _user_id = await _actor(db, claims)
+    await repo.append(
+        {
+            "org_id": org_id,
+            "actor_id": actor_id,
+            "actor_email": actor_email,
+            "event_type": CHECKLIST_STATUS,
+            "deal_id": deal_id,
+            "payload": {"item_id": item_id, "status": body.status},
+        }
+    )
+    await db.flush()
+    # Re-fold so the response reflects the status just written.
+    events = await repo.list_for_deal_by_events(
+        deal_id, CHECKLIST_EVENT_TYPES, _MAX_CHECKLIST_EVENTS
+    )
+    item = {i.item_id: i for i in build_checklist(events).items}[item_id]
+    return _checklist_item_response(item)
 
 
 @router.get("/{deal_id}/corroboration", response_model=CorroborationViewResponse)
