@@ -440,6 +440,9 @@ def test_ic_sign_off_null_when_absent(client, owner_conn, seeded_org):
 def test_ic_sign_off_record_then_read(client, owner_conn, seeded_org):
     deal_id = _seed_deal(owner_conn, seeded_org["org_pk"])
     _authed(seeded_org["clerk_org_id"], "user-1")
+    # Give the actor an email so the "recorded by" surfacing is exercised (the
+    # JIT-provisioned test user has none until a profile is synced).
+    client.post("/auth/sync-profile", json={"name": "Ana Lyst", "email": "ana@example.com"})
 
     post = client.post(
         f"/deals/{deal_id}/ic-sign-off",
@@ -453,7 +456,7 @@ def test_ic_sign_off_record_then_read(client, owner_conn, seeded_org):
     got = client.get(f"/deals/{deal_id}/ic-sign-off").json()
     assert got["decision"] == "approve"
     assert got["notes"] == "Strong fit"
-    assert got["actorEmail"]  # the recording user's email is surfaced
+    assert got["actorEmail"] == "ana@example.com"  # the recording user's email is surfaced
 
     # It is written to the append-only audit log as an ic_sign_off event.
     with owner_conn.cursor() as cur:
