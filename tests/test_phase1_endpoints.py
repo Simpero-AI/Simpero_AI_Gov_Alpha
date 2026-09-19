@@ -425,6 +425,104 @@ def test_investment_profile_present(client, owner_conn, seeded_org):
     assert body["mandate"] == {"checkSize": "5-10m"}
 
 
+# --- findings register ----------------------------------------------------
+
+
+def test_findings_empty_when_absent(client, owner_conn, seeded_org):
+    deal_id = _seed_deal(owner_conn, seeded_org["org_pk"])
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    resp = client.get(f"/deals/{deal_id}/findings")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body == {"findings": [], "openCount": 0, "resolvedCount": 0}
+
+
+def test_findings_log_then_read(client, owner_conn, seeded_org):
+    deal_id = _seed_deal(owner_conn, seeded_org["org_pk"])
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    post = client.post(
+        f"/deals/{deal_id}/findings",
+        json={
+            "title": "Customer concentration",
+            "category": "commercial",
+            "severity": "high",
+            "note": "Top 2 customers = 60% of revenue",
+        },
+    )
+    assert post.status_code == 201
+    created = post.json()
+    assert created["status"] == "open"
+    assert created["findingId"]
+    assert created["actorEmail"]
+
+    body = client.get(f"/deals/{deal_id}/findings").json()
+    assert body["openCount"] == 1
+    assert body["resolvedCount"] == 0
+    (finding,) = body["findings"]
+    assert finding["title"] == "Customer concentration"
+    assert finding["category"] == "commercial"
+    assert finding["severity"] == "high"
+    assert finding["note"] == "Top 2 customers = 60% of revenue"
+
+
+def test_findings_resolve_moves_to_resolved(client, owner_conn, seeded_org):
+    deal_id = _seed_deal(owner_conn, seeded_org["org_pk"])
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    finding_id = client.post(
+        f"/deals/{deal_id}/findings",
+        json={"title": "Missing AML policy", "category": "legal", "severity": "medium"},
+    ).json()["findingId"]
+
+    resolve = client.post(f"/deals/{deal_id}/findings/{finding_id}/resolve")
+    assert resolve.status_code == 200
+    assert resolve.json()["status"] == "resolved"
+    assert resolve.json()["resolvedBy"]
+
+    body = client.get(f"/deals/{deal_id}/findings").json()
+    assert body["openCount"] == 0
+    assert body["resolvedCount"] == 1
+
+    # Append-only: the log + the resolution are two rows, nothing updated in place.
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM human_audit_log WHERE deal_id = %s "
+            "AND event_type IN ('finding_logged', 'finding_resolved')",
+            (deal_id,),
+        )
+        assert cur.fetchone()[0] == 2
+
+
+def test_findings_reject_empty_title(client, owner_conn, seeded_org):
+    deal_id = _seed_deal(owner_conn, seeded_org["org_pk"])
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    resp = client.post(
+        f"/deals/{deal_id}/findings",
+        json={"title": "   ", "category": "financial", "severity": "low"},
+    )
+    assert resp.status_code == 422
+
+
+def test_findings_resolve_404_for_unknown_finding(client, owner_conn, seeded_org):
+    deal_id = _seed_deal(owner_conn, seeded_org["org_pk"])
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    resp = client.post(f"/deals/{deal_id}/findings/{uuid.uuid4().hex}/resolve")
+    assert resp.status_code == 404
+
+
+def test_findings_404_for_missing_deal(client, seeded_org):
+    _authed(seeded_org["clerk_org_id"], "user-1")
+    resp = client.post(
+        f"/deals/{uuid.uuid4()}/findings",
+        json={"title": "x", "category": "financial", "severity": "low"},
+    )
+    assert resp.status_code == 404
+
+
 # --- auth flow (post UserRepo refactor) -----------------------------------
 
 

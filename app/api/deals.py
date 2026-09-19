@@ -73,6 +73,11 @@ from app.schemas.deals import (
     UpdateDealRequest,
     ValueDelta,
 )
+from app.schemas.finding import (
+    FindingResponse,
+    FindingsResponse,
+    RecordFindingRequest,
+)
 from app.schemas.intake_link import (
     CreateIntakeLinkRequest,
     CreateIntakeLinkResponse,
@@ -91,6 +96,13 @@ from app.services.entity_resolution import get_resolver
 from app.services.entity_resolution.types import EntityResolutionError
 from app.services.field_synthesis import SectionSynthesis, SynthCitation, sections_from_json
 from app.services.financials_view import build_financials_trend, build_financials_view
+from app.services.findings_view import (
+    FINDING_EVENT_TYPES,
+    FINDING_LOGGED,
+    FINDING_RESOLVED,
+    Finding,
+    build_findings,
+)
 from app.services.intake_links import (
     compute_intake_link_effective_status,
     compute_pipeline_intake_status,
@@ -1133,6 +1145,150 @@ async def list_deal_audit(
         )
         for row in rows
     ]
+
+
+# Ceiling on finding events folded per read -- far above any real deal's register.
+_MAX_FINDING_EVENTS = 1000
+
+
+def _finding_response(finding: Finding) -> FindingResponse:
+    return FindingResponse(
+        finding_id=finding.finding_id,
+        title=finding.title,
+        category=cast(Any, finding.category),
+        severity=cast(Any, finding.severity),
+        status=cast(Any, finding.status),
+        note=finding.note,
+        actor_email=finding.actor_email,
+        created_at=finding.created_at,
+        resolved_at=finding.resolved_at,
+        resolved_by=finding.resolved_by,
+    )
+
+
+@router.get("/{deal_id}/findings", response_model=FindingsResponse)
+async def get_deal_findings(
+    deal_id: uuid.UUID, db: AsyncSession = Depends(get_db)
+) -> FindingsResponse:
+    """The deal's analyst-logged findings register, folded from its append-only
+    finding events (finding_logged + finding_resolved), newest-logged first, with
+    open/resolved counts. Empty before any finding. Org-scoped by RLS -- a deal in
+    another org 404s via the DealRepo lookup rather than leaking rows."""
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    events = await HumanAuditRepo(db).list_for_deal_by_events(
+        deal_id, FINDING_EVENT_TYPES, _MAX_FINDING_EVENTS
+    )
+    view = build_findings(events)
+    return FindingsResponse(
+        findings=[_finding_response(f) for f in view.findings],
+        open_count=view.open_count,
+        resolved_count=view.resolved_count,
+    )
+
+
+@router.post(
+    "/{deal_id}/findings",
+    response_model=FindingResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def record_deal_finding(
+    deal_id: uuid.UUID,
+    body: RecordFindingRequest,
+    claims: dict[str, Any] = Depends(get_claims),
+    db: AsyncSession = Depends(get_db),
+) -> FindingResponse:
+    """Log a diligence finding. Append-only: writes one finding_logged row with a
+    server-generated finding_id, so a later resolve can reference it without ever
+    mutating this row."""
+    title = body.title.strip()
+    if not title:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Finding title must not be empty",
+        )
+
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    finding_id = uuid.uuid4().hex
+    note = (body.note or "").strip() or None
+    org_id, actor_id, actor_email, _user_id = await _actor(db, claims)
+    row = await HumanAuditRepo(db).append(
+        {
+            "org_id": org_id,
+            "actor_id": actor_id,
+            "actor_email": actor_email,
+            "event_type": FINDING_LOGGED,
+            "deal_id": deal_id,
+            "payload": {
+                "finding_id": finding_id,
+                "title": title,
+                "category": body.category,
+                "severity": body.severity,
+                "note": note,
+            },
+        }
+    )
+    await db.flush()
+    return FindingResponse(
+        finding_id=finding_id,
+        title=title,
+        category=body.category,
+        severity=body.severity,
+        status="open",
+        note=note,
+        actor_email=actor_email,
+        created_at=row.created_at,
+        resolved_at=None,
+        resolved_by=None,
+    )
+
+
+@router.post("/{deal_id}/findings/{finding_id}/resolve", response_model=FindingResponse)
+async def resolve_deal_finding(
+    deal_id: uuid.UUID,
+    finding_id: str,
+    claims: dict[str, Any] = Depends(get_claims),
+    db: AsyncSession = Depends(get_db),
+) -> FindingResponse:
+    """Resolve an open finding. Append-only: writes a finding_resolved row keyed on
+    the finding_id; the original finding_logged row is untouched. 404s if the deal
+    or the finding is absent; resolving an already-resolved finding is a no-op that
+    still returns its current state."""
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    repo = HumanAuditRepo(db)
+    events = await repo.list_for_deal_by_events(deal_id, FINDING_EVENT_TYPES, _MAX_FINDING_EVENTS)
+    current = {f.finding_id: f for f in build_findings(events).findings}.get(finding_id)
+    if current is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Finding not found")
+
+    if current.status != "resolved":
+        org_id, actor_id, actor_email, _user_id = await _actor(db, claims)
+        await repo.append(
+            {
+                "org_id": org_id,
+                "actor_id": actor_id,
+                "actor_email": actor_email,
+                "event_type": FINDING_RESOLVED,
+                "deal_id": deal_id,
+                "payload": {"finding_id": finding_id},
+            }
+        )
+        await db.flush()
+        # Re-fold so the response reflects the resolution just written.
+        events = await repo.list_for_deal_by_events(
+            deal_id, FINDING_EVENT_TYPES, _MAX_FINDING_EVENTS
+        )
+        current = {f.finding_id: f for f in build_findings(events).findings}[finding_id]
+
+    return _finding_response(current)
 
 
 @router.get("/{deal_id}/corroboration", response_model=CorroborationViewResponse)
