@@ -456,6 +456,52 @@ def test_investment_profile_present(client, owner_conn, seeded_org):
     assert body["mandate"] == {"checkSize": "5-10m"}
 
 
+def test_investment_profile_put_creates_row(client, seeded_org):
+    # PUT on an org with no profile row creates it and returns JSON (not the
+    # HTML fallback the retired tRPC upsert produced).
+    _authed(seeded_org["clerk_org_id"], "user-1")
+    resp = client.put(
+        "/investment-profile",
+        json={"firmName": "Vistara", "mandate": {"checkSize": "5-10m"}},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["firmName"] == "Vistara"
+    assert body["mandate"] == {"checkSize": "5-10m"}
+    # Persisted: a subsequent GET reads it back.
+    assert client.get("/investment-profile").json()["firmName"] == "Vistara"
+
+
+def test_investment_profile_put_partial_merge_does_not_clobber(client, owner_conn, seeded_org):
+    # The Firm Profile editor and the Scoring Framework editor save different
+    # slices independently. A weights-only save must not blank the stored
+    # firm_name/mandate (and vice versa).
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO investment_profiles (org_id, firm_name, mandate, weights) "
+            "VALUES (%s, %s, %s::jsonb, %s::jsonb)",
+            (
+                seeded_org["org_pk"],
+                "Acme Capital",
+                json.dumps({"checkSize": "5-10m"}),
+                json.dumps({}),
+            ),
+        )
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    # Framework editor saves ONLY weights.
+    resp = client.put(
+        "/investment-profile",
+        json={"weights": {"framework": {"categories": []}}},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["weights"] == {"framework": {"categories": []}}
+    # firm_name + mandate survive the weights-only save.
+    assert body["firmName"] == "Acme Capital"
+    assert body["mandate"] == {"checkSize": "5-10m"}
+
+
 # --- diligence checklist --------------------------------------------------
 
 
@@ -541,6 +587,74 @@ def test_checklist_status_404_for_unknown_item(client, owner_conn, seeded_org):
 def test_checklist_404_for_missing_deal(client, seeded_org):
     _authed(seeded_org["clerk_org_id"], "user-1")
     resp = client.post(f"/deals/{uuid.uuid4()}/checklist", json={"description": "x"})
+    assert resp.status_code == 404
+
+
+# --- IC sign-off ----------------------------------------------------------
+
+
+def test_ic_sign_off_null_when_absent(client, owner_conn, seeded_org):
+    deal_id = _seed_deal(owner_conn, seeded_org["org_pk"])
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    resp = client.get(f"/deals/{deal_id}/ic-sign-off")
+    assert resp.status_code == 200
+    assert resp.json() is None
+
+
+def test_ic_sign_off_record_then_read(client, owner_conn, seeded_org):
+    deal_id = _seed_deal(owner_conn, seeded_org["org_pk"])
+    _authed(seeded_org["clerk_org_id"], "user-1")
+    # Give the actor an email so the "recorded by" surfacing is exercised (the
+    # JIT-provisioned test user has none until a profile is synced).
+    client.post("/auth/sync-profile", json={"name": "Ana Lyst", "email": "ana@example.com"})
+
+    post = client.post(
+        f"/deals/{deal_id}/ic-sign-off",
+        json={"decision": "approve", "notes": "Strong fit"},
+    )
+    assert post.status_code == 201
+    body = post.json()
+    assert body["decision"] == "approve"
+    assert body["notes"] == "Strong fit"
+
+    got = client.get(f"/deals/{deal_id}/ic-sign-off").json()
+    assert got["decision"] == "approve"
+    assert got["notes"] == "Strong fit"
+    assert got["actorEmail"] == "ana@example.com"  # the recording user's email is surfaced
+
+    # It is written to the append-only audit log as an ic_sign_off event.
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "SELECT event_type FROM human_audit_log WHERE deal_id = %s AND event_type = 'ic_sign_off'",
+            (deal_id,),
+        )
+        assert cur.fetchone() is not None
+
+
+def test_ic_sign_off_latest_decision_wins(client, owner_conn, seeded_org):
+    deal_id = _seed_deal(owner_conn, seeded_org["org_pk"])
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    assert (
+        client.post(f"/deals/{deal_id}/ic-sign-off", json={"decision": "approve"}).status_code
+        == 201
+    )
+    assert (
+        client.post(f"/deals/{deal_id}/ic-sign-off", json={"decision": "decline"}).status_code
+        == 201
+    )
+
+    # Append-only: both rows persist, and the latest (decline) is the current verdict.
+    assert client.get(f"/deals/{deal_id}/ic-sign-off").json()["decision"] == "decline"
+
+
+def test_ic_sign_off_404_for_missing_deal(client, seeded_org):
+    _authed(seeded_org["clerk_org_id"], "user-1")
+    resp = client.post(
+        f"/deals/{uuid.uuid4()}/ic-sign-off",
+        json={"decision": "approve"},
+    )
     assert resp.status_code == 404
 
 
