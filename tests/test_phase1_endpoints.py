@@ -440,6 +440,9 @@ def test_memo_draft_null_when_absent(client, owner_conn, seeded_org):
 def test_memo_draft_save_then_read(client, owner_conn, seeded_org):
     deal_id = _seed_deal(owner_conn, seeded_org["org_pk"])
     _authed(seeded_org["clerk_org_id"], "user-1")
+    # Give the actor an email so the "edited by" surfacing is exercised (the
+    # JIT-provisioned test user has none until a profile is synced).
+    client.post("/auth/sync-profile", json={"name": "Ana Lyst", "email": "ana@example.com"})
 
     post = client.post(
         f"/deals/{deal_id}/memo-draft/recommendation",
@@ -447,7 +450,7 @@ def test_memo_draft_save_then_read(client, owner_conn, seeded_org):
     )
     assert post.status_code == 201
     assert post.json()["content"] == "Proceed to IC with conditions."
-    assert post.json()["actorEmail"]
+    assert post.json()["actorEmail"] == "ana@example.com"
 
     got = client.get(f"/deals/{deal_id}/memo-draft").json()["recommendation"]
     assert got["content"] == "Proceed to IC with conditions."
