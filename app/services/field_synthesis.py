@@ -62,9 +62,12 @@ _LLM_TIMEOUT_S = 45.0
 
 @dataclass(frozen=True)
 class SectionSpec:
-    """One narrative Company-tab section to synthesize. `key` matches the section
-    names build_company_view already uses (overview/risks/commercial/
-    related_parties/plans); `query` is the keyword-rich retrieval query."""
+    """One narrative section to synthesize for a deal. `key` identifies the section
+    to the tab that renders it -- the Company-tab prose sections reuse
+    build_company_view's names (overview/risks/commercial/related_parties/plans),
+    while executive_summary (Summary tab), leadership (Founders), and the market_*
+    sections (Market tab) have no build_company_view counterpart. `query` is the
+    keyword-rich retrieval query."""
 
     key: str
     title: str
@@ -73,15 +76,18 @@ class SectionSpec:
     people: bool = False
 
 
-# The narrative sections synthesized per deal. The first five feed the Company
-# tab; "executive_summary" is deal-level and feeds the Summary tab's Executive
-# Summary (the memo composer that used to write it is unbuilt). Identity facts
+# The narrative sections synthesized per deal, one snapshot shared across tabs.
+# overview/risks/commercial/related_parties feed the Company tab and "leadership"
+# its people section; "executive_summary" is deal-level and feeds the Summary
+# tab's Executive Summary (the memo composer that used to write it is unbuilt);
+# "market_risks"/"market_growth_strategy" feed the Market tab, whose claims spine
+# has no producer for a market-scoped risk or growth signal. Identity facts
 # (Sector / HQ / Headcount / Founded) are deliberately NOT here -- they stay on
 # the claims + deal-profile path; this pass is for the prose sections where
 # synthesis over the full text adds the most over the atomic claim dump. All
 # sections are served by GET /deals/{id}/company-synthesis and cached under one
-# query key, so the Company and Summary tabs share a single synthesis pass; each
-# tab renders only the sections it needs by key.
+# query key, so the tabs share a single synthesis pass; each tab renders only the
+# sections it needs by key.
 COMPANY_SECTIONS: tuple[SectionSpec, ...] = (
     SectionSpec(
         "executive_summary",
@@ -145,6 +151,53 @@ COMPANY_SECTIONS: tuple[SectionSpec, ...] = (
         (
             "plans strategy commitments future expansion investment outlook "
             "guidance capital allocation initiatives"
+        ),
+    ),
+    # --- Market tab -----------------------------------------------------------
+    # These two feed the MARKET tab, and are deliberately a DIFFERENT lens from the
+    # Company tab's `risks` / `plans` above -- not a relabel of them. Those stay the
+    # OPERATIONAL lens (the target's own key-person, supply-chain, execution risks
+    # and general commitments), lead-subject-scoped through build_company_view; the
+    # claims spine already carries them as risk_or_dependency / plan_or_commitment.
+    # These are the EXTERNAL, market-facing lens the claims spine has no producer
+    # for: risk arising from the market/competition/regulation, and the strategy for
+    # growing market position. The questions steer retrieval-synthesis toward that
+    # boundary -- some overlap is inherent when both read the same filing, but the
+    # framing keeps Market a market view rather than a duplicate of Company under a
+    # "market" heading.
+    SectionSpec(
+        "market_risks",
+        "Market Risks",
+        (
+            "What risks does the company face from its MARKET environment -- "
+            "competition and competitive threats, market-size or growth assumptions, "
+            "pricing and margin pressure, regulatory or policy change, industry "
+            "cyclicality, and demand or substitution risk? Report market-, "
+            "competitive- and regulatory-facing risks, not the company's purely "
+            "internal operational risks (key-person, supply-chain execution, "
+            "litigation)."
+        ),
+        (
+            "market risk competition competitive threats new entrants market share "
+            "erosion pricing pressure margin regulatory policy change compliance "
+            "industry cyclicality demand substitution addressable market growth "
+            "assumptions macroeconomic headwinds"
+        ),
+    ),
+    SectionSpec(
+        "market_growth_strategy",
+        "Growth Strategy",
+        (
+            "How does the company plan to GROW its position in the market -- its "
+            "market-expansion and go-to-market strategy, new segments, geographies "
+            "or products, how it intends to win share and differentiate from "
+            "competitors, and its stated growth drivers?"
+        ),
+        (
+            "growth strategy go to market market expansion new markets geographies "
+            "segments product roadmap customer acquisition win market share "
+            "competitive differentiation upsell cross sell partnerships channel "
+            "penetration total addressable market"
         ),
     ),
     SectionSpec(
@@ -249,7 +302,7 @@ class SynthPerson:
 
 @dataclass(frozen=True)
 class SectionSynthesis:
-    """A section carries `points` (the six prose sections) or `people` (the
+    """A section carries `points` (the prose sections) or `people` (the
     leadership section) -- never conceptually both -- but both fields always
     exist so an old persisted row with no `people` key still degrades
     gracefully to an empty list rather than raising."""
