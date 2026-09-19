@@ -425,6 +425,94 @@ def test_investment_profile_present(client, owner_conn, seeded_org):
     assert body["mandate"] == {"checkSize": "5-10m"}
 
 
+# --- diligence checklist --------------------------------------------------
+
+
+def test_checklist_empty_when_absent(client, owner_conn, seeded_org):
+    deal_id = _seed_deal(owner_conn, seeded_org["org_pk"])
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    resp = client.get(f"/deals/{deal_id}/checklist")
+    assert resp.status_code == 200
+    assert resp.json() == {"items": [], "completeCount": 0, "totalCount": 0}
+
+
+def test_checklist_add_then_read(client, owner_conn, seeded_org):
+    deal_id = _seed_deal(owner_conn, seeded_org["org_pk"])
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    post = client.post(
+        f"/deals/{deal_id}/checklist",
+        json={"description": "Provide audited financials", "assignee": "CFO"},
+    )
+    assert post.status_code == 201
+    created = post.json()
+    assert created["status"] == "not_started"
+    assert created["assignee"] == "CFO"
+    assert created["itemId"]
+
+    body = client.get(f"/deals/{deal_id}/checklist").json()
+    assert body["totalCount"] == 1
+    assert body["completeCount"] == 0
+    assert body["items"][0]["description"] == "Provide audited financials"
+
+
+def test_checklist_status_advances_and_counts(client, owner_conn, seeded_org):
+    deal_id = _seed_deal(owner_conn, seeded_org["org_pk"])
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    item_id = client.post(
+        f"/deals/{deal_id}/checklist", json={"description": "Legal review"}
+    ).json()["itemId"]
+
+    assert (
+        client.post(
+            f"/deals/{deal_id}/checklist/{item_id}/status", json={"status": "in_review"}
+        ).json()["status"]
+        == "in_review"
+    )
+    done = client.post(f"/deals/{deal_id}/checklist/{item_id}/status", json={"status": "complete"})
+    assert done.status_code == 200
+    assert done.json()["status"] == "complete"
+
+    body = client.get(f"/deals/{deal_id}/checklist").json()
+    assert body["completeCount"] == 1
+    assert body["totalCount"] == 1
+
+    # Append-only: add + two status changes = three rows, nothing updated in place.
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM human_audit_log WHERE deal_id = %s "
+            "AND event_type IN ('checklist_item_added', 'checklist_item_status')",
+            (deal_id,),
+        )
+        assert cur.fetchone()[0] == 3
+
+
+def test_checklist_reject_empty_description(client, owner_conn, seeded_org):
+    deal_id = _seed_deal(owner_conn, seeded_org["org_pk"])
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    resp = client.post(f"/deals/{deal_id}/checklist", json={"description": "  "})
+    assert resp.status_code == 422
+
+
+def test_checklist_status_404_for_unknown_item(client, owner_conn, seeded_org):
+    deal_id = _seed_deal(owner_conn, seeded_org["org_pk"])
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    resp = client.post(
+        f"/deals/{deal_id}/checklist/{uuid.uuid4().hex}/status", json={"status": "complete"}
+    )
+    assert resp.status_code == 404
+
+
+def test_checklist_404_for_missing_deal(client, seeded_org):
+    _authed(seeded_org["clerk_org_id"], "user-1")
+    resp = client.post(f"/deals/{uuid.uuid4()}/checklist", json={"description": "x"})
+    assert resp.status_code == 404
+
+
 # --- auth flow (post UserRepo refactor) -----------------------------------
 
 
