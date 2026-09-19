@@ -55,6 +55,20 @@ class FinancialFact:
     status: str
     entity: str | None
     source_url: str | None = None
+    # True when the consistency pass (SIM-372) flagged this figure's arithmetic
+    # as inconsistent with its operands (e.g. revenue - cogs != gross_profit).
+    # The figure still shows -- an operand, not this line, may be the wrong one,
+    # and dropping it would lose data -- but the FE badges it so a
+    # non-reconciling statement is visible instead of a confident clean number.
+    reconciliation_mismatch: bool = False
+
+
+def _reconciliation_mismatch(claim: Claim) -> bool:
+    """Whether the SIM-372 consistency pass flagged this claim's arithmetic as
+    inconsistent. `formula_mismatch` is the flag that pass sets on the derived
+    claim when an evaluable accounting identity fails; it is reserved for exactly
+    this in the claims contract."""
+    return bool(claim.flags and "formula_mismatch" in claim.flags)
 
 
 @dataclass(frozen=True)
@@ -270,6 +284,7 @@ def build_financials_view(
                 status=claim.status,
                 entity=claim.entity,
                 source_url=_source_url(claim, source_urls),
+                reconciliation_mismatch=_reconciliation_mismatch(claim),
             )
             for metric_key, claim in sorted(items, key=_sort_key)
         ]

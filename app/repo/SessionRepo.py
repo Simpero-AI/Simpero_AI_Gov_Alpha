@@ -1,4 +1,5 @@
 import uuid
+from collections.abc import Sequence
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -32,6 +33,23 @@ class SessionRepo(BaseRepo[Session, dict]):
             .limit(1)
         )
         return result.scalar_one_or_none()
+
+    async def latest_for_deals(self, deal_ids: Sequence[uuid.UUID]) -> dict[uuid.UUID, Session]:
+        """Every listed deal's most recent session, in ONE query, keyed by
+        deal_id -- the batched counterpart of latest_for_deal for the Live
+        Pipeline grid, which otherwise ran this per row (N+1). DISTINCT ON
+        (deal_id), newest created_at first with `id` DESC as the deterministic
+        tie-break. Deals with no session are absent from the dict. Same
+        bind-parameter ceiling as IntakeLinkRepo.latest_for_deals."""
+        if not deal_ids:
+            return {}
+        result = await self.session.execute(
+            select(Session)
+            .where(Session.deal_id.in_(deal_ids))
+            .distinct(Session.deal_id)
+            .order_by(Session.deal_id, Session.created_at.desc(), Session.id.desc())
+        )
+        return {row.deal_id: row for row in result.scalars().all()}
 
     async def delete(self, id: uuid.UUID) -> bool:
         """Returns True if a row was deleted. RLS scopes the delete to the
