@@ -1158,9 +1158,11 @@ async def record_ic_sign_off(
             "payload": {"decision": body.decision, "notes": body.notes},
         }
     )
-    # Flush so the server-default created_at is populated for the response
-    # (the row is committed with the rest of the request transaction).
+    # Flush then refresh created_at: it is a server default (func.now()), so it is
+    # unpopulated until fetched, and touching it lazily would raise MissingGreenlet
+    # under async. Load it explicitly in the async context, as public_intake does.
     await db.flush()
+    await db.refresh(row, attribute_names=["created_at"])
     return IcSignOffResponse(
         decision=body.decision,
         notes=body.notes,
