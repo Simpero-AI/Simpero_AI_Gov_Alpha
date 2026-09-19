@@ -34,6 +34,11 @@ from app.repo.SessionRepo import SessionRepo
 from app.repo.SynthesisSnapshotRepo import SynthesisSnapshotRepo
 from app.repo.UserRepo import UserRepo
 from app.schemas.common import SuccessResponse
+from app.schemas.deal_note import (
+    DealNoteKind,
+    DealNoteResponse,
+    RecordDealNoteRequest,
+)
 from app.schemas.deals import (
     AvgAiScoreStat,
     CompanyFactResponse,
@@ -1133,6 +1138,96 @@ async def list_deal_audit(
         )
         for row in rows
     ]
+
+
+# Analyst Notes and Interview Log are one append-only note surface under two
+# kinds; each kind maps to its own human_audit_log event_type.
+_NOTE_EVENT_BY_KIND: dict[str, str] = {
+    "analyst": "analyst_note",
+    "interview": "interview_note",
+}
+
+
+@router.get("/{deal_id}/notes", response_model=list[DealNoteResponse])
+async def list_deal_notes(
+    deal_id: uuid.UUID,
+    kind: DealNoteKind,
+    limit: int = Query(default=100, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+) -> list[DealNoteResponse]:
+    """The deal's Analyst Notes or Interview Log (selected by `kind`), newest
+    first. An append-only running log stored in human_audit_log; returns [] before
+    any note is logged. Org-scoped by RLS -- a deal in another org 404s via the
+    DealRepo lookup rather than leaking rows."""
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    rows = await HumanAuditRepo(db).list_for_deal_by_event(
+        deal_id, _NOTE_EVENT_BY_KIND[kind], limit
+    )
+    return [
+        DealNoteResponse(
+            kind=kind,
+            body=(row.payload or {}).get("body", ""),
+            interviewee=(row.payload or {}).get("interviewee"),
+            actor_email=row.actor_email,
+            created_at=row.created_at,
+        )
+        for row in rows
+    ]
+
+
+@router.post(
+    "/{deal_id}/notes",
+    response_model=DealNoteResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def record_deal_note(
+    deal_id: uuid.UUID,
+    body: RecordDealNoteRequest,
+    claims: dict[str, Any] = Depends(get_claims),
+    db: AsyncSession = Depends(get_db),
+) -> DealNoteResponse:
+    """Log an analyst note or interview note on a deal. Append-only: each call
+    writes a new human_audit_log row (body + interviewee in the payload) under
+    the kind's event_type. Mirrors the IC sign-off / PUT /mandate actor+audit
+    pattern."""
+    text = body.body.strip()
+    if not text:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Note body must not be empty",
+        )
+    interviewee: str | None = None
+    if body.kind == "interview" and body.interviewee:
+        interviewee = body.interviewee.strip() or None
+
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    org_id, actor_id, actor_email, _user_id = await _actor(db, claims)
+    row = await HumanAuditRepo(db).append(
+        {
+            "org_id": org_id,
+            "actor_id": actor_id,
+            "actor_email": actor_email,
+            "event_type": _NOTE_EVENT_BY_KIND[body.kind],
+            "deal_id": deal_id,
+            "payload": {"body": text, "interviewee": interviewee},
+        }
+    )
+    # Flush so the server-default created_at is populated for the response
+    # (committed with the rest of the request transaction).
+    await db.flush()
+    return DealNoteResponse(
+        kind=body.kind,
+        body=text,
+        interviewee=interviewee,
+        actor_email=actor_email,
+        created_at=row.created_at,
+    )
 
 
 @router.get("/{deal_id}/corroboration", response_model=CorroborationViewResponse)
