@@ -1233,7 +1233,10 @@ async def record_deal_finding(
             },
         }
     )
+    # Refresh created_at (a server default) in the async context; touching it lazily
+    # after flush would raise MissingGreenlet. See public_intake's submitted_at.
     await db.flush()
+    await db.refresh(row, attribute_names=["created_at"])
     return FindingResponse(
         finding_id=finding_id,
         title=title,
