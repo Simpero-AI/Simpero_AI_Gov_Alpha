@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api import (
     admin,
@@ -88,6 +89,28 @@ app.include_router(public_uploads.router, prefix=API_PREFIX)
 app.include_router(admin.router, prefix=API_PREFIX)
 app.include_router(uploads.router, prefix=API_PREFIX)
 app.include_router(inspector.router, prefix=API_PREFIX)
+
+
+@app.exception_handler(404)
+async def not_found_json_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+    """Guarantee every 404 is JSON, never the ingress SPA's index.html — so an
+    orphaned /api call (e.g. the retired /api/trpc/investmentProfile.upsert the
+    mandate/firm-profile UI used to POST to, or any future dead route) fails as
+    parseable JSON rather than an "Unexpected token '<'" HTML-parse error in the
+    caller.
+
+    A 404 exception handler, not a greedy /api/{path:path} route, precisely
+    because it fires only AFTER routing on a genuine 404: real routes keep their
+    405 (wrong method, with the Allow header) and their trailing-slash 307
+    redirects, which a catch-all route would swallow into 404s. exc.detail is
+    preserved, so the public-intake "Not found" contract and FastAPI's own
+    default "Not Found" both pass through unchanged."""
+    return JSONResponse(
+        status_code=404,
+        content={"detail": exc.detail},
+        headers=getattr(exc, "headers", None),
+    )
+
 
 # Do not open DB connections at startup. PgBouncer transaction pooling requires sessions to be
 # opened per-transaction, not per-application-lifecycle. A startup DB connection would hold a
