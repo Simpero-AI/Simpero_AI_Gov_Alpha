@@ -30,3 +30,14 @@ def compute_pipeline_value_delta(current: int, prior: int) -> PipelineValueDelta
     if prior == 0:
         return "new" if current > 0 else None
     return current - prior
+
+
+def compute_dd_completion_pct(complete: int, total: int) -> int:
+    """Whole-number percentage of deals whose analysis chain reached the
+    terminal "complete" state. 0 when there are no deals — 0/0 reports as 0%,
+    the honest "nothing completed" reading, not undefined. The caller counts
+    `complete` with the same `_deal_status_from_runs` mapper the pipeline grid
+    and status endpoint use, so this stays a pure round()."""
+    if total <= 0:
+        return 0
+    return round(complete / total * 100)

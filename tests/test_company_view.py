@@ -159,6 +159,26 @@ def test_qualitative_assertions_group_by_class():
     assert "We lead the mid-market segment." not in all_company_text
 
 
+def test_firmographic_assertions_group_into_their_sections():
+    # The four sections that used to be hardcoded permanent-empties on the FE now
+    # route from their own assertion classes.
+    claims = [
+        _qual("Sequoia and a16z co-invested in the Series C.", "co_investor"),
+        _qual("Raised a $50M Series C in 2024.", "funding_history"),
+        _qual("Largest customer is Acme, ~18% of revenue.", "key_customer"),
+        _qual("Operates across the Americas, Europe and Greater China.", "geographic_presence"),
+    ]
+
+    view = build_company_view(claims, filenames={})
+
+    assert [f.value for f in view.co_investors] == ["Sequoia and a16z co-invested in the Series C."]
+    assert [f.value for f in view.funding_history] == ["Raised a $50M Series C in 2024."]
+    assert [f.value for f in view.key_customers] == ["Largest customer is Acme, ~18% of revenue."]
+    assert [f.value for f in view.geographic_presence] == [
+        "Operates across the Americas, Europe and Greater China."
+    ]
+
+
 def test_untrusted_and_unlabelled_claims_are_excluded():
     claims = [
         _qual("Draft note.", "operating_model", status="proposed"),  # untrusted

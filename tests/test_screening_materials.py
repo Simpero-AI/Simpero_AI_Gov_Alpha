@@ -465,8 +465,10 @@ def test_non_dollar_typed_and_per_unit_catchall_is_not_recovered():
 
 
 def test_magnitude_breaks_ties_for_the_same_metric_and_period():
-    # Two canonical claims for the same metric+year+status: the magnitude tiebreak
-    # picks the larger deterministically (e.g. consolidated over a segment figure).
+    # Two canonical claims (no attribute_raw, so consolidated_rank is neutral) for
+    # the same metric+year+status: the magnitude tiebreak picks the larger
+    # deterministically. Consolidated-vs-segment is handled by _consolidated_rank
+    # above magnitude, not by magnitude -- see the gross-margin test below.
     claims = [
         _claim(attribute="revenue", normalized=100_000_000, period_year=2005),
         _claim(attribute="revenue", normalized=328_000_000, period_year=2005),
@@ -475,6 +477,37 @@ def test_magnitude_breaks_ties_for_the_same_metric_and_period():
     materials = build_screening_materials(claims, dashboard_structure=None, filenames={})
 
     assert [f.value for f in materials.extracted_fields] == ["$328.00M"]
+
+
+def test_consolidated_margin_beats_a_larger_segment_margin():
+    # Apple's Services gross margin (75.4%) sits beside the consolidated ~46% for
+    # the same period; both canonicalize to `gross_margin` with the disambiguator
+    # kept in attribute_raw. The consolidated figure must win -- the magnitude
+    # tiebreak must NOT surface the bigger SEGMENT percentage as THE gross margin
+    # (the staging-test bug). consolidated_rank ranks "Total ..." above
+    # "Services ...", and magnitude is neutralized for percent metrics.
+    claims = [
+        _claim(
+            attribute="gross_margin",
+            normalized=75.4,
+            value_type="percent",
+            attribute_raw="Services gross margin",
+            period_year=2025,
+        ),
+        _claim(
+            attribute="gross_margin",
+            normalized=46.2,
+            value_type="percent",
+            attribute_raw="Total gross margin",
+            period_year=2025,
+        ),
+    ]
+
+    materials = build_screening_materials(claims, dashboard_structure=None, filenames={})
+
+    assert len(materials.extracted_fields) == 1
+    value = materials.extracted_fields[0].value
+    assert "46" in value and "75" not in value
 
 
 def test_magnitude_tiebreak_uses_absolute_value_for_losses():

@@ -216,8 +216,13 @@ def test_list_pipeline_and_dashboard_stats_shapes(client, owner_conn, seeded_org
     assert stats["window"] == "month"
     assert stats["totalDeals"]["value"] >= 1
     assert "pipelineValueUsd" in stats
+    # No scoring producer yet -> value stays null (FE shows "—"), never fabricated.
     assert stats["avgAiScore"]["value"] is None
+    assert stats["avgAiScore"]["delta"] is None
+    # One deal, no analysis run -> 0% complete. delta_pp is null (no fabricated
+    # month-over-month delta), not 0.
     assert stats["ddCompletionPct"]["value"] == 0
+    assert stats["ddCompletionPct"]["deltaPp"] is None
 
 
 def test_list_pipeline_reflects_real_analysis_run_status(client, owner_conn, seeded_org):
@@ -236,6 +241,32 @@ def test_list_pipeline_reflects_real_analysis_run_status(client, owner_conn, see
     row = next(row for row in pipeline_resp.json() if row["dealId"] == deal_id)
     assert row["agentStatus"]["jobStatus"] == "processing"
     assert row["agentStatus"]["currentPhase"] == "parsing"
+
+
+def test_dashboard_stats_dd_completion_counts_completed_deals(client, owner_conn, seeded_org):
+    """DD Completion is a real read of the analysis pipeline, not a stub: the
+    fraction of deals whose latest run chain reached "complete". Three deals,
+    one complete -> round(1/3*100) == 33. A deal counts as complete on the same
+    _deal_status_from_runs terminal state the pipeline grid uses (a successful
+    verification/screening run), not merely on having any run."""
+    org_pk = seeded_org["org_pk"]
+    complete_deal = _seed_deal(owner_conn, org_pk, name="Complete Co")
+    # A successful verification run is a terminal "complete" state.
+    _seed_analysis_run(owner_conn, org_pk, complete_deal, "successful", job_name="verification")
+    processing_deal = _seed_deal(owner_conn, org_pk, name="In-Flight Co")
+    _seed_analysis_run(owner_conn, org_pk, processing_deal, "in_progress", job_name="parsing")
+    _seed_deal(owner_conn, org_pk, name="Untouched Co")  # no run -> not complete
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    stats = client.get("/deals/dashboard-stats").json()
+    assert stats["totalDeals"]["value"] == 3
+    assert stats["ddCompletionPct"]["value"] == 33
+    assert stats["ddCompletionPct"]["deltaPp"] is None
+
+    # Cross-check: the one complete deal reports "complete" on its own status
+    # endpoint, so the KPI and the per-deal view agree.
+    status = client.get(f"/deals/{complete_deal}/status").json()
+    assert status["jobStatus"] == "complete"
 
 
 def test_create_deal_with_screening_fields_round_trips(client, seeded_org):

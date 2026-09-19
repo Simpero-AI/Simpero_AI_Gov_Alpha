@@ -65,13 +65,21 @@ class PipelineValueStat(CamelModel):
 
 
 class AvgAiScoreStat(CamelModel):
+    # Both stay null until a scoring producer exists (scoring is memo-dead --
+    # nothing writes memo_json.scoringResult yet), so the front end shows "—"
+    # rather than a fabricated number. See dashboard_stats.
     value: float | None
     delta: float | None
 
 
 class DdCompletionStat(CamelModel):
+    # `value` is real (fraction of deals whose analysis chain reached the
+    # terminal "complete" state). `delta_pp` is null: a truthful
+    # month-over-month completion-rate delta needs point-in-time run state we
+    # don't store, so we report no delta rather than a fabricated "+0pp". The
+    # front end drops the sub-caption delta when this is null.
     value: int
-    delta_pp: int
+    delta_pp: int | None
 
 
 class DashboardStatsResponse(CamelModel):
@@ -81,8 +89,10 @@ class DashboardStatsResponse(CamelModel):
     no implementation body) in the frozen contract — the actual monorepo
     logic isn't available to port exactly. This is a best-effort read
     against the same shape: current-vs-prior calendar-month counts/sums,
-    "new" when prior is 0 and current isn't. avgAiScore/ddCompletionPct are
-    null/0 in Phase 1 — there's no scoring writer until the real pipeline.
+    "new" when prior is 0 and current isn't. ddCompletionPct.value is a real
+    completion rate (see dashboard_stats endpoint); its delta_pp stays null
+    (no stored point-in-time history to diff). avgAiScore stays null until a
+    scoring producer ships.
     """
 
     window: Literal["week", "month", "quarter"]
@@ -476,6 +486,10 @@ class CompanyViewResponse(CamelModel):
     commercial: list[CompanyFactResponse]
     related_parties: list[CompanyFactResponse]
     plans: list[CompanyFactResponse]
+    co_investors: list[CompanyFactResponse]
+    funding_history: list[CompanyFactResponse]
+    key_customers: list[CompanyFactResponse]
+    geographic_presence: list[CompanyFactResponse]
 
 
 class DealTermFactResponse(CamelModel):
