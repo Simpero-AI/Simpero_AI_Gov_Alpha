@@ -425,6 +425,71 @@ def test_investment_profile_present(client, owner_conn, seeded_org):
     assert body["mandate"] == {"checkSize": "5-10m"}
 
 
+# --- IC sign-off ----------------------------------------------------------
+
+
+def test_ic_sign_off_null_when_absent(client, owner_conn, seeded_org):
+    deal_id = _seed_deal(owner_conn, seeded_org["org_pk"])
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    resp = client.get(f"/deals/{deal_id}/ic-sign-off")
+    assert resp.status_code == 200
+    assert resp.json() is None
+
+
+def test_ic_sign_off_record_then_read(client, owner_conn, seeded_org):
+    deal_id = _seed_deal(owner_conn, seeded_org["org_pk"])
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    post = client.post(
+        f"/deals/{deal_id}/ic-sign-off",
+        json={"decision": "approve", "notes": "Strong fit"},
+    )
+    assert post.status_code == 201
+    body = post.json()
+    assert body["decision"] == "approve"
+    assert body["notes"] == "Strong fit"
+
+    got = client.get(f"/deals/{deal_id}/ic-sign-off").json()
+    assert got["decision"] == "approve"
+    assert got["notes"] == "Strong fit"
+    assert got["actorEmail"]  # the recording user's email is surfaced
+
+    # It is written to the append-only audit log as an ic_sign_off event.
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "SELECT event_type FROM human_audit_log WHERE deal_id = %s AND event_type = 'ic_sign_off'",
+            (deal_id,),
+        )
+        assert cur.fetchone() is not None
+
+
+def test_ic_sign_off_latest_decision_wins(client, owner_conn, seeded_org):
+    deal_id = _seed_deal(owner_conn, seeded_org["org_pk"])
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    assert (
+        client.post(f"/deals/{deal_id}/ic-sign-off", json={"decision": "approve"}).status_code
+        == 201
+    )
+    assert (
+        client.post(f"/deals/{deal_id}/ic-sign-off", json={"decision": "decline"}).status_code
+        == 201
+    )
+
+    # Append-only: both rows persist, and the latest (decline) is the current verdict.
+    assert client.get(f"/deals/{deal_id}/ic-sign-off").json()["decision"] == "decline"
+
+
+def test_ic_sign_off_404_for_missing_deal(client, seeded_org):
+    _authed(seeded_org["clerk_org_id"], "user-1")
+    resp = client.post(
+        f"/deals/{uuid.uuid4()}/ic-sign-off",
+        json={"decision": "approve"},
+    )
+    assert resp.status_code == 404
+
+
 # --- auth flow (post UserRepo refactor) -----------------------------------
 
 
