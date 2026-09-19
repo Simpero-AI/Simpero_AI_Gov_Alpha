@@ -92,6 +92,11 @@ from app.schemas.intake_response import (
     IntakeResponseResponse,
 )
 from app.schemas.logs import ActivityRowResponse
+from app.schemas.memo_draft import (
+    MemoDraftResponse,
+    MemoRecommendation,
+    RecordMemoRecommendationRequest,
+)
 from app.services.checklist_view import (
     CHECKLIST_ADDED,
     CHECKLIST_EVENT_TYPES,
@@ -1425,6 +1430,73 @@ async def set_deal_checklist_item_status(
     )
     item = {i.item_id: i for i in build_checklist(events).items}[item_id]
     return _checklist_item_response(item)
+
+
+@router.get("/{deal_id}/memo-draft", response_model=MemoDraftResponse)
+async def get_deal_memo_draft(
+    deal_id: uuid.UUID, db: AsyncSession = Depends(get_db)
+) -> MemoDraftResponse:
+    """The analyst's saved draft-memo overrides for a deal. Today that is the
+    Recommendation: the latest memo_recommendation_saved event, or null when the
+    analyst hasn't overridden the AI draft yet (the UI then shows the generated
+    prose). Org-scoped by RLS -- a deal in another org 404s via the DealRepo
+    lookup rather than leaking rows."""
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    row = await HumanAuditRepo(db).latest_for_deal_by_event(deal_id, "memo_recommendation_saved")
+    recommendation = None
+    if row is not None:
+        recommendation = MemoRecommendation(
+            content=(row.payload or {}).get("content", ""),
+            actor_email=row.actor_email,
+            created_at=row.created_at,
+        )
+    return MemoDraftResponse(recommendation=recommendation)
+
+
+@router.post(
+    "/{deal_id}/memo-draft/recommendation",
+    response_model=MemoRecommendation,
+    status_code=status.HTTP_201_CREATED,
+)
+async def save_deal_memo_recommendation(
+    deal_id: uuid.UUID,
+    body: RecordMemoRecommendationRequest,
+    claims: dict[str, Any] = Depends(get_claims),
+    db: AsyncSession = Depends(get_db),
+) -> MemoRecommendation:
+    """Override the draft memo's Recommendation with the analyst's own text.
+    Append-only latest-wins: each save writes a new memo_recommendation_saved row,
+    so the edit history is preserved and the newest row is the current override."""
+    content = body.content.strip()
+    if not content:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Recommendation must not be empty",
+        )
+
+    deal = await DealRepo(db).get_by_id(deal_id)
+    if deal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deal not found")
+
+    org_id, actor_id, actor_email, _user_id = await _actor(db, claims)
+    row = await HumanAuditRepo(db).append(
+        {
+            "org_id": org_id,
+            "actor_id": actor_id,
+            "actor_email": actor_email,
+            "event_type": "memo_recommendation_saved",
+            "deal_id": deal_id,
+            "payload": {"content": content},
+        }
+    )
+    # Refresh created_at (a server default) in the async context; touching it lazily
+    # after flush would raise MissingGreenlet. See public_intake's submitted_at.
+    await db.flush()
+    await db.refresh(row, attribute_names=["created_at"])
+    return MemoRecommendation(content=content, actor_email=actor_email, created_at=row.created_at)
 
 
 @router.get("/{deal_id}/corroboration", response_model=CorroborationViewResponse)
