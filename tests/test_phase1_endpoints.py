@@ -544,6 +544,89 @@ def test_checklist_404_for_missing_deal(client, seeded_org):
     assert resp.status_code == 404
 
 
+# --- deal notes (Analyst Notes / Interview Log) ---------------------------
+
+
+def test_deal_notes_empty_when_absent(client, owner_conn, seeded_org):
+    deal_id = _seed_deal(owner_conn, seeded_org["org_pk"])
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    resp = client.get(f"/deals/{deal_id}/notes", params={"kind": "analyst"})
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+def test_deal_notes_record_then_read_newest_first(client, owner_conn, seeded_org):
+    deal_id = _seed_deal(owner_conn, seeded_org["org_pk"])
+    _authed(seeded_org["clerk_org_id"], "user-1")
+    # Give the actor an email so the "recorded by" surfacing is exercised (the
+    # JIT-provisioned test user has none until a profile is synced).
+    client.post("/auth/sync-profile", json={"name": "Ana Lyst", "email": "ana@example.com"})
+
+    assert (
+        client.post(
+            f"/deals/{deal_id}/notes",
+            json={"kind": "analyst", "body": "First call went well"},
+        ).status_code
+        == 201
+    )
+    assert (
+        client.post(
+            f"/deals/{deal_id}/notes",
+            json={"kind": "analyst", "body": "Follow-up scheduled"},
+        ).status_code
+        == 201
+    )
+
+    rows = client.get(f"/deals/{deal_id}/notes", params={"kind": "analyst"}).json()
+    assert [r["body"] for r in rows] == ["Follow-up scheduled", "First call went well"]
+    assert rows[0]["actorEmail"] == "ana@example.com"  # the recording user's email is surfaced
+
+    # Written to the append-only audit log as analyst_note events.
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM human_audit_log WHERE deal_id = %s AND event_type = 'analyst_note'",
+            (deal_id,),
+        )
+        assert cur.fetchone()[0] == 2
+
+
+def test_deal_notes_kinds_are_isolated(client, owner_conn, seeded_org):
+    deal_id = _seed_deal(owner_conn, seeded_org["org_pk"])
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    client.post(f"/deals/{deal_id}/notes", json={"kind": "analyst", "body": "an analyst note"})
+    client.post(
+        f"/deals/{deal_id}/notes",
+        json={"kind": "interview", "body": "founder call", "interviewee": "Jane Founder"},
+    )
+
+    analyst = client.get(f"/deals/{deal_id}/notes", params={"kind": "analyst"}).json()
+    interview = client.get(f"/deals/{deal_id}/notes", params={"kind": "interview"}).json()
+    assert [r["body"] for r in analyst] == ["an analyst note"]
+    assert [r["body"] for r in interview] == ["founder call"]
+    # interviewee is retained for interview notes, dropped for analyst notes.
+    assert interview[0]["interviewee"] == "Jane Founder"
+    assert analyst[0]["interviewee"] is None
+
+
+def test_deal_notes_reject_empty_body(client, owner_conn, seeded_org):
+    deal_id = _seed_deal(owner_conn, seeded_org["org_pk"])
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    resp = client.post(f"/deals/{deal_id}/notes", json={"kind": "analyst", "body": "   "})
+    assert resp.status_code == 422
+
+
+def test_deal_notes_404_for_missing_deal(client, seeded_org):
+    _authed(seeded_org["clerk_org_id"], "user-1")
+    resp = client.post(
+        f"/deals/{uuid.uuid4()}/notes",
+        json={"kind": "analyst", "body": "note"},
+    )
+    assert resp.status_code == 404
+
+
 # --- auth flow (post UserRepo refactor) -----------------------------------
 
 
