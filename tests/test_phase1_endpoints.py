@@ -216,8 +216,13 @@ def test_list_pipeline_and_dashboard_stats_shapes(client, owner_conn, seeded_org
     assert stats["window"] == "month"
     assert stats["totalDeals"]["value"] >= 1
     assert "pipelineValueUsd" in stats
+    # No scoring producer yet -> value stays null (FE shows "—"), never fabricated.
     assert stats["avgAiScore"]["value"] is None
+    assert stats["avgAiScore"]["delta"] is None
+    # One deal, no analysis run -> 0% complete. delta_pp is null (no fabricated
+    # month-over-month delta), not 0.
     assert stats["ddCompletionPct"]["value"] == 0
+    assert stats["ddCompletionPct"]["deltaPp"] is None
 
 
 def test_list_pipeline_reflects_real_analysis_run_status(client, owner_conn, seeded_org):
@@ -236,6 +241,32 @@ def test_list_pipeline_reflects_real_analysis_run_status(client, owner_conn, see
     row = next(row for row in pipeline_resp.json() if row["dealId"] == deal_id)
     assert row["agentStatus"]["jobStatus"] == "processing"
     assert row["agentStatus"]["currentPhase"] == "parsing"
+
+
+def test_dashboard_stats_dd_completion_counts_completed_deals(client, owner_conn, seeded_org):
+    """DD Completion is a real read of the analysis pipeline, not a stub: the
+    fraction of deals whose latest run chain reached "complete". Three deals,
+    one complete -> round(1/3*100) == 33. A deal counts as complete on the same
+    _deal_status_from_runs terminal state the pipeline grid uses (a successful
+    verification/screening run), not merely on having any run."""
+    org_pk = seeded_org["org_pk"]
+    complete_deal = _seed_deal(owner_conn, org_pk, name="Complete Co")
+    # A successful verification run is a terminal "complete" state.
+    _seed_analysis_run(owner_conn, org_pk, complete_deal, "successful", job_name="verification")
+    processing_deal = _seed_deal(owner_conn, org_pk, name="In-Flight Co")
+    _seed_analysis_run(owner_conn, org_pk, processing_deal, "in_progress", job_name="parsing")
+    _seed_deal(owner_conn, org_pk, name="Untouched Co")  # no run -> not complete
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    stats = client.get("/deals/dashboard-stats").json()
+    assert stats["totalDeals"]["value"] == 3
+    assert stats["ddCompletionPct"]["value"] == 33
+    assert stats["ddCompletionPct"]["deltaPp"] is None
+
+    # Cross-check: the one complete deal reports "complete" on its own status
+    # endpoint, so the KPI and the per-deal view agree.
+    status = client.get(f"/deals/{complete_deal}/status").json()
+    assert status["jobStatus"] == "complete"
 
 
 def test_create_deal_with_screening_fields_round_trips(client, seeded_org):
@@ -423,6 +454,94 @@ def test_investment_profile_present(client, owner_conn, seeded_org):
     body = resp.json()
     assert body["firmName"] == "Acme Capital"
     assert body["mandate"] == {"checkSize": "5-10m"}
+
+
+# --- diligence checklist --------------------------------------------------
+
+
+def test_checklist_empty_when_absent(client, owner_conn, seeded_org):
+    deal_id = _seed_deal(owner_conn, seeded_org["org_pk"])
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    resp = client.get(f"/deals/{deal_id}/checklist")
+    assert resp.status_code == 200
+    assert resp.json() == {"items": [], "completeCount": 0, "totalCount": 0}
+
+
+def test_checklist_add_then_read(client, owner_conn, seeded_org):
+    deal_id = _seed_deal(owner_conn, seeded_org["org_pk"])
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    post = client.post(
+        f"/deals/{deal_id}/checklist",
+        json={"description": "Provide audited financials", "assignee": "CFO"},
+    )
+    assert post.status_code == 201
+    created = post.json()
+    assert created["status"] == "not_started"
+    assert created["assignee"] == "CFO"
+    assert created["itemId"]
+
+    body = client.get(f"/deals/{deal_id}/checklist").json()
+    assert body["totalCount"] == 1
+    assert body["completeCount"] == 0
+    assert body["items"][0]["description"] == "Provide audited financials"
+
+
+def test_checklist_status_advances_and_counts(client, owner_conn, seeded_org):
+    deal_id = _seed_deal(owner_conn, seeded_org["org_pk"])
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    item_id = client.post(
+        f"/deals/{deal_id}/checklist", json={"description": "Legal review"}
+    ).json()["itemId"]
+
+    assert (
+        client.post(
+            f"/deals/{deal_id}/checklist/{item_id}/status", json={"status": "in_review"}
+        ).json()["status"]
+        == "in_review"
+    )
+    done = client.post(f"/deals/{deal_id}/checklist/{item_id}/status", json={"status": "complete"})
+    assert done.status_code == 200
+    assert done.json()["status"] == "complete"
+
+    body = client.get(f"/deals/{deal_id}/checklist").json()
+    assert body["completeCount"] == 1
+    assert body["totalCount"] == 1
+
+    # Append-only: add + two status changes = three rows, nothing updated in place.
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM human_audit_log WHERE deal_id = %s "
+            "AND event_type IN ('checklist_item_added', 'checklist_item_status')",
+            (deal_id,),
+        )
+        assert cur.fetchone()[0] == 3
+
+
+def test_checklist_reject_empty_description(client, owner_conn, seeded_org):
+    deal_id = _seed_deal(owner_conn, seeded_org["org_pk"])
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    resp = client.post(f"/deals/{deal_id}/checklist", json={"description": "  "})
+    assert resp.status_code == 422
+
+
+def test_checklist_status_404_for_unknown_item(client, owner_conn, seeded_org):
+    deal_id = _seed_deal(owner_conn, seeded_org["org_pk"])
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    resp = client.post(
+        f"/deals/{deal_id}/checklist/{uuid.uuid4().hex}/status", json={"status": "complete"}
+    )
+    assert resp.status_code == 404
+
+
+def test_checklist_404_for_missing_deal(client, seeded_org):
+    _authed(seeded_org["clerk_org_id"], "user-1")
+    resp = client.post(f"/deals/{uuid.uuid4()}/checklist", json={"description": "x"})
+    assert resp.status_code == 404
 
 
 # --- draft memo (Recommendation override) ---------------------------------
