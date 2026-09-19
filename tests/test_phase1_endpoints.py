@@ -456,6 +456,52 @@ def test_investment_profile_present(client, owner_conn, seeded_org):
     assert body["mandate"] == {"checkSize": "5-10m"}
 
 
+def test_investment_profile_put_creates_row(client, seeded_org):
+    # PUT on an org with no profile row creates it and returns JSON (not the
+    # HTML fallback the retired tRPC upsert produced).
+    _authed(seeded_org["clerk_org_id"], "user-1")
+    resp = client.put(
+        "/investment-profile",
+        json={"firmName": "Vistara", "mandate": {"checkSize": "5-10m"}},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["firmName"] == "Vistara"
+    assert body["mandate"] == {"checkSize": "5-10m"}
+    # Persisted: a subsequent GET reads it back.
+    assert client.get("/investment-profile").json()["firmName"] == "Vistara"
+
+
+def test_investment_profile_put_partial_merge_does_not_clobber(client, owner_conn, seeded_org):
+    # The Firm Profile editor and the Scoring Framework editor save different
+    # slices independently. A weights-only save must not blank the stored
+    # firm_name/mandate (and vice versa).
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO investment_profiles (org_id, firm_name, mandate, weights) "
+            "VALUES (%s, %s, %s::jsonb, %s::jsonb)",
+            (
+                seeded_org["org_pk"],
+                "Acme Capital",
+                json.dumps({"checkSize": "5-10m"}),
+                json.dumps({}),
+            ),
+        )
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    # Framework editor saves ONLY weights.
+    resp = client.put(
+        "/investment-profile",
+        json={"weights": {"framework": {"categories": []}}},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["weights"] == {"framework": {"categories": []}}
+    # firm_name + mandate survive the weights-only save.
+    assert body["firmName"] == "Acme Capital"
+    assert body["mandate"] == {"checkSize": "5-10m"}
+
+
 # --- diligence checklist --------------------------------------------------
 
 
