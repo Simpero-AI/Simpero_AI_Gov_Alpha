@@ -414,7 +414,9 @@ class FinancialFactResponse(CamelModel):
     rendered string ("FY23", "FY23 Estimate", or ""); `status` is the trust status
     (verified/partially_verified/cited) so the tab can badge it; `citation` is the
     human "file · p.N" string, null when unlocatable; `sourceUrl` is the web
-    source URL for a kind='web' fact, null for a document claim."""
+    source URL for a kind='web' fact, null for a document claim;
+    `reconciliationMismatch` is true when this figure failed the arithmetic
+    consistency check (SIM-372) so the tab can flag a non-reconciling line."""
 
     label: str
     value: str
@@ -423,6 +425,7 @@ class FinancialFactResponse(CamelModel):
     status: str
     entity: str | None = None
     source_url: str | None = None
+    reconciliation_mismatch: bool = False
 
 
 class FinancialTrendPointResponse(CamelModel):
