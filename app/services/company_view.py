@@ -15,11 +15,18 @@ What maps to what:
 - commercial: `commercial_terms` assertions (customers, pricing, contract terms).
 - related_parties: `related_party` assertions.
 - plans: `plan_or_commitment` assertions.
+- co_investors: `co_investor` assertions (other backers in the syndicate).
+- funding_history: `funding_history` assertions (prior rounds / capital raised).
+- key_customers: `key_customer` assertions (named customers / concentration).
+- geographic_presence: `geographic_presence` assertions (regions/markets the
+  business operates in; a public 10-K's geo segments populate this).
 
-market_definition / competitive_position live on the Market tab, not here.
-Sections the pipeline has no source for (funding history, co-investor syndicate,
-per-region breakdown) are deliberately not surfaced rather than shown as
-permanent empties.
+market_definition / competitive_position live on the Market tab, not here. The
+last four sections are private-deal / firmographic assertions the parser emits
+when the document states them -- co_investor and funding_history are CIM
+concepts (a public 10-K has neither), so they stay empty for a public filer.
+Each section still comes back empty (the tab renders "no evidence") when the
+deal has no backing claims.
 
 Every fact is scoped to the deal's LEAD business subject (a competitor's or
 segment's figure never surfaces as the target's), picked latest-actual-first,
@@ -70,6 +77,10 @@ class CompanyView:
     commercial: list[CompanyFact] = field(default_factory=list)
     related_parties: list[CompanyFact] = field(default_factory=list)
     plans: list[CompanyFact] = field(default_factory=list)
+    co_investors: list[CompanyFact] = field(default_factory=list)
+    funding_history: list[CompanyFact] = field(default_factory=list)
+    key_customers: list[CompanyFact] = field(default_factory=list)
+    geographic_presence: list[CompanyFact] = field(default_factory=list)
 
 
 # Qualitative assertion_class -> the CompanyView section it feeds. Market classes
@@ -80,6 +91,10 @@ _SECTION_BY_CLASS = {
     "commercial_terms": "commercial",
     "related_party": "related_parties",
     "plan_or_commitment": "plans",
+    "co_investor": "co_investors",
+    "funding_history": "funding_history",
+    "key_customer": "key_customers",
+    "geographic_presence": "geographic_presence",
 }
 
 # Company identity metrics recovered from a claim's raw label. `tokens` are whole
@@ -461,4 +476,8 @@ def build_company_view(
         commercial=sections["commercial"],
         related_parties=sections["related_parties"],
         plans=sections["plans"],
+        co_investors=sections["co_investors"],
+        funding_history=sections["funding_history"],
+        key_customers=sections["key_customers"],
+        geographic_presence=sections["geographic_presence"],
     )

@@ -476,6 +476,10 @@ class CompanyViewResponse(CamelModel):
     commercial: list[CompanyFactResponse]
     related_parties: list[CompanyFactResponse]
     plans: list[CompanyFactResponse]
+    co_investors: list[CompanyFactResponse]
+    funding_history: list[CompanyFactResponse]
+    key_customers: list[CompanyFactResponse]
+    geographic_presence: list[CompanyFactResponse]
 
 
 class CorroborationEventResponse(CamelModel):

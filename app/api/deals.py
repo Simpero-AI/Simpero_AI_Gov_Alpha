@@ -785,6 +785,10 @@ async def get_deal_company(
         commercial=_to_responses(company.commercial, CompanyFactResponse),
         related_parties=_to_responses(company.related_parties, CompanyFactResponse),
         plans=_to_responses(company.plans, CompanyFactResponse),
+        co_investors=_to_responses(company.co_investors, CompanyFactResponse),
+        funding_history=_to_responses(company.funding_history, CompanyFactResponse),
+        key_customers=_to_responses(company.key_customers, CompanyFactResponse),
+        geographic_presence=_to_responses(company.geographic_presence, CompanyFactResponse),
     )
 
 
