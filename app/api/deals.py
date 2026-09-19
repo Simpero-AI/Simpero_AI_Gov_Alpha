@@ -86,7 +86,11 @@ from app.schemas.intake_response import (
 from app.schemas.logs import ActivityRowResponse
 from app.services.company_view import build_company_view
 from app.services.corroboration_citation import corroboration_source_url
-from app.services.dashboard_stats import compute_month_bounds, compute_pipeline_value_delta
+from app.services.dashboard_stats import (
+    compute_dd_completion_pct,
+    compute_month_bounds,
+    compute_pipeline_value_delta,
+)
 from app.services.entity_resolution import get_resolver
 from app.services.entity_resolution.types import EntityResolutionError
 from app.services.field_synthesis import SectionSynthesis, SynthCitation, sections_from_json
@@ -334,7 +338,20 @@ async def dashboard_stats(db: AsyncSession = Depends(get_db)) -> DashboardStatsR
     """deals.dashboardStats. See app/services/dashboard_stats.py for the
     "best-effort read against a types-only contract" caveat."""
     current_start, prior_start, prior_end = compute_month_bounds()
-    agg = await DealRepo(db).dashboard_aggregates(current_start, prior_start, prior_end)
+    deal_repo = DealRepo(db)
+    run_repo = AnalysisRunRepo(db)
+    agg = await deal_repo.dashboard_aggregates(current_start, prior_start, prior_end)
+
+    # DD Completion is a real read of the analysis pipeline, not a stub. Resolve
+    # the whole org in a fixed number of queries -- the same batched fetch +
+    # pure _deal_status_from_runs mapper the Live Pipeline grid uses, so a deal
+    # counts as "complete" here exactly when its row shows "complete" there.
+    deals = await deal_repo.list()
+    deal_ids = [deal.id for deal in deals]
+    latest_runs = await run_repo.latest_for_deals(deal_ids)
+    latest_parsing = await run_repo.latest_by_job_name_for_deals(deal_ids, "parsing")
+    latest_verification = await run_repo.latest_by_job_name_for_deals(deal_ids, "verification")
+    completed = _completed_deal_count(deals, latest_runs, latest_parsing, latest_verification)
 
     return DashboardStatsResponse(
         window="month",
@@ -348,10 +365,25 @@ async def dashboard_stats(db: AsyncSession = Depends(get_db)) -> DashboardStatsR
                 agg["current_window_value"], agg["prior_window_value"]
             ),
         ),
-        # No scoring/completion data in Phase 1 — there's no analyse pipeline
-        # writing memo_json.scoringResult yet.
+        # avg_ai_score has no producer: scoring is memo-dead -- nothing writes
+        # memo_json.scoringResult yet -- so value stays None (FE shows "—")
+        # rather than fabricating a number. Wire this up when a scoring writer
+        # ships.
         avg_ai_score=AvgAiScoreStat(value=None, delta=None),
-        dd_completion_pct=DdCompletionStat(value=0, delta_pp=0),
+        # delta_pp stays None on purpose: a truthful month-over-month
+        # completion-rate delta needs point-in-time run state we don't retain,
+        # so we report the real rate and no delta rather than a fake "+0pp".
+        #
+        # Denominator is len(deals), not agg["total_deals"]: `completed` was
+        # counted over this same list() snapshot, so the ratio is always valid
+        # (0..100%). agg["total_deals"] is a separate COUNT (another snapshot
+        # under READ COMMITTED) feeding the Total Deals KPI; the two can differ
+        # by one under a concurrent write, which is cosmetic and self-heals on
+        # the next poll -- pairing numerator and denominator matters more here.
+        dd_completion_pct=DdCompletionStat(
+            value=compute_dd_completion_pct(completed, len(deals)),
+            delta_pp=None,
+        ),
     )
 
 
@@ -994,6 +1026,31 @@ def _deal_status_from_runs(
         error_message=run.error_message,
         job_comments=run.job_comments,
     )
+
+
+def _completed_deal_count(
+    deals: list[Deal],
+    latest_runs: dict[uuid.UUID, AnalysisRun],
+    latest_parsing: dict[uuid.UUID, AnalysisRun],
+    latest_verification: dict[uuid.UUID, AnalysisRun],
+) -> int:
+    """How many of `deals` have reached the terminal "complete" state, computed
+    from the prefetched chain rows with the same pure _deal_status_from_runs
+    mapper the pipeline grid and status endpoint use. No DB access -- the caller
+    batches the three latest-row lookups once for the whole org (dashboard_stats
+    / list_pipeline), so this is O(deals), not a query per deal. A deal with no
+    run is absent from `latest_runs` and simply isn't complete."""
+    complete = 0
+    for deal in deals:
+        run = latest_runs.get(deal.id)
+        if run is None:
+            continue
+        status = _deal_status_from_runs(
+            run, latest_parsing.get(deal.id), latest_verification.get(deal.id)
+        )
+        if status.job_status == "complete":
+            complete += 1
+    return complete
 
 
 def _entity_resolution_response(row: EntityResolution) -> EntityResolutionResponse:
