@@ -440,6 +440,9 @@ def test_deal_notes_empty_when_absent(client, owner_conn, seeded_org):
 def test_deal_notes_record_then_read_newest_first(client, owner_conn, seeded_org):
     deal_id = _seed_deal(owner_conn, seeded_org["org_pk"])
     _authed(seeded_org["clerk_org_id"], "user-1")
+    # Give the actor an email so the "recorded by" surfacing is exercised (the
+    # JIT-provisioned test user has none until a profile is synced).
+    client.post("/auth/sync-profile", json={"name": "Ana Lyst", "email": "ana@example.com"})
 
     assert (
         client.post(
@@ -458,7 +461,7 @@ def test_deal_notes_record_then_read_newest_first(client, owner_conn, seeded_org
 
     rows = client.get(f"/deals/{deal_id}/notes", params={"kind": "analyst"}).json()
     assert [r["body"] for r in rows] == ["Follow-up scheduled", "First call went well"]
-    assert rows[0]["actorEmail"]  # the recording user's email is surfaced
+    assert rows[0]["actorEmail"] == "ana@example.com"  # the recording user's email is surfaced
 
     # Written to the append-only audit log as analyst_note events.
     with owner_conn.cursor() as cur:
