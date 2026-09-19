@@ -27,6 +27,7 @@ def _claim(
     kind: str = "pdf",
     page: int | None = 1,
     data_source_id: uuid.UUID | None = None,
+    flags: list[str] | None = None,
 ) -> Claim:
     return Claim(
         entity=entity,
@@ -46,7 +47,39 @@ def _claim(
         page=page,
         status=status,
         data_source_id=data_source_id,
+        flags=flags,
     )
+
+
+def test_formula_mismatch_flag_surfaces_as_reconciliation_mismatch():
+    """A figure the consistency pass flagged (formula_mismatch) still shows -- an
+    operand may be the wrong one, not this line -- but is marked so the FE can
+    badge a non-reconciling statement instead of a confident clean number."""
+    claims = [
+        _claim(
+            attribute="gross_profit",
+            normalized=97_860_000_000,
+            period_year=2023,
+            period_kind="A",
+            flags=["formula_mismatch"],
+        ),
+        _claim(attribute="revenue", normalized=497_200_000, period_year=2023, period_kind="A"),
+    ]
+
+    view = build_financials_view(claims, filenames={}, company="AcmeCo")
+
+    facts = {f.label: f for f in view.income_statement}
+    assert facts["Gross Profit"].reconciliation_mismatch is True
+    # An unflagged line is not marked.
+    assert facts["Revenue"].reconciliation_mismatch is False
+
+
+def test_reconciliation_mismatch_defaults_false_without_flags():
+    claims = [
+        _claim(attribute="revenue", normalized=497_200_000, period_year=2023, period_kind="A"),
+    ]
+    (fact,) = build_financials_view(claims, filenames={}, company="AcmeCo").income_statement
+    assert fact.reconciliation_mismatch is False
 
 
 def test_canonical_revenue_lands_in_income_statement():

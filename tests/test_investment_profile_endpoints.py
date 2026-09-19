@@ -97,17 +97,6 @@ def test_put_creates_then_get_returns_it(client, seeded_org):
     assert got["mandate"] == mandate
 
 
-def test_post_also_upserts(client, seeded_org):
-    """POST and PUT hit the same handler — the retired tRPC client POSTed, so
-    the ported route accepts both."""
-    _authed(seeded_org["clerk_org_id"], "user-1")
-
-    resp = client.post("/investment-profile", json={"firmName": "Acme"})
-
-    assert resp.status_code == 200
-    assert resp.json()["firmName"] == "Acme"
-
-
 def test_saving_one_slice_leaves_the_other_column_untouched(client, seeded_org):
     """The partial-update contract: Firm Profile saves firm_name + mandate,
     Scoring Framework saves weights, and neither wipes the other's column even

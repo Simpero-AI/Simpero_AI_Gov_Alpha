@@ -14,14 +14,13 @@ class InvestmentProfileResponse(CamelModel):
 
 
 class UpsertInvestmentProfileRequest(CamelModel):
-    """investmentProfile.upsert body — partial by design: only the fields the
-    caller sends are written, so Firm Profile (firm_name + mandate) and Scoring
-    Framework (weights) each save their own slice without clobbering the
-    other's column. Every field is optional and defaults unset (never sent =>
-    excluded from model_dump(exclude_unset=True) => that column is left
-    untouched). Each JSONB field is a full replace of that column, so the
-    caller merges its slice into the existing blob client-side before sending.
-    """
+    """PUT /investment-profile body. Every field is OPTIONAL and defaults to
+    None so the two independent editors on /mandate-scorecard can each save the
+    slice they own without clobbering the other's: FirmProfileBlock sends
+    firm_name + mandate, EditableFrameworkBlock sends weights. A field left unset
+    (None) keeps the stored value; a field sent explicitly (including an empty
+    string or {}) overwrites it. Replaces the retired tRPC
+    investmentProfile.upsert, which had no FastAPI route and 404'd."""
 
     firm_name: str | None = None
     firm_type: str | None = None

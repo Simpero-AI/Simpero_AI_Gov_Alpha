@@ -1,4 +1,5 @@
 import uuid
+from collections.abc import Sequence
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -45,6 +46,55 @@ class AnalysisRunRepo(BaseRepo[AnalysisRun, dict]):
             .limit(1)
         )
         return result.scalars().first()
+
+    async def latest_for_deals(self, deal_ids: Sequence[uuid.UUID]) -> dict[uuid.UUID, AnalysisRun]:
+        """Every listed deal's most recent run (any job_name), in ONE query,
+        keyed by deal_id -- the batched counterpart of latest_for_deal for the
+        Live Pipeline grid, which otherwise ran this per row (N+1). DISTINCT ON
+        (deal_id) with the same started_at DESC ordering returns the newest row
+        per deal; `id` DESC is the deterministic tie-break for two runs sharing a
+        started_at. Deals with no run are simply absent from the dict.
+
+        Same bind-parameter ceiling as IntakeLinkRepo.latest_for_deals: deal_ids
+        is spread into an IN (...) list and DealRepo.list() applies no limit, so a
+        large enough org hits Postgres's 65535-parameter wall -- fine at Alpha
+        volume, and strictly better than the per-row loop it replaces."""
+        if not deal_ids:
+            return {}
+        result = await self.session.execute(
+            select(AnalysisRun)
+            .where(AnalysisRun.deal_id.in_(deal_ids))
+            .distinct(AnalysisRun.deal_id)
+            .order_by(
+                AnalysisRun.deal_id,
+                AnalysisRun.started_at.desc(),
+                AnalysisRun.id.desc(),
+            )
+        )
+        return {run.deal_id: run for run in result.scalars().all()}
+
+    async def latest_by_job_name_for_deals(
+        self, deal_ids: Sequence[uuid.UUID], job_name: str
+    ) -> dict[uuid.UUID, AnalysisRun]:
+        """Every listed deal's most recent run of one job_name, in ONE query,
+        keyed by deal_id -- the batched counterpart of latest_by_job_name, so the
+        pipeline grid can resolve each deal's parsing/verification chain rows
+        without a query per deal per job. Same DISTINCT ON idiom and bind-limit
+        caveat as latest_for_deals."""
+        if not deal_ids:
+            return {}
+        result = await self.session.execute(
+            select(AnalysisRun)
+            .where(AnalysisRun.deal_id.in_(deal_ids))
+            .where(AnalysisRun.job_name == job_name)
+            .distinct(AnalysisRun.deal_id)
+            .order_by(
+                AnalysisRun.deal_id,
+                AnalysisRun.started_at.desc(),
+                AnalysisRun.id.desc(),
+            )
+        )
+        return {run.deal_id: run for run in result.scalars().all()}
 
     async def active_for_deal(self, deal_id: uuid.UUID) -> AnalysisRun | None:
         """Fast-path check for a friendly 409 -- uq_analysis_run_active (the

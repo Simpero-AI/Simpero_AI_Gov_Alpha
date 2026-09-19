@@ -1,4 +1,4 @@
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -11,35 +11,11 @@ class InvestmentProfileRepo(BaseRepo[InvestmentProfile, dict]):
         super().__init__(db)
 
     async def create(self, data: dict, **kwargs: object) -> InvestmentProfile:
-        # Plain insert only — upsert_for_org below is the create-or-update path
-        # investmentProfile.upsert uses; this stays for a caller that has a
-        # brand-new row and no conflict to resolve.
+        # Plain insert only — the upsert (create-or-update on org_id) that
+        # investmentProfile.upsert needs arrives in Phase 2.
         profile = InvestmentProfile(**data)
         self.session.add(profile)
         return profile
-
-    async def upsert_for_org(self, org_id: int, data: dict) -> InvestmentProfile:
-        """Create-or-update the org's single profile row (org_id is UNIQUE) —
-        Phase 2's create-or-update that create() above deferred. `data` carries
-        only the caller-provided columns (model_dump(exclude_unset=True)), so a
-        save of one slice (firm_name+mandate, or weights) leaves the other
-        columns as they were; each JSONB column is a full replace of what the
-        caller sent. updated_at is bumped explicitly because pg_insert bypasses
-        the ORM onupdate=now() event. RLS's USING clause doubles as the
-        INSERT/UPDATE WITH CHECK, so org_id must be the caller's own org."""
-        result = await self.session.execute(
-            pg_insert(InvestmentProfile)
-            .values(org_id=org_id, **data)
-            .on_conflict_do_update(
-                index_elements=["org_id"],
-                set_={**data, "updated_at": func.now()},
-            )
-            .returning(InvestmentProfile),
-            # populate_existing so a RETURNING row always wins over a stale
-            # identity-map instance, same guard as MandateRepo.upsert.
-            execution_options={"populate_existing": True},
-        )
-        return result.scalar_one()
 
     async def get_by_id(self, id: object) -> InvestmentProfile | None:
         return await self.session.get(InvestmentProfile, id)
@@ -49,3 +25,30 @@ class InvestmentProfileRepo(BaseRepo[InvestmentProfile, dict]):
         request's org, no WHERE org_id needed."""
         result = await self.session.execute(select(InvestmentProfile).limit(1))
         return result.scalar_one_or_none()
+
+    async def upsert(self, data: dict) -> InvestmentProfile:
+        """Create-or-update the org's single investment-profile row, keyed on the
+        unique org_id. `data` is the FULL row to persist (firm_name, firm_type,
+        aum_band, mandate, weights, org_id) -- the endpoint merges any partial
+        request over the stored row before calling this, so a save that touches
+        only the framework weights doesn't blank the firm profile. Mirrors
+        MandateRepo.upsert: populate_existing so the RETURNING row wins over any
+        instance the endpoint already loaded (get_for_org, for the merge), rather
+        than echoing the pre-update values back to the caller."""
+        result = await self.session.execute(
+            pg_insert(InvestmentProfile)
+            .values(**data)
+            .on_conflict_do_update(
+                index_elements=["org_id"],
+                set_={
+                    "firm_name": data.get("firm_name"),
+                    "firm_type": data.get("firm_type"),
+                    "aum_band": data.get("aum_band"),
+                    "mandate": data.get("mandate"),
+                    "weights": data.get("weights"),
+                },
+            )
+            .returning(InvestmentProfile),
+            execution_options={"populate_existing": True},
+        )
+        return result.scalar_one()

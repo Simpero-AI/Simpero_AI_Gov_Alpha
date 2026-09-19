@@ -1,3 +1,5 @@
+from collections.abc import Sequence
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -45,6 +47,40 @@ class HumanAuditRepo(BaseRepo[HumanAuditLog, dict]):
         result = await self.session.execute(
             select(HumanAuditLog)
             .where(HumanAuditLog.deal_id == deal_id)
+            .order_by(HumanAuditLog.created_at.desc(), HumanAuditLog.id.desc())
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
+    async def latest_for_deal_by_event(
+        self, deal_id: object, event_type: str
+    ) -> HumanAuditLog | None:
+        """The most recent audit row for one deal of one event_type, or None.
+        Backs the IC Sign-off read: sign-off is append-only (each decision is a
+        new row), so "the current decision" is simply the latest ic_sign_off
+        event. Same deal_id + stable created_at/id ordering as list_for_deal;
+        RLS scopes it to the org."""
+        result = await self.session.execute(
+            select(HumanAuditLog)
+            .where(HumanAuditLog.deal_id == deal_id)
+            .where(HumanAuditLog.event_type == event_type)
+            .order_by(HumanAuditLog.created_at.desc(), HumanAuditLog.id.desc())
+            .limit(1)
+        )
+        return result.scalars().first()
+
+    async def list_for_deal_by_events(
+        self, deal_id: object, event_types: Sequence[str], limit: int
+    ) -> list[HumanAuditLog]:
+        """Every audit row for one deal whose event_type is in `event_types`,
+        newest first. Backs the event-sourced deal surfaces that fold several
+        event kinds for one deal into current state (the diligence checklist:
+        checklist_item_added + checklist_item_status). Same deal_id filter +
+        stable created_at/id ordering as list_for_deal; RLS scopes it to the org."""
+        result = await self.session.execute(
+            select(HumanAuditLog)
+            .where(HumanAuditLog.deal_id == deal_id)
+            .where(HumanAuditLog.event_type.in_(event_types))
             .order_by(HumanAuditLog.created_at.desc(), HumanAuditLog.id.desc())
             .limit(limit)
         )
