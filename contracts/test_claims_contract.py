@@ -364,6 +364,16 @@ def test_superseded_by_same_fact_flag_accepted(validator: Draft202012Validator) 
     assert not list(validator.iter_errors(ok)), "superseded_by_same_fact should validate"
 
 
+def test_header_unresolved_flag_accepted(validator: Draft202012Validator) -> None:
+    # Parser #70: a claim whose column header is empty/shared carries
+    # header_unresolved. The backend re-validates every parser claim against this
+    # contract in the verify job, so the flag MUST be accepted here or a claim
+    # bearing it fails verify with a ValueError -- keep this contract in lockstep
+    # with the parser's copy.
+    ok = {**VALID_PDF_CLAIM, "flags": ["header_unresolved"]}
+    assert not list(validator.iter_errors(ok)), "header_unresolved should validate"
+
+
 # --- SIM-375: canonical attribute vocabulary ----------------------------------
 
 
