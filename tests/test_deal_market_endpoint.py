@@ -105,10 +105,20 @@ def test_returns_sizing_with_camelcase_wire_keys(client, owner_conn, seeded_org,
     # camelCase wire keys (the CamelModel contract the frontend consumes)
     assert set(body.keys()) == {"sizing", "marketDefinition", "competitivePosition"}
     (fact,) = body["sizing"]
-    assert set(fact.keys()) == {"label", "value", "citation", "status", "entity", "sourceUrl"}
+    assert set(fact.keys()) == {
+        "label",
+        "value",
+        "citation",
+        "status",
+        "entity",
+        "sourceUrl",
+        "isWeb",
+    }
     assert fact["label"] == "TAM"
     assert fact["value"] == "$5.00B"
     assert fact["status"] == "cited"
+    # A deck (pdf) sizing claim is not a public-source fact.
+    assert fact["isWeb"] is False
     # A document (pdf) sizing claim has no external source URL; the field is
     # present (serialized) but null -- the clickable link is web-only.
     assert fact["sourceUrl"] is None

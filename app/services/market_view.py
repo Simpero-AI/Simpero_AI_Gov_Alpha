@@ -453,6 +453,11 @@ def build_market_view(
             status=claim.status,
             entity=claim.entity,
             source_url=_source_url(claim, source_urls),
+            # Provenance for the FE badge: a public-source (web_search_collect)
+            # sizing figure vs the deck's own. _qual_fact already sets this for
+            # the qualitative sections; sizing needs it too so a TAM sourced from
+            # SEC/market research is distinguishable from a deck figure.
+            is_web=claim.kind == "web",
         )
         for _key, (_rank, claim, display) in sorted(
             sizing_best.items(), key=lambda item: _SIZING_ORDER.get(item[0], 99)
