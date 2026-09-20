@@ -39,19 +39,45 @@ _COMPANY_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 _COMPANY_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"
 
 # Canonical claim attribute -> EDGAR us-gaap concept candidates, most-specific
-# first. Kept deliberately small; extend as concepts are validated against real
-# filings.
+# first. Every tag is a standard us-gaap concept; candidates are tried in order so
+# a filer using an older/alternate tag still resolves. Sign- or definition-
+# ambiguous lines (see _CONFIRM_ONLY_ATTRIBUTES) confirm on a match but never
+# conflict, so a benign like-vs-unlike comparison cannot manufacture a false
+# conflict.
 _CONCEPTS: dict[str, tuple[str, ...]] = {
+    # --- Income statement (duration facts) ---
     "revenue": (
         "RevenueFromContractWithCustomerExcludingAssessedTax",
         "Revenues",
         "SalesRevenueNet",
     ),
+    "cogs": ("CostOfGoodsAndServicesSold", "CostOfRevenue", "CostOfGoodsSold"),
+    "gross_profit": ("GrossProfit",),
+    "opex": ("OperatingExpenses",),
+    "interest_expense": ("InterestExpense", "InterestExpenseNonoperating"),
+    "tax_expense": ("IncomeTaxExpenseBenefit",),
+    "depreciation_and_amortization": (
+        "DepreciationDepletionAndAmortization",
+        "DepreciationAmortizationAndAccretionNet",
+        "DepreciationAndAmortization",
+    ),
     "net_income": ("NetIncomeLoss",),
+    # --- Balance sheet (instant facts) ---
     "total_assets": ("Assets",),
+    "current_assets": ("AssetsCurrent",),
     "total_liabilities": ("Liabilities",),
+    "current_liabilities": ("LiabilitiesCurrent",),
     "total_equity": ("StockholdersEquity",),
     "cash_and_equivalents": ("CashAndCashEquivalentsAtCarryingValue",),
+    "accounts_receivable": ("AccountsReceivableNetCurrent", "ReceivablesNetCurrent"),
+    "accounts_payable": ("AccountsPayableCurrent", "AccountsPayableTradeCurrent"),
+    "inventory": ("InventoryNet",),
+    # --- Cash flow (duration facts) ---
+    "operating_cash_flow": (
+        "NetCashProvidedByUsedInOperatingActivities",
+        "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations",
+    ),
+    "capex": ("PaymentsToAcquirePropertyPlantAndEquipment",),
 }
 
 # Relative tolerance for "the same figure". Tight on purpose -- EDGAR XBRL is a
@@ -73,7 +99,28 @@ _REL_TOLERANCE = 0.005  # 0.5%
 # extraction (tag total vs product vs services vs segment, and the period_kind),
 # after which these can compare like-for-like against their own concepts; this is
 # the display-safe gate until then.
-_CONFIRM_ONLY_ATTRIBUTES = frozenset({"revenue", "net_income"})
+_CONFIRM_ONLY_ATTRIBUTES = frozenset(
+    {
+        "revenue",
+        "net_income",
+        # Each has a benign non-match cause the extraction does not disambiguate, so
+        # a mismatch is a like-vs-unlike comparison, not a real conflict: cogs/capex
+        # sign convention varies (a deck may carry -220B while EDGAR reports +220B),
+        # opex definitions differ (with/without COGS; R&D vs SG&A sub-lines),
+        # interest_expense splits operating/nonoperating, tax_expense may be a
+        # benefit (sign flip), and D&A is tagged several ways and split across the
+        # cash-flow statement and segments. Confirm on a match, no-signal otherwise.
+        # The clean single-consolidated stocks (gross_profit, current_assets/
+        # liabilities, accounts_receivable/payable, inventory, operating_cash_flow)
+        # stay FULL, so a genuinely wrong balance-sheet/OCF figure still conflicts.
+        "cogs",
+        "opex",
+        "interest_expense",
+        "tax_expense",
+        "depreciation_and_amortization",
+        "capex",
+    }
+)
 
 Fetch = Callable[[str], Awaitable[Any]]
 
