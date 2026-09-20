@@ -28,11 +28,13 @@ and the period separately.
 """
 
 import uuid
+from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from app.models.claim import Claim
+from app.services.financial_sanity import flag_implausible
 from app.services.screening_materials import (
     _HEADLINE_LABELS,
     _citation,
@@ -261,6 +263,29 @@ def build_financials_view(
     # recovered headline display), not taken from whichever claim wins the value.
     labels = _labels_by_key(rows)
 
+    # Read-time internal-consistency check: flag any displayed figure that cannot
+    # reconcile with its statement-mates (a failed accounting identity, an
+    # impossible income-statement ordering, or a magnitude orders of magnitude off
+    # -- a scale mis-detection). Grouped by (entity, period_year) so only
+    # like-period figures are compared. Deterministic and LLM-free, so it lights up
+    # already-stored deals with NO re-analysis; ORed with the verify-time
+    # formula_mismatch flag below, never overriding it.
+    sanity_groups: dict[tuple[str | None, int | None], dict[str, tuple[float, str]]] = defaultdict(
+        dict
+    )
+    for metric_key, claim in best.items():
+        value = claim.value or {}
+        normalized = value.get("normalized")
+        if isinstance(normalized, (int, float)) and not isinstance(normalized, bool):
+            sanity_groups[(claim.entity, claim.period_year)][metric_key] = (
+                float(normalized),
+                value.get("value_type") or "",
+            )
+    implausible: set[tuple[str | None, int | None, str]] = set()
+    for (entity, period_year), figures in sanity_groups.items():
+        for flagged_key in flag_implausible(figures):
+            implausible.add((entity, period_year, flagged_key))
+
     partitioned: dict[str, list[tuple[str, Claim]]] = {name: [] for name in _SECTIONS}
     for metric_key, claim in best.items():
         section = _SECTION_BY_METRIC.get(metric_key, "operating")
@@ -284,7 +309,10 @@ def build_financials_view(
                 status=claim.status,
                 entity=claim.entity,
                 source_url=_source_url(claim, source_urls),
-                reconciliation_mismatch=_reconciliation_mismatch(claim),
+                reconciliation_mismatch=(
+                    _reconciliation_mismatch(claim)
+                    or (claim.entity, claim.period_year, metric_key) in implausible
+                ),
             )
             for metric_key, claim in sorted(items, key=_sort_key)
         ]

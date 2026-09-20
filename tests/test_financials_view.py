@@ -8,7 +8,11 @@ theirs, and the latest-actual figure winning a single row per metric."""
 import uuid
 
 from app.models.claim import Claim
-from app.services.financials_view import build_financials_trend, build_financials_view
+from app.services.financials_view import (
+    FinancialFact,
+    build_financials_trend,
+    build_financials_view,
+)
 
 
 def _claim(
@@ -55,10 +59,12 @@ def test_formula_mismatch_flag_surfaces_as_reconciliation_mismatch():
     """A figure the consistency pass flagged (formula_mismatch) still shows -- an
     operand may be the wrong one, not this line -- but is marked so the FE can
     badge a non-reconciling statement instead of a confident clean number."""
+    # Internally-consistent figures (gross_profit < revenue, same scale) so the
+    # read-time check stays silent and this isolates the stored-flag plumbing.
     claims = [
         _claim(
             attribute="gross_profit",
-            normalized=97_860_000_000,
+            normalized=200_000_000,
             period_year=2023,
             period_kind="A",
             flags=["formula_mismatch"],
@@ -70,8 +76,55 @@ def test_formula_mismatch_flag_surfaces_as_reconciliation_mismatch():
 
     facts = {f.label: f for f in view.income_statement}
     assert facts["Gross Profit"].reconciliation_mismatch is True
-    # An unflagged line is not marked.
+    # An unflagged, consistent line is not marked.
     assert facts["Revenue"].reconciliation_mismatch is False
+
+
+def _all_facts(view) -> dict[str, FinancialFact]:
+    facts: dict[str, FinancialFact] = {}
+    for section in (
+        view.income_statement,
+        view.profitability,
+        view.balance_sheet,
+        view.cash_flow,
+        view.operating,
+    ):
+        facts.update({f.label: f for f in section})
+    return facts
+
+
+def test_read_time_sanity_flags_a_mis_scaled_figure_without_a_stored_flag():
+    """The deterministic read-time check lights up reconciliation_mismatch on an
+    already-stored deal with NO formula_mismatch flag: a balance-sheet total
+    mis-scaled to thousands next to a billions revenue is caught at display time
+    (no re-analysis)."""
+    claims = [
+        _claim(attribute="revenue", normalized=416_000_000_000, period_year=2025, period_kind="A"),
+        _claim(
+            attribute="net_income", normalized=112_000_000_000, period_year=2025, period_kind="A"
+        ),
+        # Mis-scaled: Apple's total assets are ~$365B, here extracted as 365K.
+        _claim(attribute="total_assets", normalized=365_000, period_year=2025, period_kind="A"),
+    ]
+    facts = _all_facts(build_financials_view(claims, filenames={}, company="AcmeCo"))
+    assert facts["Total Assets"].reconciliation_mismatch is True
+    assert facts["Revenue"].reconciliation_mismatch is False
+
+
+def test_read_time_sanity_flags_ebit_above_gross_profit():
+    claims = [
+        _claim(attribute="revenue", normalized=200_000_000_000, period_year=2025, period_kind="A"),
+        _claim(
+            attribute="gross_profit", normalized=97_860_000_000, period_year=2025, period_kind="A"
+        ),
+        _claim(attribute="ebit", normalized=141_450_000_000, period_year=2025, period_kind="A"),
+    ]
+    facts = _all_facts(build_financials_view(claims, filenames={}, company="AcmeCo"))
+    # EBIT (141.45B) cannot exceed Gross Profit (97.86B) -> both flagged.
+    ebit = next(f for label, f in facts.items() if label.lower() == "ebit")
+    gp = next(f for label, f in facts.items() if label.lower() == "gross profit")
+    assert ebit.reconciliation_mismatch is True
+    assert gp.reconciliation_mismatch is True
 
 
 def test_reconciliation_mismatch_defaults_false_without_flags():
