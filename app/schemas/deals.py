@@ -384,6 +384,10 @@ class MarketFactResponse(CamelModel):
     # The web source URL for a kind='web' fact; null for a document claim (whose
     # citation is a file · p.N string).
     source_url: str | None = None
+    # True for a public-source (web_search_collect) fact, so the FE can badge a
+    # figure sourced externally (SEC / market research) rather than from the deck.
+    # Copied by name from the MarketFact view dataclass via _to_responses.
+    is_web: bool = False
 
 
 class CompanyFactResponse(CamelModel):

@@ -702,6 +702,10 @@ def test_web_claim_source_url_is_surfaced():
     by_label = {f.label: f for f in view.sizing}
     assert by_label["Market Size"].source_url == "https://example.com/gartner"
     assert by_label["TAM"].source_url is None
+    # Provenance flag rides alongside the URL: the web-sourced figure is flagged
+    # so the FE can badge it; the deck (pdf) figure is not.
+    assert by_label["Market Size"].is_web is True
+    assert by_label["TAM"].is_web is False
 
 
 def test_web_claims_sort_above_deck_claims_in_market_definition():
