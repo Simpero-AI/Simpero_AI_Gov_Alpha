@@ -336,3 +336,83 @@ def test_a_quarterly_datapoint_does_not_stand_in_for_the_annual_figure():
         }
     }
     assert _lookup_annual_fact(facts, ("Revenues",), 2023) is None
+
+
+# --- Expanded concept coverage (gross profit, balance-sheet stocks, cash flow) ---
+
+
+def _instant(year: int, val: float, *, form: str = "10-K", filed: str = "2024-02-01") -> dict:
+    """A balance-sheet (INSTANT) EDGAR datapoint: an `end` at fiscal year-end and
+    NO `start` -- the shape a stock (assets/liabilities/AR/AP/inventory) carries,
+    distinct from the duration `_annual` above. Exercises _covers_annual_period's
+    instant branch (start is None -> qualifies on end year alone)."""
+    return {
+        "fy": year,
+        "fp": "FY",
+        "form": form,
+        "filed": filed,
+        "end": f"{year}-12-31",
+        "val": val,
+    }
+
+
+def _facts_instant(concept: str, year: int, val: float) -> dict:
+    return {"facts": {"us-gaap": {concept: {"units": {"USD": [_instant(year, val)]}}}}}
+
+
+async def test_gross_profit_confirms_on_match():
+    src = SecEdgarSource(fetch=_fake_fetch(_facts("GrossProfit", 2023, 195_000_000_000.0)))
+    v = await src.check(None, _claim(attribute="gross_profit", normalized=195_000_000_000.0))
+    assert isinstance(v, CorroborationVerdict)
+    assert v.agrees is True
+    assert v.result["concept"] == "GrossProfit"
+
+
+async def test_current_assets_confirms_on_an_instant_fact():
+    src = SecEdgarSource(
+        fetch=_fake_fetch(_facts_instant("AssetsCurrent", 2023, 143_566_000_000.0))
+    )
+    v = await src.check(None, _claim(attribute="current_assets", normalized=143_566_000_000.0))
+    assert isinstance(v, CorroborationVerdict)
+    assert v.agrees is True
+
+
+async def test_operating_cash_flow_confirms_on_match():
+    src = SecEdgarSource(
+        fetch=_fake_fetch(
+            _facts("NetCashProvidedByUsedInOperatingActivities", 2023, 110_543_000_000.0)
+        )
+    )
+    v = await src.check(None, _claim(attribute="operating_cash_flow", normalized=110_543_000_000.0))
+    assert isinstance(v, CorroborationVerdict)
+    assert v.agrees is True
+
+
+async def test_accounts_payable_mismatch_conflicts():
+    # A clean single-consolidated stock is NOT confirm-only: a real mismatch (here
+    # a mis-scaled "6.0K" against EDGAR's $62B) surfaces as a conflict so a wrong
+    # figure is caught, not silently confirmed.
+    src = SecEdgarSource(
+        fetch=_fake_fetch(_facts_instant("AccountsPayableCurrent", 2023, 62_000_000_000.0))
+    )
+    v = await src.check(None, _claim(attribute="accounts_payable", normalized=6_000.0))
+    assert isinstance(v, CorroborationVerdict)
+    assert v.agrees is False
+
+
+async def test_cogs_sign_mismatch_is_no_signal_not_a_conflict():
+    # COGS is confirm-only: a deck carrying it negative (-220B) against EDGAR's
+    # positive magnitude (+220B) is a sign-convention difference, not a conflict.
+    src = SecEdgarSource(
+        fetch=_fake_fetch(_facts("CostOfGoodsAndServicesSold", 2023, 220_000_000_000.0))
+    )
+    assert await src.check(None, _claim(attribute="cogs", normalized=-220_000_000_000.0)) is None
+
+
+async def test_cogs_confirms_when_signed_the_same():
+    src = SecEdgarSource(
+        fetch=_fake_fetch(_facts("CostOfGoodsAndServicesSold", 2023, 220_000_000_000.0))
+    )
+    v = await src.check(None, _claim(attribute="cogs", normalized=220_000_000_000.0))
+    assert isinstance(v, CorroborationVerdict)
+    assert v.agrees is True
