@@ -38,6 +38,20 @@ _TIMEOUT = 10.0
 _COMPANY_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 _COMPANY_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"
 
+# Well-known brand -> SEC-registrant aliases, in strip_legal_suffix core form (the
+# same normalized space _resolve_cik matches in: lower-cased, legal suffix removed).
+# These are EXACT curated facts -- a brand a deal is commonly named by whose SEC
+# filer is a differently-named legal entity -- NOT fuzzy matching: a filing is
+# Google's but the registrant is "Alphabet Inc."; Facebook files as "Meta
+# Platforms". Without this a deal named by the brand ("google") matches no SEC
+# title and every EDGAR corroboration verdict is silently 0. Extend deliberately:
+# every entry must be an unambiguous brand -> registrant fact, never a guess.
+_BRAND_ALIASES: dict[str, str] = {
+    "google": "alphabet",
+    "facebook": "meta platforms",
+    "meta": "meta platforms",
+}
+
 # Canonical claim attribute -> EDGAR us-gaap concept candidates, most-specific
 # first. Kept deliberately small; extend as concepts are validated against real
 # filings.
@@ -205,33 +219,62 @@ class SecEdgarSource:
         self._tickers: dict[str, int] | None = (
             None  # normalized title -> CIK; ambiguous titles dropped
         )
+        self._by_ticker: dict[str, int] | None = (
+            None  # normalized ticker symbol -> CIK; ambiguous tickers dropped
+        )
 
     async def _resolve_cik(self, company_name: str) -> int | None:
-        """Suffix-insensitive title match against company_tickers.json. Both the
-        SEC title and the claim entity are reduced by strip_legal_suffix (the same
-        core-name helper the views use), so a deck's bare "Snowflake" resolves to
-        SEC's "Snowflake Inc." -- an exact-string match missed exactly this, the
-        common case where a deck names a company without its legal form. Returns a
-        CIK only on an unambiguous single match -- deterministic, never a guess;
-        None when not found or ambiguous (a suffix-strip collision between two
-        filers is marked ambiguous below and drops to no-signal, not a conflict)."""
-        if self._tickers is None:
+        """Resolve a company name to a CIK against company_tickers.json, three
+        ways, most-specific first:
+
+        1. Ticker symbol -- a deal named/aliased by its symbol ("GOOGL") matches
+           the row's `ticker` directly. Unambiguous by construction.
+        2. Brand alias (_BRAND_ALIASES) -- a brand whose SEC registrant has a
+           different legal name ("google" -> "alphabet", "facebook" -> "meta
+           platforms"), applied in the same normalized core space as the title
+           match below.
+        3. Suffix-insensitive title -- both the SEC title and the claim entity are
+           reduced by strip_legal_suffix, so a deck's bare "Snowflake" resolves to
+           SEC's "Snowflake Inc." (the common case: a deck names a company without
+           its legal form).
+
+        Returns a CIK only on an unambiguous single match -- deterministic, never
+        a guess; None when not found or ambiguous (a suffix-strip collision
+        between two filers drops to no-signal, not a conflict). Two rows sharing a
+        title AND CIK -- e.g. GOOGL and GOOG both filing as Alphabet -- are the
+        same filer, so they are NOT ambiguous."""
+        if self._tickers is None or self._by_ticker is None:
             try:
                 data = await self._fetch(_COMPANY_TICKERS_URL)
             except Exception:
                 logger.exception("EDGAR company_tickers fetch failed; treating as no-signal")
                 return None
             rows = data.values() if isinstance(data, dict) else (data or [])
-            seen: dict[str, int | None] = {}
+            titles: dict[str, int | None] = {}
+            tickers: dict[str, int | None] = {}
+
+            def _record(index: dict[str, int | None], key: str, cik: int) -> None:
+                # Ambiguous (None) the moment a SECOND, DIFFERENT CIK claims the
+                # key; a repeat of the same CIK (GOOGL/GOOG -> one Alphabet) keeps
+                # it resolvable.
+                index[key] = None if key in index and index[key] != cik else cik
+
             for row in rows:
-                title = strip_legal_suffix(str(row.get("title", "")))
                 cik = row.get("cik_str")
-                if not title or not isinstance(cik, int):
+                if not isinstance(cik, int):
                     continue
-                # Mark a title ambiguous (None) the moment a second CIK claims it.
-                seen[title] = None if title in seen and seen[title] != cik else cik
-            self._tickers = {t: c for t, c in seen.items() if c is not None}
-        return self._tickers.get(strip_legal_suffix(company_name))
+                title = strip_legal_suffix(str(row.get("title", "")))
+                if title:
+                    _record(titles, title, cik)
+                ticker = strip_legal_suffix(str(row.get("ticker", "")))
+                if ticker:
+                    _record(tickers, ticker, cik)
+            self._tickers = {t: c for t, c in titles.items() if c is not None}
+            self._by_ticker = {t: c for t, c in tickers.items() if c is not None}
+
+        core = strip_legal_suffix(company_name)
+        # A CIK is always a positive int, so `or` safely falls through a miss.
+        return self._by_ticker.get(core) or self._tickers.get(_BRAND_ALIASES.get(core, core))
 
     async def check(self, db: Any, claim: Claim) -> CorroborationVerdict | None:
         concepts = _CONCEPTS.get(claim.attribute)

@@ -13,6 +13,11 @@ _TICKERS = {
     # Same title under two CIKs -> ambiguous, must resolve to nothing.
     "2": {"cik_str": 111, "ticker": "DUPA", "title": "Dupe Co"},
     "3": {"cik_str": 222, "ticker": "DUPB", "title": "Dupe Co"},
+    # Two tickers, ONE title, ONE CIK -- exactly how real SEC data carries GOOGL
+    # and GOOG (both file as "Alphabet Inc."). Same CIK => NOT ambiguous. Also the
+    # brand-alias case: a deal named "google" must resolve to this filer.
+    "4": {"cik_str": 1652044, "ticker": "GOOGL", "title": "Alphabet Inc."},
+    "5": {"cik_str": 1652044, "ticker": "GOOG", "title": "Alphabet Inc."},
 }
 
 
@@ -85,6 +90,36 @@ async def test_resolves_a_bare_name_without_the_legal_suffix():
     v = await src.check(None, _claim(entity="Apple", normalized=1000.0))
     assert isinstance(v, CorroborationVerdict)
     assert v.result["cik"] == 320193
+
+
+async def test_resolves_a_brand_alias_to_its_sec_registrant():
+    # A deal named by its BRAND ("google") must resolve to the SEC registrant's
+    # legal name ("Alphabet Inc."). The suffix-strip title match alone misses this
+    # -- "google" is an alias, not a legal-suffix variant of "alphabet" -- so it
+    # is exactly the case that produced 0 EDGAR verdicts on a real "google" deal.
+    src = SecEdgarSource(fetch=_fake_fetch(_facts("Revenues", 2023, 1000.0)))
+    v = await src.check(None, _claim(entity="google", normalized=1000.0))
+    assert isinstance(v, CorroborationVerdict)
+    assert v.result["cik"] == 1652044
+
+
+async def test_resolves_a_ticker_symbol():
+    # A deal named by its ticker ("GOOGL") resolves via the ticker index -- no
+    # title/alias needed. GOOG would resolve to the same filer.
+    src = SecEdgarSource(fetch=_fake_fetch(_facts("Revenues", 2023, 1000.0)))
+    v = await src.check(None, _claim(entity="GOOGL", normalized=1000.0))
+    assert isinstance(v, CorroborationVerdict)
+    assert v.result["cik"] == 1652044
+
+
+async def test_two_tickers_one_cik_is_not_ambiguous():
+    # GOOGL and GOOG share the title "Alphabet Inc." under ONE CIK, so the shared
+    # title stays resolvable (same filer) -- unlike the Dupe Co case where two
+    # DIFFERENT CIKs share a title and must drop to no-signal.
+    src = SecEdgarSource(fetch=_fake_fetch(_facts("Revenues", 2023, 1000.0)))
+    v = await src.check(None, _claim(entity="Alphabet", normalized=1000.0))
+    assert isinstance(v, CorroborationVerdict)
+    assert v.result["cik"] == 1652044
 
 
 async def test_disagrees_on_material_delta_and_records_both_values():
