@@ -49,6 +49,14 @@ class DealStatusResponse(CamelModel):
     # has a real ended_at, i.e. only for a step that's actually finished.
     step_durations: dict[str, int] = {}
     error_message: str | None = None
+    # A stable, machine-readable failure reason for the few causes the analyst can
+    # act on -- today "llm_credit_exhausted" (the AI provider account is out of
+    # credit or over its usage limit). Null for a generic/opaque failure and on
+    # every non-error status. The frontend renders a cause-specific message + CTA
+    # when this is set, and falls back to error_message otherwise. Derived from the
+    # persisted sentinel error_message, so it needs no new column
+    # (app/services/failure_reasons.py).
+    error_code: str | None = None
     # Only populated once a run reaches a terminal status (successful/failed)
     # -- null everywhere else, including no_job/queued/processing.
     job_comments: list[JobCommentResponse] | None = None

@@ -39,6 +39,7 @@ from app.repo.AnalysisRunRepo import AnalysisRunRepo
 from app.repo.DataSourceRepo import DataSourceRepo
 from app.repo.DealRepo import DealRepo
 from app.repo.HumanAuditRepo import HumanAuditRepo
+from app.services.failure_reasons import CREDIT_EXHAUSTED_MESSAGE, PARSER_CREDIT_REJECTION_CODE
 from app.services.screening.mandate_rules import selected_rule_ids
 from app.services.screening.rulebook import load_rulebook
 from app.services.screening.workspace_config import load_workspace_config
@@ -142,6 +143,13 @@ def _final_status(parse_jobs: list[dict], timed_out: bool) -> tuple[str, str | N
     if timed_out:
         return "failed", "Analysis timed out waiting for documents to finish parsing."
     rejected = [job for job in parse_jobs if job["outcome"] == "rejected"]
+    if any(job["code"] == PARSER_CREDIT_REJECTION_CODE for job in rejected):
+        # An AI-provider billing/quota block (the parser's anthropic_credit_exhausted
+        # rejection) fails every document the same way -- it is an account issue, not
+        # a bad deal -- so surface the actionable cause instead of the generic
+        # "couldn't be parsed". CREDIT_EXHAUSTED_MESSAGE is the fixed sentinel the
+        # status API maps back to a machine-readable error_code for the frontend.
+        return "failed", CREDIT_EXHAUSTED_MESSAGE
     if rejected and all(job["code"] == "no_extractable_text" for job in rejected):
         noun = "document" if len(rejected) == 1 else f"{len(rejected)} documents"
         return "failed", f"All {noun} need OCR before analysis."

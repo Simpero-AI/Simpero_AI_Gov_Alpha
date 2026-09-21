@@ -125,6 +125,7 @@ from app.services.dashboard_stats import (
 from app.services.deal_terms_view import build_deal_terms_view
 from app.services.entity_resolution import get_resolver
 from app.services.entity_resolution.types import EntityResolutionError
+from app.services.failure_reasons import error_code_for_message
 from app.services.field_synthesis import SectionSynthesis, SynthCitation, sections_from_json
 from app.services.financials_view import build_financials_trend, build_financials_view
 from app.services.findings_view import (
@@ -1036,6 +1037,7 @@ def _deal_status_from_runs(
             started_at=chain_started_at,
             ended_at=ended_at,
             step_durations=step_durations,
+            error_code=error_code_for_message(run.error_message),
             error_message=run.error_message,
             job_comments=run.job_comments,
         )
@@ -1069,6 +1071,7 @@ def _deal_status_from_runs(
                 started_at=chain_started_at,
                 ended_at=ended_at,
                 step_durations=step_durations,
+                error_code=error_code_for_message(run.error_message),
                 error_message=run.error_message,
                 job_comments=verification_comments,
             )
@@ -1108,6 +1111,7 @@ def _deal_status_from_runs(
         started_at=chain_started_at,
         ended_at=ended_at,
         step_durations=step_durations,
+        error_code=error_code_for_message(run.error_message),
         error_message=run.error_message,
         job_comments=run.job_comments,
     )
