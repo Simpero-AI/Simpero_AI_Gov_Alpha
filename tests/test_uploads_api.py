@@ -6,9 +6,10 @@ pattern, but mounts only app.api.uploads.router on a test-local FastAPI
 instance rather than the full app -- app/main.py isn't wired to this router
 yet (that's Phase 6's job, out of scope here). The Spaces adapter is mocked
 at the call sites app/api/uploads.py imports (build_object_key, presign_put,
-head_object) so no real network call happens. The job queue
-(app.jobs.queue.get_queue) is likewise mocked at its call site in
-app/api/uploads.py, never the real Valkey connection.
+head_object) so no real network call happens. The job queue is likewise mocked
+at its source (app.jobs.queue.get_queue) -- complete_upload defers the enqueue
+to a post-commit BackgroundTask via enqueue_ingest_data_source rather than
+touching get_queue itself -- never the real Valkey connection.
 """
 
 import uuid
@@ -307,13 +308,17 @@ def _complete_body(deal_id: str, **overrides: Any) -> dict[str, Any]:
 
 @pytest.fixture
 def mocked_complete(monkeypatch: pytest.MonkeyPatch):
-    """Mocks the Spaces/queue call sites app/api/uploads.py imports directly
-    (build_object_key, head_object, get_queue) so /complete never opens a
-    real network connection. Also patches app.jobs.parse_client.get_parse_queue
-    to raise if it's ever called -- that's a DIFFERENT Valkey queue ("parse")
-    for a different service's worker; /complete must enqueue only on
-    get_queue()'s "simpero" queue, never this one (see CLAUDE.md's documented
-    "silent drop" hazard if the two get swapped).
+    """Mocks the Spaces call sites app/api/uploads.py imports directly
+    (build_object_key, head_object) plus the job queue at its source
+    (app.jobs.queue.get_queue) so /complete never opens a real network
+    connection. get_queue is patched at the source, not on `uploads`:
+    complete_upload no longer references it -- it hands enqueue_ingest_data_source
+    to a post-commit BackgroundTask, and that helper resolves get_queue from its
+    own module globals when the task runs. Also patches
+    app.jobs.parse_client.get_parse_queue to raise if it's ever called -- that's
+    a DIFFERENT Valkey queue ("parse") for a different service's worker;
+    /complete must enqueue only on get_queue()'s "simpero" queue, never this one
+    (see CLAUDE.md's documented "silent drop" hazard if the two get swapped).
     """
     build_calls: list[tuple] = []
     enqueue_calls: list[tuple[str, dict[str, Any]]] = []
@@ -341,7 +346,7 @@ def mocked_complete(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr(uploads, "build_object_key", fake_build_object_key)
     monkeypatch.setattr(uploads, "head_object", fake_head_object)
-    monkeypatch.setattr(uploads, "get_queue", lambda: fake_queue)
+    monkeypatch.setattr("app.jobs.queue.get_queue", lambda: fake_queue)
     monkeypatch.setattr(parse_client, "get_parse_queue", _fail_if_called)
 
     return {
@@ -439,3 +444,45 @@ async def test_complete_row_invisible_to_other_org_via_rls(
         text("SELECT id FROM data_source WHERE id = :id"), {"id": upload_id}
     )
     assert result.first() is None
+
+
+def test_complete_enqueues_only_after_the_row_is_committed(
+    app, client, owner_conn, seeded_org, seeded_deal, monkeypatch
+):
+    """Regression (production incident): the ingest job must be enqueued from a
+    post-commit BackgroundTask, never inline in the request transaction.
+    Enqueued inline, a worker could dequeue and look the data_source row up
+    before this request committed and abort with "data_source ... not found"
+    (transient), or -- if the commit later failed -- run against a row that never
+    persisted (permanent miss + an object stranded in Spaces). We prove the
+    ordering from inside the fake enqueue by reading the row through owner_conn,
+    a separate autocommit connection that can only see it once complete_upload's
+    transaction has committed.
+    """
+    _authed(app, seeded_org["clerk_org_id"], "user-1")
+    upload_id = str(uuid.uuid4())
+    seen_at_enqueue: dict[str, bool] = {}
+
+    def fake_build_object_key(org_name, clerk_org_id, deal_id, upload_id_, filename):
+        return f"{org_name}-{clerk_org_id}/{deal_id}/{upload_id_}-{filename}"
+
+    def fake_head_object(key: str) -> bool:
+        return True
+
+    class _VisibilityCheckingQueue:
+        async def enqueue(self, job_name: str, **kwargs: Any) -> None:
+            with owner_conn.cursor() as cur:
+                cur.execute("SELECT 1 FROM data_source WHERE id = %s", (kwargs["data_source_id"],))
+                seen_at_enqueue["value"] = cur.fetchone() is not None
+
+    monkeypatch.setattr(uploads, "build_object_key", fake_build_object_key)
+    monkeypatch.setattr(uploads, "head_object", fake_head_object)
+    monkeypatch.setattr("app.jobs.queue.get_queue", lambda: _VisibilityCheckingQueue())
+
+    resp = client.post(f"/uploads/{upload_id}/complete", json=_complete_body(seeded_deal))
+
+    assert resp.status_code == 200, resp.text
+    assert seen_at_enqueue.get("value") is True, (
+        "ingest_data_source was enqueued before the data_source row committed -- "
+        "it must be deferred to a post-commit BackgroundTask"
+    )

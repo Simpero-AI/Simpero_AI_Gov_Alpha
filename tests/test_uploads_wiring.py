@@ -2,10 +2,10 @@
 at its real prefixed path (/api/uploads/...), through the real app instance --
 not the test-local FastAPI() app tests/test_uploads_api.py builds in
 isolation. Mirrors tests/test_phase1_endpoints.py's ApiTestClient +
-dependency_overrides pattern for app.main.app. Spaces/queue calls are mocked
-at their app/api/uploads.py call sites, same as test_uploads_api.py -- this
-test is about route wiring, not re-covering the guard/dedupe logic already
-covered there.
+dependency_overrides pattern for app.main.app. Spaces calls are mocked at their
+app/api/uploads.py call sites and the queue at its source (app.jobs.queue),
+same as test_uploads_api.py -- this test is about route wiring, not re-covering
+the guard/dedupe logic already covered there.
 """
 
 import uuid
@@ -96,7 +96,11 @@ def mocked_spaces_and_queue(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(uploads, "build_object_key", fake_build_object_key)
     monkeypatch.setattr(uploads, "presign_put", fake_presign_put)
     monkeypatch.setattr(uploads, "head_object", fake_head_object)
-    monkeypatch.setattr(uploads, "get_queue", lambda: _FakeQueue())
+    # Patched at the source, not on `uploads`: complete_upload no longer holds a
+    # get_queue reference -- it hands enqueue_ingest_data_source to a post-commit
+    # BackgroundTask, and that helper (in app.jobs.queue) resolves get_queue from
+    # its own module globals at call time.
+    monkeypatch.setattr("app.jobs.queue.get_queue", lambda: _FakeQueue())
 
 
 def test_presigned_url_reachable_through_real_app(

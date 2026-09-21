@@ -1,12 +1,12 @@
 from typing import Any
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dependencies import get_claims, get_db
-from app.jobs.queue import get_queue
+from app.jobs.queue import enqueue_ingest_data_source
 from app.models.organisation import Organisation
 from app.repo.DataSourceRepo import DataSourceRepo
 from app.repo.HumanAuditRepo import HumanAuditRepo
@@ -116,6 +116,7 @@ async def create_presigned_url(
 async def complete_upload(
     upload_id: UUID,
     body: CompleteRequest,
+    background_tasks: BackgroundTasks,
     claims: dict[str, Any] = Depends(get_claims),
     db: AsyncSession = Depends(get_db),
 ) -> CompleteResponse:
@@ -154,23 +155,6 @@ async def complete_upload(
         }
     )
 
-    # "simpero" queue -- this app's own SAQ worker. Never get_parse_queue()'s
-    # "parse" queue, which targets a different service's worker that doesn't
-    # consume this job name; getting this backwards silently drops the job.
-    # Explicit timeout: SAQ's default is 10s, and stream_and_hash's round trip
-    # to Spaces for a real document routinely runs longer than that -- a job
-    # cancelled by SAQ mid-UPDATE rolls back, leaving the row stuck "pending"
-    # with no automatic retry (default retries=1 doesn't cover a timeout kill).
-    await get_queue().enqueue(
-        "ingest_data_source",
-        data_source_id=str(upload_id),
-        clerk_org_id=claims["tenant_id"],
-        storage_key=storage_key,
-        declared_sha256=body.declared_sha256,
-        timeout=120,
-        retries=2,
-    )
-
     org_id, actor_id, actor_email = await _actor(db, claims)
     await HumanAuditRepo(db).append(
         {
@@ -185,6 +169,22 @@ async def complete_upload(
                 "storage_key": storage_key,
             },
         }
+    )
+
+    # Enqueue AFTER commit, not inside this transaction. A BackgroundTask runs
+    # once the response is sent -- after get_db commits the data_source + audit
+    # rows -- and is skipped entirely if that commit raises. Enqueuing inline
+    # (the old code) could let a worker dequeue before the row was visible
+    # (transient "data_source not found", healed by retry) or, if the commit
+    # later failed, orphan the job against a row that never persisted (permanent
+    # not-found + an object stranded in Spaces). Mirrors the analysis chain's
+    # enqueue-after-commit discipline.
+    background_tasks.add_task(
+        enqueue_ingest_data_source,
+        data_source_id=str(upload_id),
+        clerk_org_id=claims["tenant_id"],
+        storage_key=storage_key,
+        declared_sha256=body.declared_sha256,
     )
 
     return CompleteResponse(id=data_source.id, status=data_source.status, page_count=page_count)
