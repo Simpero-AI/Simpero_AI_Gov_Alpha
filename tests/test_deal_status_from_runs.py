@@ -12,6 +12,7 @@ from datetime import UTC, datetime, timedelta
 
 from app.api.deals import _deal_status_from_runs
 from app.models.analysis_run import AnalysisRun
+from app.services.failure_reasons import CREDIT_EXHAUSTED_CODE, CREDIT_EXHAUSTED_MESSAGE
 
 _START = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
 
@@ -64,6 +65,58 @@ def test_parsing_failed_is_error_and_passes_the_message_through():
     assert resp.job_status == "error"
     assert resp.current_phase == "parsing"
     assert resp.error_message == "boom"
+    # A generic (non-sentinel) failure carries no machine-readable code.
+    assert resp.error_code is None
+
+
+def test_parsing_failed_credit_sentinel_sets_error_code():
+    # The credit sentinel error_message maps to the stable llm_credit_exhausted
+    # code the frontend renders a billing-specific message + CTA for, while the
+    # human-readable message is still passed through unchanged.
+    run = _run(
+        "parsing",
+        "failed",
+        ended_at=_START + timedelta(seconds=5),
+        error_message=CREDIT_EXHAUSTED_MESSAGE,
+    )
+    resp = _deal_status_from_runs(run, None, None)
+    assert resp.job_status == "error"
+    assert resp.error_code == CREDIT_EXHAUSTED_CODE
+    assert resp.error_message == CREDIT_EXHAUSTED_MESSAGE
+
+
+def test_verification_failed_credit_sentinel_sets_error_code():
+    parsing = _run("parsing", "successful", ended_at=_START + timedelta(seconds=30))
+    verification = _run(
+        "verification",
+        "failed",
+        started_at=_START + timedelta(minutes=1),
+        ended_at=_START + timedelta(minutes=1, seconds=3),
+        error_message=CREDIT_EXHAUSTED_MESSAGE,
+    )
+    resp = _deal_status_from_runs(verification, parsing, verification)
+    assert resp.job_status == "error"
+    assert resp.error_code == CREDIT_EXHAUSTED_CODE
+
+
+def test_screening_failed_credit_sentinel_sets_error_code():
+    parsing = _run("parsing", "successful", ended_at=_START + timedelta(seconds=30))
+    verification = _run(
+        "verification",
+        "successful",
+        started_at=_START + timedelta(minutes=1),
+        ended_at=_START + timedelta(minutes=1, seconds=20),
+    )
+    screening = _run(
+        "screening",
+        "failed",
+        started_at=_START + timedelta(minutes=2),
+        ended_at=_START + timedelta(minutes=2, seconds=5),
+        error_message=CREDIT_EXHAUSTED_MESSAGE,
+    )
+    resp = _deal_status_from_runs(screening, parsing, verification)
+    assert resp.job_status == "error"
+    assert resp.error_code == CREDIT_EXHAUSTED_CODE
 
 
 def test_verification_successful_is_complete_at_governance():

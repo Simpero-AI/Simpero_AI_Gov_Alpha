@@ -33,6 +33,7 @@ from app.repo.AnalysisRunRepo import AnalysisRunRepo
 from app.repo.DealRepo import DealRepo
 from app.repo.HumanAuditRepo import HumanAuditRepo
 from app.repo.ScreeningResultRepo import ScreeningResultRepo
+from app.services.failure_reasons import CREDIT_EXHAUSTED_MESSAGE, is_credit_exhausted
 from app.services.screening.decision import screen_deal
 from app.services.screening.mandate_rules import selected_rule_ids
 from app.services.screening.rulebook import load_rulebook
@@ -207,10 +208,20 @@ async def _mark_run_failed(run_id: UUID, clerk_org_id: str, exc: BaseException) 
             run = await run_repo.get_by_id(run_id)
             if run is None or run.status in ("successful", "failed"):
                 return
+            # A billing/quota block that hit mid-chain gets the same fixed,
+            # actionable sentinel the parse path uses, which the status API maps to
+            # a machine-readable error_code. It is a constant, not str(exc), so it
+            # still keeps document-derived content out of the column. Any other
+            # failure keeps the type-name-only message.
+            error_message = (
+                CREDIT_EXHAUSTED_MESSAGE
+                if is_credit_exhausted(exc)
+                else f"screening failed: {type(exc).__name__}"
+            )
             await run_repo.update_progress(
                 run_id,
                 status="failed",
-                error_message=f"screening failed: {type(exc).__name__}",
+                error_message=error_message,
             )
             await HumanAuditRepo(session).append(
                 {

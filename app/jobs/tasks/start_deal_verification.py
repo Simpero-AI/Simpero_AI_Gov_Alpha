@@ -58,6 +58,7 @@ from app.services.corroboration import CORROBORATABLE_STATUSES
 from app.services.dashboard_structure import merge_dashboard_structures
 from app.services.deal_profile import deal_profile_updates
 from app.services.edge_writer import flush_edges, stage_edge
+from app.services.failure_reasons import CREDIT_EXHAUSTED_MESSAGE, is_credit_exhausted
 from app.services.qualitative_findings import merge_qualitative_findings
 from app.services.reconciliation import reconcile_same_fact
 from app.services.span_promotion import promote_exact_span
@@ -612,10 +613,21 @@ async def _mark_run_failed(run_id: UUID, clerk_org_id: str, exc: BaseException) 
             run = await run_repo.get_by_id(run_id)
             if run is None or run.status in ("successful", "failed"):
                 return
+            # A billing/quota block that hit mid-chain (credit funded through
+            # parsing, then exhausted) gets the same fixed, actionable sentinel the
+            # parse path uses, which the status API maps to a machine-readable
+            # error_code. It is a constant, not str(exc), so it still keeps
+            # document-derived content out of the column. Any other failure keeps
+            # the type-name-only message.
+            error_message = (
+                CREDIT_EXHAUSTED_MESSAGE
+                if is_credit_exhausted(exc)
+                else f"verification failed: {type(exc).__name__}"
+            )
             await run_repo.update_progress(
                 run_id,
                 status="failed",
-                error_message=f"verification failed: {type(exc).__name__}",
+                error_message=error_message,
             )
             await HumanAuditRepo(session).append(
                 {
