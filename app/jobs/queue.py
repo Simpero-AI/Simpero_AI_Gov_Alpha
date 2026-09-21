@@ -26,13 +26,14 @@ async def enqueue_ingest_data_source(
     MUST be scheduled to run only AFTER the data_source row's request
     transaction has committed -- the job looks the row up by id under the org's
     RLS and aborts ("data_source ... not found") if it is not yet durable. The
-    upload handlers therefore hand this to a FastAPI BackgroundTask (which runs
-    after the response, i.e. after get_db commits, and is skipped when the commit
-    raises) rather than awaiting it inside the request transaction, where a
-    fast worker could dequeue before the commit (transient miss) OR a later
-    rollback could orphan the job against a row that never persisted (permanent
-    miss). See docs/plans / the analysis-job chain, which enqueues post-commit
-    for exactly this reason.
+    upload handlers therefore register this as a post-commit hook
+    (app.core.post_commit.add_post_commit_hook), which get_db / get_public_session_db
+    await only after a successful commit and never on a rollback -- NOT inline in
+    the request transaction (a fast worker could dequeue before the commit, a
+    transient miss) and NOT a FastAPI BackgroundTask (which runs BEFORE the
+    yield-dependency's commit, so it would fire pre-commit and even when the commit
+    ultimately fails, a permanent miss that orphans the job against a row that never
+    persisted). Mirrors the analysis-job chain's enqueue-after-commit discipline.
 
     On the "simpero" queue -- this app's own SAQ worker, never the parser's
     'parse' queue (a different service that doesn't consume this job name).

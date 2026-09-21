@@ -1,11 +1,12 @@
 from typing import Any
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dependencies import get_claims, get_db
+from app.core.post_commit import add_post_commit_hook
 from app.jobs.queue import enqueue_ingest_data_source
 from app.models.organisation import Organisation
 from app.repo.DataSourceRepo import DataSourceRepo
@@ -116,7 +117,6 @@ async def create_presigned_url(
 async def complete_upload(
     upload_id: UUID,
     body: CompleteRequest,
-    background_tasks: BackgroundTasks,
     claims: dict[str, Any] = Depends(get_claims),
     db: AsyncSession = Depends(get_db),
 ) -> CompleteResponse:
@@ -171,20 +171,22 @@ async def complete_upload(
         }
     )
 
-    # Enqueue AFTER commit, not inside this transaction. A BackgroundTask runs
-    # once the response is sent -- after get_db commits the data_source + audit
-    # rows -- and is skipped entirely if that commit raises. Enqueuing inline
-    # (the old code) could let a worker dequeue before the row was visible
-    # (transient "data_source not found", healed by retry) or, if the commit
-    # later failed, orphan the job against a row that never persisted (permanent
-    # not-found + an object stranded in Spaces). Mirrors the analysis chain's
-    # enqueue-after-commit discipline.
-    background_tasks.add_task(
-        enqueue_ingest_data_source,
-        data_source_id=str(upload_id),
-        clerk_org_id=claims["tenant_id"],
-        storage_key=storage_key,
-        declared_sha256=body.declared_sha256,
+    # Enqueue only AFTER get_db commits this transaction. Registered as a
+    # post-commit hook (run by get_db once the commit lands, skipped on rollback),
+    # NOT enqueued inline and NOT a FastAPI BackgroundTask: inline, a worker could
+    # dequeue before the row was durable (transient "data_source not found"); and a
+    # BackgroundTask runs BEFORE get_db's yield-commit, so it would enqueue before
+    # the row committed and even when the commit ultimately fails (orphaning the job
+    # against a row that never persisted + a Spaces object stranded). The hook fires
+    # iff the data is durable. See app/core/post_commit.py.
+    add_post_commit_hook(
+        db,
+        lambda: enqueue_ingest_data_source(
+            data_source_id=str(upload_id),
+            clerk_org_id=claims["tenant_id"],
+            storage_key=storage_key,
+            declared_sha256=body.declared_sha256,
+        ),
     )
 
     return CompleteResponse(id=data_source.id, status=data_source.status, page_count=page_count)

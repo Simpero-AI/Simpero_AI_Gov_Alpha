@@ -1,13 +1,14 @@
 import logging
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import AuthenticationError
 from app.core.intake_security import IntakeSessionClaims, decode_intake_session_jwt
+from app.core.post_commit import add_post_commit_hook
 from app.core.public_dependencies import get_public_session_db
 from app.core.rate_limit_middleware import client_ip
 from app.jobs.queue import enqueue_ingest_data_source
@@ -140,7 +141,6 @@ async def complete_upload(
     upload_id: UUID,
     body: PublicCompleteRequest,
     request: Request,
-    background_tasks: BackgroundTasks,
     session_and_link: tuple[AsyncSession, DealIntakeLink] = Depends(get_public_session_db),
     claims: IntakeSessionClaims = Depends(_decode_claims),
 ) -> CompleteResponse | JSONResponse:
@@ -249,17 +249,20 @@ async def complete_upload(
         }
     )
 
-    # Enqueue AFTER commit (BackgroundTask), never inside this transaction --
-    # same queue/timeout/retries as the authenticated path. Inline enqueuing
-    # could dequeue before the row was durable (transient not-found) or orphan
-    # the job if the commit later failed (permanent not-found). See
-    # enqueue_ingest_data_source's docstring.
-    background_tasks.add_task(
-        enqueue_ingest_data_source,
-        data_source_id=str(upload_id),
-        clerk_org_id=link.clerk_org_id,
-        storage_key=storage_key,
-        declared_sha256=body.declared_sha256,
+    # Enqueue only AFTER this transaction commits -- registered as a post-commit
+    # hook (run by get_public_session_db once the commit lands, skipped on
+    # rollback), never inline and never a FastAPI BackgroundTask. Same reasoning as
+    # the authenticated path: inline could dequeue before the row was durable, and a
+    # BackgroundTask runs before the yield-commit so it fires pre-commit and even on
+    # a failed commit. See app/core/post_commit.py and enqueue_ingest_data_source.
+    add_post_commit_hook(
+        db,
+        lambda: enqueue_ingest_data_source(
+            data_source_id=str(upload_id),
+            clerk_org_id=link.clerk_org_id,
+            storage_key=storage_key,
+            declared_sha256=body.declared_sha256,
+        ),
     )
 
     return CompleteResponse(id=data_source.id, status=data_source.status, page_count=page_count)

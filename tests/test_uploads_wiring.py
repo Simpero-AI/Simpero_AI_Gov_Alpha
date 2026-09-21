@@ -97,9 +97,9 @@ def mocked_spaces_and_queue(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(uploads, "presign_put", fake_presign_put)
     monkeypatch.setattr(uploads, "head_object", fake_head_object)
     # Patched at the source, not on `uploads`: complete_upload no longer holds a
-    # get_queue reference -- it hands enqueue_ingest_data_source to a post-commit
-    # BackgroundTask, and that helper (in app.jobs.queue) resolves get_queue from
-    # its own module globals at call time.
+    # get_queue reference -- it registers enqueue_ingest_data_source as a post-commit
+    # hook, and that helper (in app.jobs.queue) resolves get_queue from its own
+    # module globals at call time.
     monkeypatch.setattr("app.jobs.queue.get_queue", lambda: _FakeQueue())
 
 

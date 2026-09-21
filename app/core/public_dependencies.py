@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import AuthenticationError
 from app.core.intake_security import decode_intake_session_jwt, sha256_hex
+from app.core.post_commit import run_post_commit_hooks
 from app.core.public_database import PublicAsyncSessionLocal
 from app.models.deal_intake_link import DealIntakeLink
 from app.repo.IntakeLinkRepo import IntakeLinkRepo
@@ -106,3 +107,8 @@ async def get_public_session_db(
             {"tid": link.clerk_org_id, "did": str(link.deal_id)},
         )
         yield session, link
+    # Reached only when the transaction COMMITTED cleanly (see get_db for the full
+    # reasoning): post-commit hooks fire iff the data is durable, so a public
+    # intake upload's ingest enqueue cannot dequeue before its row exists nor be
+    # orphaned by a rollback.
+    await run_post_commit_hooks(session)

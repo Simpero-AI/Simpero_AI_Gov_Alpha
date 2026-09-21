@@ -7,7 +7,7 @@ intake-session JWT (encode_intake_session_jwt), never a stubbed dependency
 override, so RLS is genuinely exercised end to end. The Spaces adapter
 (presign_put, head_object_size) is mocked at its call sites in
 app.api.public_uploads and the job queue at its source (app.jobs.queue.get_queue),
-which complete_upload reaches only through a post-commit BackgroundTask --
+which complete_upload reaches only through a post-commit hook --
 mirroring tests/test_uploads_api.py's pattern for the authenticated router.
 """
 
@@ -89,7 +89,7 @@ def mocked_spaces(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(public_uploads, "presign_put", fake_presign_put)
     monkeypatch.setattr(public_uploads, "head_object_size", fake_head_object_size)
     # At the source, not on `public_uploads`: complete_upload defers the enqueue
-    # to a post-commit BackgroundTask via enqueue_ingest_data_source, which
+    # to a post-commit hook via enqueue_ingest_data_source, which
     # resolves get_queue from its own module globals when the task runs.
     monkeypatch.setattr("app.jobs.queue.get_queue", lambda: fake_queue)
     monkeypatch.setattr(parse_client, "get_parse_queue", _fail_if_called)

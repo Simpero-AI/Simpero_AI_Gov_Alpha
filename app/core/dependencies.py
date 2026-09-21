@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import AsyncSessionLocal
 from app.core.exceptions import AuthenticationError
+from app.core.post_commit import run_post_commit_hooks
 from app.core.security import decode_clerk_jwt, fetch_clerk_organization
 from app.models.organisation import Organisation, OrgType, Users
 from app.repo.UserRepo import UserRepo
@@ -134,3 +135,10 @@ async def get_db(
         )
         await _ensure_user_provisioned(session, claims)
         yield session
+    # Reached only when the `session.begin()` block exited cleanly -- i.e. the
+    # transaction COMMITTED. A handler error or a failed commit propagates out of
+    # the block above and skips this, so post-commit hooks run if and only if the
+    # data is durable. This is why an ingest enqueue registered via
+    # add_post_commit_hook cannot dequeue before its row exists, nor be orphaned by
+    # a rollback -- unlike a FastAPI BackgroundTask, which runs before this point.
+    await run_post_commit_hooks(session)

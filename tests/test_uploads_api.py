@@ -8,7 +8,7 @@ yet (that's Phase 6's job, out of scope here). The Spaces adapter is mocked
 at the call sites app/api/uploads.py imports (build_object_key, presign_put,
 head_object) so no real network call happens. The job queue is likewise mocked
 at its source (app.jobs.queue.get_queue) -- complete_upload defers the enqueue
-to a post-commit BackgroundTask via enqueue_ingest_data_source rather than
+to a post-commit hook via enqueue_ingest_data_source rather than
 touching get_queue itself -- never the real Valkey connection.
 """
 
@@ -313,7 +313,7 @@ def mocked_complete(monkeypatch: pytest.MonkeyPatch):
     (app.jobs.queue.get_queue) so /complete never opens a real network
     connection. get_queue is patched at the source, not on `uploads`:
     complete_upload no longer references it -- it hands enqueue_ingest_data_source
-    to a post-commit BackgroundTask, and that helper resolves get_queue from its
+    to a post-commit hook, and that helper resolves get_queue from its
     own module globals when the task runs. Also patches
     app.jobs.parse_client.get_parse_queue to raise if it's ever called -- that's
     a DIFFERENT Valkey queue ("parse") for a different service's worker;
@@ -450,7 +450,7 @@ def test_complete_enqueues_only_after_the_row_is_committed(
     app, client, owner_conn, seeded_org, seeded_deal, monkeypatch
 ):
     """Regression (production incident): the ingest job must be enqueued from a
-    post-commit BackgroundTask, never inline in the request transaction.
+    post-commit hook, never inline in the request transaction.
     Enqueued inline, a worker could dequeue and look the data_source row up
     before this request committed and abort with "data_source ... not found"
     (transient), or -- if the commit later failed -- run against a row that never
@@ -484,5 +484,5 @@ def test_complete_enqueues_only_after_the_row_is_committed(
     assert resp.status_code == 200, resp.text
     assert seen_at_enqueue.get("value") is True, (
         "ingest_data_source was enqueued before the data_source row committed -- "
-        "it must be deferred to a post-commit BackgroundTask"
+        "it must be deferred to a post-commit hook"
     )
