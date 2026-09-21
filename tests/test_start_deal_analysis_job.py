@@ -25,9 +25,18 @@ job_module = importlib.import_module("app.jobs.tasks.start_deal_analysis")
 
 
 class _FakeSaqJob:
-    def __init__(self, status: Status, result: dict[str, Any] | None = None):
+    def __init__(
+        self,
+        status: Status,
+        result: dict[str, Any] | None = None,
+        error: str | None = None,
+    ):
         self.status = status
         self.result = result
+        # Mirrors saq.job.Job.error: the worker's traceback as a string on a
+        # FAILED/ABORTED job, None otherwise. Defaulted so every existing
+        # construction here keeps describing a job that recorded no trace.
+        self.error = error
 
 
 @pytest.fixture
@@ -443,9 +452,10 @@ async def test_mixed_outcomes_mark_run_successful_not_failed(
 async def test_saq_level_job_failure_falls_back_to_generic_comment(
     owner_conn, seeded_org, seeded_deal, monkeypatch, mocked_verification_enqueue
 ):
-    """A SAQ-level FAILED/ABORTED job never went through the parser's own
-    ParseError path, so there's no `message` to use verbatim -- the only
-    case where this app's own generic wording is the right call."""
+    """A SAQ-level FAILED/ABORTED job that recorded NO traceback leaves this
+    app nothing to quote, so its own generic wording is the right call. This
+    is now the narrow residual case -- a job that did record one is covered by
+    test_saq_level_job_failure_surfaces_the_real_error below."""
     data_source_id = _seed_verified_data_source(
         owner_conn, seeded_org["org_pk"], seeded_deal, "org/broken.pdf"
     )
@@ -483,6 +493,86 @@ async def test_saq_level_job_failure_falls_back_to_generic_comment(
         }
     ]
     assert not mocked_verification_enqueue
+
+
+async def test_saq_level_job_failure_surfaces_the_real_error(
+    owner_conn, seeded_org, seeded_deal, monkeypatch, mocked_verification_enqueue
+):
+    """The regression this file's generic wording used to hide: when the parser
+    worker dies on an uncaught exception, SAQ hands us its traceback on
+    `job.error`, and BOTH the per-file comment and the run's error_message must
+    carry its final line rather than this app's invented text.
+
+    The traceback below is the real production shape -- an account-level
+    Anthropic billing block, which fails every document of every deal
+    identically, so a user reading "Parsing job failed unexpectedly." has no way
+    to tell an ops problem from a bad upload.
+    """
+    traceback = (
+        "Traceback (most recent call last):\n"
+        '  File "/app/parser_service/worker.py", line 180, in process_document\n'
+        "    payload = await asyncio.to_thread(extract_claims, data, ...)\n"
+        '  File "/app/parser_service/extract_service.py", line 175, in _prose_tiers\n'
+        "    raise\n"
+        "parser_service.llm_client.AnthropicCreditExhausted: Anthropic usage/spend "
+        "limit reached for this account; raise or reset the limit in the Console "
+        "(or wait for it to reset) and re-run."
+    )
+
+    _seed_verified_data_source(owner_conn, seeded_org["org_pk"], seeded_deal, "org/capped.pdf")
+    run_id = _seed_run(owner_conn, seeded_org["org_pk"], seeded_deal)
+
+    async def fake_enqueue(
+        storage_key: str,
+        *,
+        entity: str,
+        known_sha256s=None,
+        sector_options=None,
+        geo_options=None,
+        screen_criteria=None,
+    ) -> str:
+        return "job-key-capped"
+
+    async def fake_get_job(job_key: str) -> _FakeSaqJob:
+        return _FakeSaqJob(Status.FAILED, None, error=traceback)
+
+    monkeypatch.setattr(job_module, "enqueue_process_document_job", fake_enqueue)
+    monkeypatch.setattr(job_module, "get_parse_job", fake_get_job)
+
+    await job_module.start_deal_analysis(
+        {}, analysis_run_id=run_id, deal_id=seeded_deal, clerk_org_id=seeded_org["clerk_org_id"]
+    )
+
+    run = _fetch_run(owner_conn, run_id)
+    assert run["status"] == "failed"
+
+    # The per-file finding quotes the exception line, not the generic wrapper.
+    comment = run["job_comments"][0]["comment"]
+    assert comment.startswith("parser_service.llm_client.AnthropicCreditExhausted:")
+    assert "usage/spend limit reached" in comment
+    assert "Parsing job failed unexpectedly." not in comment
+
+    # The banner names the parser as the failing component rather than implying
+    # the deal's documents are unusable.
+    assert run["error_message"] is not None
+    assert "parser service failed on every document" in run["error_message"]
+    assert run["error_message"] != "None of this deal's documents could be parsed."
+
+    # Only the summary line reaches the UI -- the frame lines stay in the log.
+    assert "Traceback" not in comment
+    assert "worker.py" not in comment
+
+    assert not mocked_verification_enqueue
+
+
+def test_error_summary_takes_the_last_meaningful_line() -> None:
+    assert job_module._error_summary(None) is None
+    assert job_module._error_summary("") is None
+    assert job_module._error_summary("   \n  \n") is None
+    assert job_module._error_summary("ValueError: boom") == "ValueError: boom"
+    # Trailing blank lines are common on a captured trace; the exception line,
+    # not the empty string after it, is what an operator needs.
+    assert job_module._error_summary("Traceback...\nKeyError: 'x'\n\n") == "KeyError: 'x'"
 
 
 async def test_missing_run_raises_instead_of_silently_no_oping(owner_conn, seeded_org, seeded_deal):
