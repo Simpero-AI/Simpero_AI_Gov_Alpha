@@ -8,9 +8,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import AuthenticationError
 from app.core.intake_security import IntakeSessionClaims, decode_intake_session_jwt
+from app.core.post_commit import add_post_commit_hook
 from app.core.public_dependencies import get_public_session_db
 from app.core.rate_limit_middleware import client_ip
-from app.jobs.queue import get_queue
+from app.jobs.queue import enqueue_ingest_data_source
 from app.models.deal_intake_link import DealIntakeLink
 from app.models.organisation import Organisation
 from app.repo.DataSourceRepo import DataSourceRepo
@@ -231,19 +232,6 @@ async def complete_upload(
             detail=f"This link has already reached the {MAX_FILES_PER_LINK}-file limit",
         )
 
-    # Same queue/timeout/retries as the authenticated path -- the ticket's
-    # "byte-for-byte identical data_source row" implies the same downstream
-    # ingest processing too.
-    await get_queue().enqueue(
-        "ingest_data_source",
-        data_source_id=str(upload_id),
-        clerk_org_id=link.clerk_org_id,
-        storage_key=storage_key,
-        declared_sha256=body.declared_sha256,
-        timeout=120,
-        retries=2,
-    )
-
     await HumanAuditRepo(db).append(
         {
             "org_id": link.org_id,
@@ -259,6 +247,22 @@ async def complete_upload(
             "ip_address": ip_address,
             "user_agent": user_agent,
         }
+    )
+
+    # Enqueue only AFTER this transaction commits -- registered as a post-commit
+    # hook (run by get_public_session_db once the commit lands, skipped on
+    # rollback), never inline and never a FastAPI BackgroundTask. Same reasoning as
+    # the authenticated path: inline could dequeue before the row was durable, and a
+    # BackgroundTask runs before the yield-commit so it fires pre-commit and even on
+    # a failed commit. See app/core/post_commit.py and enqueue_ingest_data_source.
+    add_post_commit_hook(
+        db,
+        lambda: enqueue_ingest_data_source(
+            data_source_id=str(upload_id),
+            clerk_org_id=link.clerk_org_id,
+            storage_key=storage_key,
+            declared_sha256=body.declared_sha256,
+        ),
     )
 
     return CompleteResponse(id=data_source.id, status=data_source.status, page_count=page_count)

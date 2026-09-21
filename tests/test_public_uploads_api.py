@@ -5,9 +5,10 @@ Full app (app.main.app) over httpx.ASGITransport, same pattern as
 tests/test_public_intake_session.py -- session_token is a real, verified
 intake-session JWT (encode_intake_session_jwt), never a stubbed dependency
 override, so RLS is genuinely exercised end to end. The Spaces adapter
-(presign_put, head_object_size) and the job queue (get_queue) are mocked at their
-call sites in app.api.public_uploads, mirroring tests/test_uploads_api.py's
-pattern for the authenticated router.
+(presign_put, head_object_size) is mocked at its call sites in
+app.api.public_uploads and the job queue at its source (app.jobs.queue.get_queue),
+which complete_upload reaches only through a post-commit hook --
+mirroring tests/test_uploads_api.py's pattern for the authenticated router.
 """
 
 import uuid
@@ -87,7 +88,10 @@ def mocked_spaces(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(public_uploads, "build_object_key", fake_build_object_key)
     monkeypatch.setattr(public_uploads, "presign_put", fake_presign_put)
     monkeypatch.setattr(public_uploads, "head_object_size", fake_head_object_size)
-    monkeypatch.setattr(public_uploads, "get_queue", lambda: fake_queue)
+    # At the source, not on `public_uploads`: complete_upload defers the enqueue
+    # to a post-commit hook via enqueue_ingest_data_source, which
+    # resolves get_queue from its own module globals when the task runs.
+    monkeypatch.setattr("app.jobs.queue.get_queue", lambda: fake_queue)
     monkeypatch.setattr(parse_client, "get_parse_queue", _fail_if_called)
 
     return {
