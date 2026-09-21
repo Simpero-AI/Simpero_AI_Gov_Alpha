@@ -277,6 +277,17 @@ def test_unknown_scale_source_rejected(validator: Draft202012Validator) -> None:
     assert list(validator.iter_errors(bad)), "unknown scale_source should be rejected"
 
 
+def test_inherited_page_header_scale_source_accepted(validator: Draft202012Validator) -> None:
+    # The parser carries a scale caption forward from a preceding page (a statement
+    # whose "(in millions)" caption sits on the page before its figures) and stamps
+    # scale_source="inherited_page_header". Verify (this backend's _validate_claims)
+    # must accept it or it would reject those claims and abort the run -- the two
+    # contracts stay in lockstep.
+    ok = json.loads(json.dumps(VALID_PDF_CLAIM))
+    ok["value"]["scale_source"] = "inherited_page_header"
+    assert not list(validator.iter_errors(ok)), "inherited_page_header must be accepted"
+
+
 def test_pdf_location_requires_char_span(validator: Draft202012Validator) -> None:
     # All-or-nothing provenance: a pdf claim without a char span is invalid.
     bad = json.loads(json.dumps(VALID_PDF_CLAIM))
