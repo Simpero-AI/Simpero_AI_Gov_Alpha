@@ -1,6 +1,8 @@
 """Hermetic unit tests for the SEC EDGAR corroboration source (Epic 12). No
 network and no DB: `fetch` is injected, and check() never touches the session."""
 
+import logging
+
 import pytest
 
 from app.models.claim import Claim
@@ -68,6 +70,29 @@ def _claim(
         period_year=period_year,
         value={"normalized": normalized, "unit": unit},
     )
+
+
+async def test_value_declined_for_unknown_scale_is_logged_not_silent(caplog):
+    # The exact NVDA/AAPL blind spot: a RESOLVED SEC filer whose figure has an
+    # unresolved magnitude (scale_source=assumed_1x) is declined before comparison.
+    # It must SAY so with the deciding fields, not vanish -- this locks the reason
+    # log so a future refactor can't silently re-open the "why is corroboration
+    # empty?" guessing game.
+    src = SecEdgarSource(fetch=_fake_fetch(_facts("Revenues", 2023, 1000.0)))
+    claim = Claim(
+        entity="Apple Inc.",
+        attribute="revenue",
+        period_year=2023,
+        value={"normalized": 1000.0, "unit": "USD", "scale_source": "assumed_1x"},
+    )
+    with caplog.at_level(logging.INFO, logger="app.services.corroboration_sources.sec_edgar"):
+        v = await src.check(None, claim)
+    assert v is None
+    assert any(
+        "reason=value_not_comparable" in r.getMessage()
+        and "scale_source=assumed_1x" in r.getMessage()
+        for r in caplog.records
+    ), "the value-declined (assumed_1x) gate must log its reason, not return None silently"
 
 
 async def test_agrees_when_edgar_matches_within_tolerance():

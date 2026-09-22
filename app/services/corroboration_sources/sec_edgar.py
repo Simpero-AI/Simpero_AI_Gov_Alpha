@@ -325,12 +325,37 @@ class SecEdgarSource:
 
     async def check(self, db: Any, claim: Claim) -> CorroborationVerdict | None:
         concepts = _CONCEPTS.get(claim.attribute)
-        if concepts is None or claim.period_year is None:
-            return None  # not an attribute/period EDGAR can speak to
+        if concepts is None:
+            # Expected for every non-financial / non-canonical attribute; DEBUG so
+            # it never drowns the notable no-signals, but still recoverable.
+            logger.debug(
+                "EDGAR no-signal reason=attribute_not_mapped deal=%s entity=%r attribute=%s",
+                claim.deal_id,
+                claim.entity,
+                claim.attribute,
+            )
+            return None
+        if claim.period_year is None:
+            logger.debug(
+                "EDGAR no-signal reason=no_period_year deal=%s entity=%r attribute=%s",
+                claim.deal_id,
+                claim.entity,
+                claim.attribute,
+            )
+            return None
 
         cik = await self._resolve_cik(claim.entity)
         if cik is None:
-            return None  # not an EDGAR filer, or ambiguous -> no-signal
+            # Common and expected for a private company; DEBUG per-claim. The
+            # per-deal summary in start_deal_corroboration surfaces "entity did not
+            # resolve" once, loudly, so it is never mistaken for "checked, no match".
+            logger.debug(
+                "EDGAR no-signal reason=cik_unresolved deal=%s entity=%r attribute=%s",
+                claim.deal_id,
+                claim.entity,
+                claim.attribute,
+            )
+            return None
 
         # The entity resolved to a CIK, so it is a US SEC registrant reporting in
         # USD: an unlabeled figure is taken as USD here (a foreign currency is
@@ -338,6 +363,23 @@ class SecEdgarSource:
         # top-line figures corroborate instead of being silently dropped.
         claim_value = _claim_usd_value(claim, us_filer=True)
         if claim_value is None:
+            # The entity IS an SEC filer and the attribute IS corroboratable, yet the
+            # value can't be compared -- the notable case (this is why NVDA/AAPL went
+            # silent). INFO with the deciding fields: scale_source=assumed_1x means the
+            # parser never resolved the magnitude; an explicit non-USD unit or a
+            # non-numeric normalized value also land here.
+            value = claim.value or {}
+            logger.info(
+                "EDGAR no-signal reason=value_not_comparable deal=%s entity=%r attribute=%s "
+                "period=%s scale_source=%s unit=%s normalized=%s",
+                claim.deal_id,
+                claim.entity,
+                claim.attribute,
+                claim.period_year,
+                value.get("scale_source"),
+                value.get("unit"),
+                value.get("normalized"),
+            )
             return None  # nothing comparable (explicit non-USD / non-numeric / unknown scale)
 
         try:
@@ -348,6 +390,20 @@ class SecEdgarSource:
 
         found = _lookup_annual_fact(facts, concepts, claim.period_year)
         if found is None:
+            # Resolved filer + corroboratable attribute, but EDGAR has no annual fact
+            # for this concept in this period_year -- typically a period vs fiscal-
+            # year-end mismatch (e.g. a Jan-ending fiscal year tagged by calendar
+            # year) or a genuinely unreported line. Notable -> INFO.
+            logger.info(
+                "EDGAR no-signal reason=no_annual_fact deal=%s entity=%r attribute=%s "
+                "period=%s cik=%s concepts=%s",
+                claim.deal_id,
+                claim.entity,
+                claim.attribute,
+                claim.period_year,
+                cik,
+                concepts,
+            )
             return None  # no reported fact for this concept/period -> no-signal
         concept, edgar_value = found
 
@@ -372,6 +428,18 @@ class SecEdgarSource:
             )
             return None
 
+        logger.info(
+            "EDGAR %s deal=%s entity=%r attribute=%s period=%s claim=%s edgar=%s delta=%.4f cik=%s",
+            "verified" if agrees else "CONFLICT",
+            claim.deal_id,
+            claim.entity,
+            claim.attribute,
+            claim.period_year,
+            claim_value,
+            edgar_value,
+            delta,
+            cik,
+        )
         result = {
             "source": self.name,
             "cik": cik,

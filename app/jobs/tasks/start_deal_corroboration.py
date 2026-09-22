@@ -36,6 +36,7 @@ source can never stall the pipeline.
 
 import asyncio
 import logging
+from collections import Counter
 from uuid import UUID
 
 from saq.types import Context
@@ -149,10 +150,49 @@ async def _run_corroboration(*, screening_run_id: UUID, clerk_org_id: str) -> bo
                     )
                 ).all()
             )
+            # Diagnostic: whether corroboration even has candidates. A verify pass
+            # that promoted nothing leaves every claim `proposed`, so the
+            # corroboratable set is empty and gather_corroboration is skipped
+            # entirely -- the single commonest reason for an empty tab. On zero, log
+            # the FULL status breakdown at WARNING so "nothing was eligible" is never
+            # mistaken for "checked every source and found nothing".
+            if not claims:
+                status_rows = (
+                    await session.scalars(
+                        select(Claim.status)
+                        .where(Claim.deal_id == deal_uuid)
+                        .where(Claim.kind != "intake")
+                    )
+                ).all()
+                logger.warning(
+                    "corroboration has 0 eligible claims deal=%s run=%s "
+                    "(need status in %s); non-intake claim status breakdown=%s",
+                    deal_uuid,
+                    screening_run_id,
+                    sorted(CORROBORATABLE_STATUSES),
+                    dict(Counter(status_rows)),
+                )
+            else:
+                logger.info(
+                    "corroboration eligible claims deal=%s run=%s count=%d",
+                    deal_uuid,
+                    screening_run_id,
+                    len(claims),
+                )
             # Prime the session-memoized entity resolution ONCE, so the ISED/Trademark
             # adapters' load_resolved_entity in phase B is a cache hit, not a query.
+            resolved_entity = None
             if claims:
-                await load_resolved_entity(session, deal_uuid)
+                resolved_entity = await load_resolved_entity(session, deal_uuid)
+                if resolved_entity is None:
+                    # ISED/OrgBook + Trademark return no-signal without a resolved
+                    # entity (which no pipeline job writes today). Surface it once so
+                    # their silence is never read as "checked and found nothing".
+                    logger.info(
+                        "corroboration: no resolved_entity for deal=%s -- registry sources "
+                        "(ISED/OrgBook, Trademark) are inert this run; only EDGAR + web can fire",
+                        deal_uuid,
+                    )
 
         # --- Phase B: NO transaction -- all external HTTP happens here ---
         # Corroboration verdicts over the deck's claims (skipped when there are
@@ -256,6 +296,34 @@ async def _run_corroboration(*, screening_run_id: UUID, clerk_org_id: str) -> bo
                         exc_info=True,
                     )
                     minted_intake = 0
+            # Per-source verified/conflict breakdown -- turns "registry_verdicts=0"
+            # into "which source said what". Combined with the per-claim no-signal
+            # reasons logged inside each source's check(), this makes an empty pass
+            # fully explainable from logs + the audit row alone.
+            registry_by_source: dict[str, dict[str, int]] = {}
+            for _cid, source_name, verdict in results:
+                bucket = registry_by_source.setdefault(source_name, {"verified": 0, "conflict": 0})
+                bucket["verified" if verdict.agrees else "conflict"] += 1
+
+            # One INFO line that answers "what did this pass do?" without SQL: eligible
+            # claims, events written, per-source verdicts, web/intake mint counts, and
+            # whether the registry-only sources were even active this run.
+            logger.info(
+                "corroboration complete deal=%s run=%s claims_checked=%d events=%d "
+                "registry_by_source=%s sizing_verdicts=%d web_candidates=%d web_facts=%d "
+                "intake_facts=%d resolved_entity=%s",
+                deal_uuid,
+                screening_run_id,
+                len(claims),
+                len(results) + len(sizing_verdicts),
+                registry_by_source,
+                len(sizing_verdicts),
+                len(web_candidates),
+                minted,
+                minted_intake,
+                resolved_entity is not None,
+            )
+
             # web_candidates_collected (what gather_web_facts returned) vs
             # web_facts_collected (rows actually minted) separates "web search found
             # nothing" from "found some but the dedup/persist dropped them".
@@ -270,6 +338,8 @@ async def _run_corroboration(*, screening_run_id: UUID, clerk_org_id: str) -> bo
                         "screening_run_id": str(screening_run_id),
                         "claims_checked": len(claims),
                         "registry_verdicts": len(results),
+                        "registry_by_source": registry_by_source,
+                        "resolved_entity": resolved_entity is not None,
                         "sizing_verdicts": len(sizing_verdicts),
                         "events_recorded": len(results) + len(sizing_verdicts),
                         "web_candidates_collected": len(web_candidates),

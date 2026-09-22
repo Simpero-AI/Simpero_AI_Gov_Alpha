@@ -129,7 +129,32 @@ async def _run_screening(*, analysis_run_id: str, clerk_org_id: str) -> None:
         rulebook = load_rulebook()
         mandate = await load_workspace_config(session)
         selected = selected_rule_ids(rulebook, mandate)
+        if selected:
+            logger.info(
+                "screening deal=%s run=%s: %d mandate-selected rule(s)",
+                deal_uuid,
+                analysis_run_id,
+                len(selected),
+            )
+        else:
+            # Full-rulebook fallback. Notable because a CONFIGURED mandate whose
+            # questions map to 0 rules (the Path-B seeding/mapping gap) lands here
+            # too and looks identical to "no mandate" -- so a silently-unscoped
+            # screening is never invisible.
+            logger.warning(
+                "screening deal=%s run=%s: no mandate-selected rules -- falling back to the "
+                "FULL rulebook (a mandate whose questions map to 0 rules also lands here)",
+                deal_uuid,
+                analysis_run_id,
+            )
         decision = await screen_deal(session, deal, rulebook, only_rule_ids=selected or None)
+        logger.info(
+            "screening complete deal=%s run=%s recommendation=%s rules_evaluated=%d",
+            deal_uuid,
+            analysis_run_id,
+            decision.recommendation,
+            len(decision.results),
+        )
         await ScreeningResultRepo(session).record(
             decision, org_id=org_id, deal_id=deal_uuid, analysis_run_id=run_id
         )
@@ -200,6 +225,9 @@ async def _mark_run_failed(run_id: UUID, clerk_org_id: str, exc: BaseException) 
     failure that the caller re-raises. error_message carries only the exception
     TYPE -- never str(exc) -- to keep document-derived content out of a
     persisted field. Mirrors start_deal_verification._mark_run_failed."""
+    # Log the REAL failure loudly (stack + run) before the terse best-effort status
+    # write below -- see start_deal_verification._mark_run_failed for the rationale.
+    logger.error("screening run %s failed: %s", run_id, type(exc).__name__, exc_info=exc)
     try:
         async with AsyncSessionLocal() as session, session.begin():
             await session.execute(text("SET LOCAL statement_timeout = '30s'"))
