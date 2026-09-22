@@ -107,6 +107,20 @@ def _validate_claims(claims: list[dict]) -> None:
     for i, claim in enumerate(claims):
         errors = sorted(validator.iter_errors(claim), key=str)
         if errors:
+            # This ValueError ABORTS the whole verify run (before any ingest), so
+            # make the cause unmistakable: name the offending claim's identity and
+            # the exact violation, not just "claim N". A parser/backend contract
+            # drift (e.g. a new scale_source the backend enum lacks) surfaces here.
+            logger.error(
+                "claim contract violation ABORTS verification: index=%d entity=%r attribute=%r "
+                "claim_ref=%r scale_source=%r error=%s",
+                i,
+                claim.get("entity"),
+                claim.get("attribute"),
+                claim.get("claim_ref"),
+                (claim.get("value") or {}).get("scale_source"),
+                errors[0].message,
+            )
             raise ValueError(f"claim {i} violates the contract: {errors[0].message}")
 
 
@@ -448,6 +462,8 @@ async def _run_verification(
         if deal_updates:
             await DealRepo(session).update(deal_uuid, deal_updates)
 
+        promoted_total = 0
+        held_binding_unsupported_total = 0
         for data_source_id in verified_data_source_ids:
             # SIM-412 first: the parser leaves every PDF claim at `proposed`,
             # and nothing downstream of here trusts a `proposed` claim
@@ -458,6 +474,8 @@ async def _run_verification(
             # with its neighbours. Running it before them keeps the reading
             # order honest: cite first, then cross-check.
             promoted = await promote_exact_span(session, data_source_id=data_source_id)
+            promoted_total += promoted.claims_promoted
+            held_binding_unsupported_total += promoted.skipped_binding_unsupported
             same_fact = await reconcile_same_fact(
                 session, data_source_id=data_source_id, run_id=analysis_run_id
             )
@@ -522,6 +540,22 @@ async def _run_verification(
         await roll_up_deal(session, rollup_claims)
         rollup_counts: Counter[str] = Counter(c.status for c in rollup_claims)
         await session.flush()
+
+        # The decisive hand-off signal: how many claims are `cited`+ (corroboratable)
+        # after promotion/roll-up. If this is 0, corroboration has NOTHING to check
+        # and its tab will be empty -- logged here so that emptiness is explained at
+        # its source (verify) rather than guessed at downstream.
+        logger.info(
+            "verification complete deal=%s run=%s docs=%d claims_promoted_cited=%d "
+            "held_binding_unsupported=%d corroboratable_claims=%d status_rollup=%s",
+            deal_uuid,
+            analysis_run_id,
+            len(verified_data_source_ids),
+            promoted_total,
+            held_binding_unsupported_total,
+            len(rollup_claims),
+            dict(rollup_counts),
+        )
 
         rollup_summary = ", ".join(f"{n} {status}" for status, n in sorted(rollup_counts.items()))
         for comment in job_comments:
@@ -605,6 +639,11 @@ async def _mark_run_failed(run_id: UUID, clerk_org_id: str, exc: BaseException) 
     fails it is logged, never raised, so it can never mask the real failure that
     the caller re-raises. error_message carries only the exception TYPE -- never
     str(exc) -- to keep document-derived content out of a persisted field."""
+    # Log the REAL failure loudly, with its stack and the run it killed, BEFORE the
+    # best-effort status write below (which persists only the exception type). The DB
+    # field is deliberately terse; the log is where the full cause lives, attributed
+    # to the run rather than surfacing only as a bare SAQ traceback.
+    logger.error("verification run %s failed: %s", run_id, type(exc).__name__, exc_info=exc)
     try:
         async with AsyncSessionLocal() as session, session.begin():
             await session.execute(text("SET LOCAL statement_timeout = '30s'"))

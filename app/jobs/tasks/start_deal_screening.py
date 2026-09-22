@@ -200,6 +200,9 @@ async def _mark_run_failed(run_id: UUID, clerk_org_id: str, exc: BaseException) 
     failure that the caller re-raises. error_message carries only the exception
     TYPE -- never str(exc) -- to keep document-derived content out of a
     persisted field. Mirrors start_deal_verification._mark_run_failed."""
+    # Log the REAL failure loudly (stack + run) before the terse best-effort status
+    # write below -- see start_deal_verification._mark_run_failed for the rationale.
+    logger.error("screening run %s failed: %s", run_id, type(exc).__name__, exc_info=exc)
     try:
         async with AsyncSessionLocal() as session, session.begin():
             await session.execute(text("SET LOCAL statement_timeout = '30s'"))
