@@ -18,10 +18,12 @@ from app.services.corroboration import CORROBORATION_SOURCES, CorroborationSourc
 from app.services.corroboration_sources.federal_register import FederalRegisterSource
 from app.services.corroboration_sources.ised_corporations import IsedCorporationsSource
 from app.services.corroboration_sources.sec_edgar import SecEdgarSource
+from app.services.corroboration_sources.sec_edgar_submissions import SecEdgarSubmissionsSource
 from app.services.corroboration_sources.trademarks import TrademarkSource
 
 DEFAULT_SOURCES: list[CorroborationSource] = [
     SecEdgarSource(),
+    SecEdgarSubmissionsSource(),
     IsedCorporationsSource(),
     FederalRegisterSource(),
     TrademarkSource(),
