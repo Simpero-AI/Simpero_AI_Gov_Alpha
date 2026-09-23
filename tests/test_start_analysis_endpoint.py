@@ -228,7 +228,11 @@ def test_start_analysis_happy_path(client, owner_conn, seeded_org, seeded_deal, 
     body = resp.json()
     assert body["jobStatus"] == "queued"
     assert body["currentPhase"] is None
-    assert len(body["steps"]) == 2
+    assert [step["phase"] for step in body["steps"]] == [
+        "parsing",
+        "verification",
+        "analysis",
+    ]
     assert all(step["status"] == "pending" for step in body["steps"])
 
     with owner_conn.cursor() as cur:
@@ -528,7 +532,13 @@ def test_status_screening_in_progress_maps_to_processing(
 
     body = client.get(f"/deals/{seeded_deal}/status").json()
     assert body["jobStatus"] == "processing"
-    assert body["currentPhase"] == "governance"
+    # Corroboration + screening run after verification as the third step, so an
+    # in-flight screening row shows that step "current", not the terminal marker.
+    assert body["currentPhase"] == "analysis"
+    steps = {step["phase"]: step["status"] for step in body["steps"]}
+    assert steps["parsing"] == "done"
+    assert steps["verification"] == "done"
+    assert steps["analysis"] == "current"
 
 
 def test_status_screening_failed_maps_to_error(client, owner_conn, seeded_org, seeded_deal):
@@ -547,7 +557,10 @@ def test_status_screening_failed_maps_to_error(client, owner_conn, seeded_org, s
 
     body = client.get(f"/deals/{seeded_deal}/status").json()
     assert body["jobStatus"] == "error"
-    assert body["currentPhase"] == "governance"
+    # A failed screening is a failure of the corroboration + analysis step.
+    assert body["currentPhase"] == "analysis"
+    steps = {step["phase"]: step["status"] for step in body["steps"]}
+    assert steps["analysis"] == "failed"
 
 
 def test_status_verification_failed_maps_to_verification_failed(

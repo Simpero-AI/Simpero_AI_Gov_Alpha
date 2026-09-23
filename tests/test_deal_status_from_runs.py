@@ -188,7 +188,28 @@ def test_screening_successful_is_complete_and_uses_verification_comments():
     assert resp.step_durations == {"parsing": 30, "verification": 20}
 
 
-def test_screening_failed_is_error_at_governance():
+def test_screening_in_progress_is_processing_at_the_analysis_step():
+    # Corroboration + screening run after verification as the third step; while
+    # the screening row is in flight the deal is still processing, on "analysis".
+    parsing = _run("parsing", "successful", ended_at=_START + timedelta(seconds=30))
+    verification = _run(
+        "verification",
+        "successful",
+        started_at=_START + timedelta(minutes=1),
+        ended_at=_START + timedelta(minutes=1, seconds=20),
+    )
+    screening = _run("screening", "in_progress", started_at=_START + timedelta(minutes=2))
+    resp = _deal_status_from_runs(screening, parsing, verification)
+    assert resp.job_status == "processing"
+    assert resp.current_phase == "analysis"
+    assert {s.phase: s.status for s in resp.steps} == {
+        "parsing": "done",
+        "verification": "done",
+        "analysis": "current",
+    }
+
+
+def test_screening_failed_is_error_at_the_analysis_step():
     parsing = _run("parsing", "successful", ended_at=_START + timedelta(seconds=30))
     verification = _run(
         "verification",
@@ -205,5 +226,6 @@ def test_screening_failed_is_error_at_governance():
     )
     resp = _deal_status_from_runs(screening, parsing, verification)
     assert resp.job_status == "error"
-    assert resp.current_phase == "governance"
+    assert resp.current_phase == "analysis"
     assert resp.error_message == "screening failed"
+    assert next(s.status for s in resp.steps if s.phase == "analysis") == "failed"
