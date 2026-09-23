@@ -228,7 +228,11 @@ def test_start_analysis_happy_path(client, owner_conn, seeded_org, seeded_deal, 
     body = resp.json()
     assert body["jobStatus"] == "queued"
     assert body["currentPhase"] is None
-    assert len(body["steps"]) == 2
+    assert [step["phase"] for step in body["steps"]] == [
+        "parsing",
+        "verification",
+        "analysis",
+    ]
     assert all(step["status"] == "pending" for step in body["steps"])
 
     with owner_conn.cursor() as cur:
