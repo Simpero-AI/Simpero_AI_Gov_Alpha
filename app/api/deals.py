@@ -1066,8 +1066,8 @@ def _deal_status_from_runs(
         if run.status == "failed":
             return DealStatusResponse(
                 job_status="error",
-                current_phase="governance",
-                steps=_steps_for_status("governance"),
+                current_phase="analysis",
+                steps=_steps_for_status("analysis", failed_phase="analysis"),
                 started_at=chain_started_at,
                 ended_at=ended_at,
                 step_durations=step_durations,
@@ -1075,10 +1075,25 @@ def _deal_status_from_runs(
                 error_message=run.error_message,
                 job_comments=verification_comments,
             )
+        if run.status == "successful":
+            # Screening is the real last stage in the chain, so a successful
+            # screening row is a finished deal: every step done, past the end.
+            return DealStatusResponse(
+                job_status="complete",
+                current_phase="governance",
+                steps=_steps_for_status("governance"),
+                started_at=chain_started_at,
+                ended_at=ended_at,
+                step_durations=step_durations,
+                job_comments=verification_comments,
+            )
+        # queued / in_progress: the corroboration + analysis step is what's
+        # running now (corroboration has no run row of its own, so the screening
+        # row stands for the whole post-verification chain).
         return DealStatusResponse(
-            job_status="complete" if run.status == "successful" else "processing",
-            current_phase="governance",
-            steps=_steps_for_status("governance"),
+            job_status="processing",
+            current_phase="analysis",
+            steps=_steps_for_status("analysis"),
             started_at=chain_started_at,
             ended_at=ended_at,
             step_durations=step_durations,
