@@ -175,6 +175,19 @@ def _comment_for_job(job: dict, timed_out: bool) -> str:
     return "Timed out waiting for the parser." if timed_out else "Still waiting on the parser."
 
 
+def _job_status(job: dict) -> str:
+    """The per-document status the frontend renders. A credit/usage-limit
+    rejection is an AI-provider account block that fails every document the
+    same way -- an account issue, not a bad document -- so surface it as
+    `paused` (recoverable by topping up / raising the limit, then re-running)
+    rather than the parser's raw `rejected`, which reads as "this file is no
+    good" next to a document that actually parsed fine. Every other outcome
+    keeps the parser's own vocabulary verbatim."""
+    if job["outcome"] == "rejected" and job.get("code") == PARSER_CREDIT_REJECTION_CODE:
+        return "paused"
+    return job["outcome"] or "pending"
+
+
 def _build_job_comments(parse_jobs: list[dict], timed_out: bool) -> list[dict]:
     """Frontend-facing findings summary, derived from `parse_jobs` at the
     moment the run goes terminal. Unlike `parse_jobs` (this task's own
@@ -185,7 +198,7 @@ def _build_job_comments(parse_jobs: list[dict], timed_out: bool) -> list[dict]:
         {
             "dataSourceId": job["data_source_id"],
             "fileName": job.get("filename"),
-            "status": job["outcome"] or "pending",
+            "status": _job_status(job),
             "comment": _comment_for_job(job, timed_out),
         }
         for job in parse_jobs
