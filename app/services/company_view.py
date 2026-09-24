@@ -141,6 +141,7 @@ _IDENTITY_ORDER = {key: i for i, (key, _d, _t) in enumerate(_IDENTITY_LABELS)}
 _IDENTITY_EXCLUDE: dict[str, frozenset[str]] = {
     "headcount": frozenset(
         {
+            # Flows / changes -- a headcount is a stock, not a movement.
             "terminated",
             "turnover",
             "attrition",
@@ -155,6 +156,30 @@ _IDENTITY_EXCLUDE: dict[str, frozenset[str]] = {
             "laid",
             "growth",
             "per",
+            # Counts of PLACES or SEGMENTS, not people: "approximately 42,000
+            # employees in 38 countries" must never surface the 38 as headcount.
+            # A label naming a geography/segment count means the figure is that
+            # count, or a per-place sub-count -- never the total employee stock.
+            "country",
+            "countries",
+            "market",
+            "markets",
+            "region",
+            "regions",
+            "office",
+            "offices",
+            "location",
+            "locations",
+            "site",
+            "sites",
+            "facility",
+            "facilities",
+            "city",
+            "cities",
+            "jurisdiction",
+            "jurisdictions",
+            "segment",
+            "segments",
         }
     ),
 }

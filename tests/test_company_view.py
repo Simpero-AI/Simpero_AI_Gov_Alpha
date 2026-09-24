@@ -409,6 +409,30 @@ def test_employees_terminated_is_not_mislabeled_as_headcount():
     assert all(f.label != "Headcount" for f in view.facts)
 
 
+def test_a_place_count_is_not_mislabeled_as_headcount():
+    # "approximately 42,000 employees in 38 countries": the 38 gets bound to an
+    # employee label but is a count of COUNTRIES, not people. The real headcount
+    # (42,000) must win, and a lone place-count must never be surfaced as headcount.
+    claims = [
+        _claim(attribute_raw="employees in countries", normalized=38, value_type="count"),
+        _claim(attribute_raw="Total Employees", normalized=42_000, value_type="count"),
+    ]
+
+    view = build_company_view(claims, filenames={}, company="AcmeCo")
+
+    assert [f.value for f in view.facts if f.label == "Headcount"] == ["42,000"]
+
+
+def test_a_lone_place_count_yields_no_headcount():
+    claims = [
+        _claim(attribute_raw="number of countries of operation", normalized=38, value_type="count"),
+    ]
+
+    view = build_company_view(claims, filenames={}, company="AcmeCo")
+
+    assert all(f.label != "Headcount" for f in view.facts)
+
+
 def test_freq_fallback_anchors_the_lead_on_the_company_excluding_competitors():
     # No dashboard structure and no entity crosses the frequency threshold (each
     # appears once). Without an anchor the subject filter is a no-op and the
