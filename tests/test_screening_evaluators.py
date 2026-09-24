@@ -452,6 +452,29 @@ async def test_db_04_reads_prohibited_list_from_rulebook_not_hardcoded(db_sessio
     assert result.verdict == "Y"
 
 
+async def test_db_04_clears_on_a_non_prohibited_raw_sector_when_fit_column_unset(
+    db_session, org_a_id
+):
+    # When the fund configured no approved sectors, the parser skips the fit and
+    # leaves deal.sector NULL, writing only sector_raw. The global prohibited-sector
+    # breaker must still clear (not read "no evidence") off the raw sector.
+    deal = await _seed_deal(db_session, org_a_id, sector=None, sector_raw="Semiconductors")
+    result = await _evaluate("db_04", db_session, deal)
+    assert result.verdict == "N"
+
+
+async def test_db_04_fires_on_a_prohibited_raw_sector_when_fit_column_unset(db_session, org_a_id):
+    deal = await _seed_deal(db_session, org_a_id, sector=None, sector_raw="cannabis")
+    result = await _evaluate("db_04", db_session, deal)
+    assert result.verdict == "Y"
+
+
+async def test_db_04_unknown_only_when_both_sector_and_raw_are_unset(db_session, org_a_id):
+    deal = await _seed_deal(db_session, org_a_id, sector=None, sector_raw=None)
+    result = await _evaluate("db_04", db_session, deal)
+    assert result.verdict == "unknown"
+
+
 # --- db_01: gate only --------------------------------------------------------
 
 
