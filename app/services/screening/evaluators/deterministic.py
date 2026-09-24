@@ -28,7 +28,7 @@ from app.services.screening.claims_lookup import (
 from app.services.screening.evaluators.document import DOCUMENT_EVALUATORS
 from app.services.screening.rulebook import Rulebook
 from app.services.screening.types import DealField, RuleResult
-from app.services.screening.workspace_config import load_workspace_config
+from app.services.screening.workspace_config import load_workspace_config, normalize_label
 
 
 async def evaluate_gs_03(session: AsyncSession, deal: Deal, rulebook: Rulebook) -> RuleResult:
@@ -158,12 +158,20 @@ async def evaluate_db_04(session: AsyncSession, deal: Deal, rulebook: Rulebook) 
     approved list, which is genuinely per-org)."""
     rule = rulebook.by_id["db_04"]
     assert rule.threshold is not None
-    if deal.sector is None:
+    # The prohibited list needs no mandate config, so fall back to the RAW
+    # extracted sector when the mandate-canonical `sector` column is unset -- which
+    # happens when the fund configured no approved sectors, so the parser skipped
+    # the fit and wrote only `sector_raw`. A universal deal-breaker must still fire
+    # (or clear) for such a fund, not read "no evidence". gs_08 (approved sector)
+    # genuinely needs the per-org list, so it does NOT get this fallback.
+    sector = deal.sector if deal.sector is not None else deal.sector_raw
+    if sector is None:
         return RuleResult(
             "db_04", "unknown", None, "deterministic", reason="sector not set on the deal"
         )
-    verdict = "Y" if deal.sector in rule.threshold["in"] else "N"
-    return RuleResult("db_04", verdict, DealField("sector", deal.sector), "deterministic")
+    prohibited = {normalize_label(s) for s in rule.threshold["in"]}
+    verdict = "Y" if normalize_label(sector) in prohibited else "N"
+    return RuleResult("db_04", verdict, DealField("sector", sector), "deterministic")
 
 
 async def evaluate_db_01_gate(session: AsyncSession, deal: Deal, rulebook: Rulebook) -> RuleResult:
