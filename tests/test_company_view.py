@@ -343,6 +343,37 @@ def test_latest_headcount_wins_over_a_stale_larger_one():
     assert [f.value for f in view.facts if f.label == "Headcount"] == ["1,200"]
 
 
+def test_headcount_total_wins_over_same_period_functional_subcounts():
+    # "approximately 42,000 employees; 31,000 in research and development and
+    # 11,000 in sales, marketing, operations and administrative positions": all
+    # carry the token "employees", so all match the metric -- the TOTAL (largest)
+    # must win the same-period tie, not a functional fragment.
+    claims = [
+        _claim(
+            attribute_raw="employees in sales, marketing, operations and administrative positions",
+            normalized=11_000,
+            value_type="count",
+            period_year=2026,
+        ),
+        _claim(
+            attribute_raw="employees in research and development",
+            normalized=31_000,
+            value_type="count",
+            period_year=2026,
+        ),
+        _claim(
+            attribute_raw="employees",
+            normalized=42_000,
+            value_type="count",
+            period_year=2026,
+        ),
+    ]
+
+    view = build_company_view(claims, filenames={})
+
+    assert [f.value for f in view.facts if f.label == "Headcount"] == ["42,000"]
+
+
 def test_a_percent_metric_is_not_mislabeled_as_headcount():
     # "Total Employees Turnover %" carries the headcount words but is a percent --
     # the value_type guard keeps it out; the real count keeps the slot.
