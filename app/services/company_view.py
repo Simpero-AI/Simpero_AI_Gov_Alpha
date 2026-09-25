@@ -128,6 +128,15 @@ _IDENTITY_LABELS: tuple[tuple[str, str, tuple[tuple[str, ...], ...]], ...] = (
             ("year", "of", "incorporation"),
             ("inception",),
             ("established",),
+            # A legal entity (esp. an LLC / LP) is "formed" or "organized", not
+            # "incorporated" -- e.g. "ACEP is a holding company that was formed in
+            # Delaware on December 29, 2003". Treat those as the founding date too.
+            ("formed",),
+            ("date", "formed"),
+            ("formation",),
+            ("date", "of", "formation"),
+            ("year", "of", "formation"),
+            ("organized",),
         ),
     ),
 )

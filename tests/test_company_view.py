@@ -397,6 +397,25 @@ def test_founded_date_renders_the_year_without_grouping():
     assert by_label["Founded"] == "1998"
 
 
+def test_a_formation_date_is_recognized_as_founded():
+    # A holding company / LLC / LP is "formed" or "organized", not "incorporated"
+    # -- e.g. "ACEP ... was formed in Delaware on December 29, 2003". The founding
+    # year must still surface under Founded, not be dropped for wording.
+    claims = [
+        _claim(
+            attribute_raw="date formed",
+            raw="December 29, 2003",
+            normalized=None,
+            value_type="text",
+        ),
+    ]
+
+    view = build_company_view(claims, filenames={}, company="AcmeCo")
+
+    by_label = {f.label: f.value for f in view.facts}
+    assert by_label["Founded"] == "2003"
+
+
 def test_employees_terminated_is_not_mislabeled_as_headcount():
     # "Employees Terminated" is a count too, so the value-type guard can't reject
     # it -- the exclude token ("terminated") must. It is a flow, not a headcount.
