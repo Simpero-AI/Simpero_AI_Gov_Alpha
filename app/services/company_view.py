@@ -277,6 +277,27 @@ def _rank(claim: Claim) -> tuple[int, int, int]:
     return (is_historical, year, _STATUS_RANK.get(claim.status, 0))
 
 
+def _headcount_magnitude(claim: Claim) -> float:
+    """The claim's numeric employee count, for breaking a headcount tie by size;
+    -inf when it carries no number so it never wins."""
+    value = claim.value if isinstance(claim.value, dict) else {}
+    n = value.get("normalized")
+    return float(n) if isinstance(n, (int, float)) and not isinstance(n, bool) else float("-inf")
+
+
+def _identity_pref(key: str, claim: Claim) -> tuple:
+    """How to choose among candidates for one identity metric. Recency first (see
+    _rank). For HEADCOUNT, break a same-recency tie by the LARGEST value: the
+    total workforce is bigger than any functional or geographic sub-count stated
+    in the same breath -- "42,000 employees" beats "11,000 ... in sales,
+    marketing, operations and administrative positions", "31,000 ... in research
+    and development", and "employees in 38 countries". The largest same-period
+    figure is the total, not a fragment. Other metrics keep recency-only."""
+    if key == "headcount":
+        return (*_rank(claim), _headcount_magnitude(claim))
+    return _rank(claim)
+
+
 # Subject folding is shared with market_view and screening_materials (see
 # app/services/subject_fold.py) so the three tabs can't disagree on the same
 # deal: the consolidated anchor leads, and the deal's company matches its claims
@@ -482,7 +503,7 @@ def build_company_view(
         if not _identity_value_ok(key, claim):
             continue
         current = identity_best.get(key)
-        if current is None or _rank(claim) > _rank(current[0]):
+        if current is None or _identity_pref(key, claim) > _identity_pref(key, current[0]):
             identity_best[key] = (claim, display)
 
     facts.extend(
