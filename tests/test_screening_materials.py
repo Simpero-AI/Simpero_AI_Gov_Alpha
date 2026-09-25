@@ -6,7 +6,18 @@ cited."""
 import uuid
 
 from app.models.claim import Claim
-from app.services.screening_materials import build_screening_materials, render_claim_facts
+from app.services.screening_materials import (
+    _headline_key,
+    _prefer,
+    build_screening_materials,
+    render_claim_facts,
+)
+
+
+def _scaled(claim: Claim, source: str) -> Claim:
+    """Set the value's scale_source (the _claim factory omits it)."""
+    claim.value["scale_source"] = source
+    return claim
 
 
 def _claim(
@@ -659,3 +670,82 @@ def test_canonical_attributes_match_the_contract_enum():
     )
     enum = set(schema["$defs"]["canonicalAttribute"]["enum"])
     assert enum - {"operating_metric", "core_unmapped"} == _CANONICAL_ATTRIBUTES
+
+
+# --------------------------------------------------------------------------- #
+# Cell selection: reject cash-flow deltas / negatives for balance-sheet stocks,
+# prefer resolved scale over an assumed_1x common-size %, deterministic tiebreak.
+# Reproduces the NVIDIA 10-K QA report (negative AR/AP/Inventory, flipping EBIT).
+# --------------------------------------------------------------------------- #
+
+
+def test_cashflow_change_line_is_not_the_balance_sheet_stock():
+    balance = _claim(
+        attribute="accounts_receivable",
+        normalized=38_466_000_000,
+        attribute_raw="Current assets: | Accounts receivable, net | Jan 25, 2026",
+    )
+    delta = _claim(
+        attribute="accounts_receivable",
+        normalized=-15_399_000_000,
+        attribute_raw="Changes in operating assets and liabilities, net of acquisitions: | Accounts receivable | Jan 25, 2026",
+    )
+    assert _headline_key(balance) == ("accounts_receivable", "Accounts Receivable")
+    assert _headline_key(delta) is None
+
+
+def test_negative_balance_sheet_stock_is_rejected():
+    for attr in ("accounts_payable", "inventory", "current_assets", "total_assets"):
+        assert _headline_key(_claim(attribute=attr, normalized=-1_690_000_000)) is None
+        assert _headline_key(_claim(attribute=attr, normalized=1_690_000_000)) is not None
+
+
+def test_resolved_scale_beats_an_assumed_1x_common_size_percent():
+    operating_income = _scaled(
+        _claim(attribute="ebit", normalized=130_387_000_000), "column_header"
+    )
+    common_size = _scaled(_claim(attribute="ebit", normalized=60.4), "assumed_1x")
+    assert _prefer(operating_income, common_size)
+    assert not _prefer(common_size, operating_income)
+
+
+def test_selection_is_deterministic_regardless_of_input_order():
+    a = _claim(attribute="ebit", normalized=130_387_000_000)
+    a.claim_ref = "69:100-110"
+    b = _claim(attribute="ebit", normalized=130_387_000_000)
+    b.claim_ref = "94:200-210"
+    m1 = build_screening_materials([a, b], dashboard_structure=None, filenames={})
+    m2 = build_screening_materials([b, a], dashboard_structure=None, filenames={})
+    assert [f.value for f in m1.extracted_fields] == [f.value for f in m2.extracted_fields]
+
+
+def test_end_to_end_picks_balances_over_cashflow_deltas():
+    claims = [
+        _claim(
+            attribute="accounts_receivable",
+            normalized=38_466_000_000,
+            attribute_raw="Current assets: | Accounts receivable, net | Jan 25, 2026",
+        ),
+        _claim(
+            attribute="accounts_receivable",
+            normalized=-15_399_000_000,
+            attribute_raw="Changes in operating assets and liabilities, net of acquisitions: | Accounts receivable | Jan 25, 2026",
+        ),
+        _claim(
+            attribute="inventory",
+            normalized=21_403_000_000,
+            attribute_raw="Current assets: | Inventories | Jan 25, 2026",
+        ),
+        _claim(
+            attribute="inventory",
+            normalized=-11_324_000_000,
+            attribute_raw="Changes in operating assets and liabilities, net of acquisitions: | Inventories | Jan 25, 2026",
+        ),
+    ]
+    materials = build_screening_materials(claims, dashboard_structure=None, filenames={})
+    values = {f.label.split(" · ")[0]: f.value for f in materials.extracted_fields}
+    assert values["Accounts Receivable"] == "$38.47B"
+    assert values["Inventory"] == "$21.40B"
+    assert not any(
+        f.value.startswith("-") or f.value.startswith("$-") for f in materials.extracted_fields
+    )

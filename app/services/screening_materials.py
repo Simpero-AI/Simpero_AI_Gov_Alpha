@@ -401,6 +401,66 @@ def _tokens_contain(raw: str, phrase: str) -> bool:
     return any(raw_tokens[i : i + span] == phrase_tokens for i in range(len(raw_tokens) - span + 1))
 
 
+# Balance-sheet STOCK attributes: a level at a point in time, never a flow. The
+# cash-flow statement's "Changes in operating assets and liabilities" section
+# restates several of these names as WORKING-CAPITAL DELTAS -- e.g. "Changes in
+# operating assets and liabilities: | Accounts receivable | ... (15,399)" -- and
+# the parser canonicalizes that delta onto the stock attribute (accounts_receivable).
+# A delta is not the balance and must never be shown as it, so a claim canonicalized
+# to a stock attribute whose raw label is a cash-flow change line is rejected below.
+# This is the cell-selection defect behind the negative AR/AP/Inventory figures.
+_BALANCE_SHEET_STOCK = frozenset(
+    {
+        "total_assets",
+        "total_liabilities",
+        "total_equity",
+        "cash_and_equivalents",
+        "total_debt",
+        "net_debt",
+        "current_assets",
+        "current_liabilities",
+        "working_capital",
+        "accounts_receivable",
+        "accounts_payable",
+        "inventory",
+    }
+)
+
+# normalize_name lowercases and collapses punctuation, so this substring matches the
+# "Changes in operating assets and liabilities:" cash-flow banner in a normalized
+# raw label without matching a real balance-sheet line.
+_CASH_FLOW_CHANGE_MARKER = "changes in operating assets"
+
+# The stock attributes that are ALWAYS non-negative. A negative value here means a
+# cash-flow delta (or another mis-selected cell) slipped through -- never a real
+# balance -- so it is rejected rather than shown. total_equity (accumulated deficit),
+# net_debt (net cash) and working_capital can legitimately be negative and are excluded.
+_NON_NEGATIVE_STOCK = frozenset(
+    {
+        "total_assets",
+        "total_liabilities",
+        "cash_and_equivalents",
+        "total_debt",
+        "current_assets",
+        "current_liabilities",
+        "accounts_receivable",
+        "accounts_payable",
+        "inventory",
+    }
+)
+
+
+def _is_cash_flow_change(claim: Claim) -> bool:
+    """Whether the claim's raw label is a cash-flow working-capital change line
+    rather than the balance-sheet stock it canonicalized to."""
+    return _CASH_FLOW_CHANGE_MARKER in normalize_name(claim.attribute_raw or "")
+
+
+def _is_negative_value(claim: Claim) -> bool:
+    n = claim.value.get("normalized") if isinstance(claim.value, dict) else None
+    return isinstance(n, (int, float)) and not isinstance(n, bool) and n < 0
+
+
 def _headline_key(claim: Claim) -> tuple[str, str] | None:
     """The metric a claim contributes to the screening snapshot, as
     (grouping key, display label) -- or None when the claim is not a headline
@@ -417,6 +477,14 @@ def _headline_key(claim: Claim) -> tuple[str, str] | None:
     """
     attribute = claim.attribute
     if _is_canonical(attribute):
+        # A balance-sheet stock must be the balance, not the cash-flow statement's
+        # working-capital delta of the same name, and never negative. Either means a
+        # mis-selected cell -- drop it so the metric falls back to a correct cell or
+        # to "no evidence" rather than showing a wrong (often negative) figure.
+        if attribute in _BALANCE_SHEET_STOCK and _is_cash_flow_change(claim):
+            return None
+        if attribute in _NON_NEGATIVE_STOCK and _is_negative_value(claim):
+            return None
         return attribute, _human_attr(attribute)
     raw = normalize_name(claim.attribute_raw or "")
     if not raw:
@@ -627,7 +695,16 @@ def _prefer(candidate: Claim, current: Claim) -> bool:
     return _rank_key(candidate) > _rank_key(current)
 
 
-def _rank_key(claim: Claim) -> tuple[int, int, int, int, float]:
+def _scale_known(claim: Claim) -> int:
+    """Prefer a figure whose scale was actually resolved over one where it was
+    guessed (assumed_1x). A common-size percentage mis-typed as currency lands as an
+    assumed_1x tiny value ("60.4" for a 60.4% operating margin); a properly
+    header-scaled figure of the same metric must always win over it."""
+    src = claim.value.get("scale_source") if isinstance(claim.value, dict) else None
+    return 0 if src == "assumed_1x" else 1
+
+
+def _rank_key(claim: Claim) -> tuple[int, int, int, int, int, float, str]:
     # A forecast (Estimate/Projection) ranks below any historical figure; an
     # unmarked period counts as historical, not a forecast -- so a latest actual
     # is never passed over for a later-year estimate even when the actuals carry
@@ -659,5 +736,11 @@ def _rank_key(claim: Claim) -> tuple[int, int, int, int, float]:
         year,
         _STATUS_RANK.get(claim.status, 0),
         _consolidated_rank(claim),
+        _scale_known(claim),
         magnitude,
+        # Final, fully deterministic tiebreak: claim_ref is a stable per-claim key
+        # (page:char-span). Without it, two candidates tied on every signal above
+        # resolve by iteration order, which varies run-to-run -- the source of the
+        # "same deal, different figure each run" reports.
+        claim.claim_ref or "",
     )
