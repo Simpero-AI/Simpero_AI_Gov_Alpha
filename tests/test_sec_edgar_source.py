@@ -476,3 +476,23 @@ async def test_cogs_confirms_when_signed_the_same():
     v = await src.check(None, _claim(attribute="cogs", normalized=220_000_000_000.0))
     assert isinstance(v, CorroborationVerdict)
     assert v.agrees is True
+
+
+async def test_ebit_verifies_against_operating_income():
+    # EBIT now maps to GAAP OperatingIncomeLoss (previously unmapped -> always PARTIAL).
+    src = SecEdgarSource(fetch=_fake_fetch(_facts("OperatingIncomeLoss", 2026, 130_387_000_000.0)))
+    v = await src.check(
+        None, _claim(attribute="ebit", period_year=2026, normalized=130_387_000_000.0)
+    )
+    assert v is not None and v.agrees
+    assert v.result["concept"] == "OperatingIncomeLoss"
+
+
+async def test_ebit_mismatch_is_no_signal_not_conflict():
+    # A deck's non-GAAP adjusted operating income differs from filed GAAP; EBIT is
+    # confirm-only, so a mismatch is a no-signal, never a conflict.
+    src = SecEdgarSource(fetch=_fake_fetch(_facts("OperatingIncomeLoss", 2026, 130_000_000_000.0)))
+    v = await src.check(
+        None, _claim(attribute="ebit", period_year=2026, normalized=145_000_000_000.0)
+    )
+    assert v is None

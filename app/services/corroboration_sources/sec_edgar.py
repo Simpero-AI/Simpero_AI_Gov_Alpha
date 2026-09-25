@@ -76,6 +76,10 @@ _CONCEPTS: dict[str, tuple[str, ...]] = {
         "DepreciationAndAmortization",
     ),
     "net_income": ("NetIncomeLoss",),
+    # EBIT maps to GAAP operating income. Confirm-only (below): a deck often shows a
+    # non-GAAP adjusted operating income that legitimately differs from the filed
+    # figure, so a mismatch is not necessarily a conflict.
+    "ebit": ("OperatingIncomeLoss",),
     # --- Balance sheet (instant facts) ---
     "total_assets": ("Assets",),
     "current_assets": ("AssetsCurrent",),
@@ -133,6 +137,9 @@ _CONFIRM_ONLY_ATTRIBUTES = frozenset(
         "tax_expense",
         "depreciation_and_amortization",
         "capex",
+        # A deck's operating income is often a non-GAAP adjusted figure, so a mismatch
+        # against filed OperatingIncomeLoss is not necessarily a conflict.
+        "ebit",
     }
 )
 
