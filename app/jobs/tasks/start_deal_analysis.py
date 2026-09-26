@@ -26,6 +26,7 @@ pooler.
 """
 
 import asyncio
+import logging
 from uuid import UUID, uuid4
 
 from saq.job import TERMINAL_STATUSES, Status
@@ -43,6 +44,8 @@ from app.services.failure_reasons import CREDIT_EXHAUSTED_MESSAGE, PARSER_CREDIT
 from app.services.screening.mandate_rules import selected_rule_ids
 from app.services.screening.rulebook import load_rulebook
 from app.services.screening.workspace_config import load_workspace_config
+
+logger = logging.getLogger(__name__)
 
 # The backend must wait at least as long as the parser can legitimately take,
 # or a slow-but-succeeding parse trips this deadline mid-run and the whole
@@ -131,6 +134,28 @@ async def _apply_outcome(ds_repo: DataSourceRepo, job: dict, result: dict) -> di
     return job
 
 
+def _error_summary(error: str | None) -> str | None:
+    """The actionable last line of a SAQ job's `error` (a full traceback string
+    -- see saq.job.Job.error), or None when the job recorded none.
+
+    A SAQ-level job failure is the ONE parse outcome whose cause never reaches
+    this app any other way: every *expected* rejection comes back as a normal
+    result dict carrying the parser's own ParseError code and message, so it
+    already arrives self-describing. What lands here is the unexpected kind --
+    an account-level Anthropic billing/quota block, a worker OOM, a bad deploy
+    -- and a traceback's final line ("module.ExceptionType: message") is exactly
+    the part an operator can act on.
+
+    Only that line is returned because this string is rendered straight into the
+    findings panel; the whole trace goes to the log line beside the call, which
+    is where a full trace belongs.
+    """
+    if not error:
+        return None
+    lines = [line.strip() for line in error.strip().splitlines() if line.strip()]
+    return lines[-1] if lines else None
+
+
 def _final_status(parse_jobs: list[dict], timed_out: bool) -> tuple[str, str | None]:
     """D14/D15: a run with zero successful parses is `failed`, named why.
     Mixed outcomes (some parsed, some rejected) -> `successful`, not
@@ -153,6 +178,18 @@ def _final_status(parse_jobs: list[dict], timed_out: bool) -> tuple[str, str | N
     if rejected and all(job["code"] == "no_extractable_text" for job in rejected):
         noun = "document" if len(rejected) == 1 else f"{len(rejected)} documents"
         return "failed", f"All {noun} need OCR before analysis."
+    if rejected and all(job["code"] in ("job_failed", "job_aborted") for job in rejected):
+        # Every document died on an uncaught exception inside the parser worker,
+        # which says nothing about the documents themselves -- a deal whose files
+        # are all perfectly parseable lands here whenever the parser hits an
+        # account-level or deploy-level fault. Naming it as a parser failure (and
+        # carrying the first real cause, from _error_summary) keeps it from being
+        # read as "these files are unusable", the reading the generic message
+        # below invites.
+        cause = next((job.get("message") for job in rejected if job.get("message")), None)
+        if cause:
+            return "failed", f"The parser service failed on every document: {cause}"
+        return "failed", "The parser service failed on every document."
     return "failed", "None of this deal's documents could be parsed."
 
 
@@ -161,8 +198,11 @@ def _comment_for_job(job: dict, timed_out: bool) -> str:
     any -- `message`, straight from its ParseError, for a rejected outcome.
     This app only invents wording where the parser genuinely has none: a
     "parsed" success (no narrative field on that side, just bucket/key/kind
-    metadata) and a SAQ-level job failure (never went through the parser's
-    own error path at all, so there's no message to have)."""
+    metadata) and a SAQ-level job failure that recorded no traceback at all.
+    A job failure that DID record one carries its summary line as `message`
+    (see _error_summary), so it takes the same first branch as a ParseError --
+    the generic fallback below is now genuinely the last resort it reads as,
+    not the everyday path it used to be."""
     if job["outcome"] == "parsed":
         return "Parsed successfully."
     if job["outcome"] == "rejected":
@@ -319,8 +359,30 @@ async def start_deal_analysis(
                     # FAILED/ABORTED on the SAQ job itself (not a ParseError,
                     # which the parser returns as a normal "rejected" result
                     # dict, never a raised exception on the queue).
+                    #
+                    # SAQ already carries the worker's traceback on `job.error`.
+                    # Dropping it here was what reduced EVERY uncaught parser
+                    # failure -- billing block, OOM, bad deploy -- to the bare
+                    # "Parsing job failed unexpectedly.", leaving the real cause
+                    # visible only to someone with parser log access. Keep it:
+                    # the full trace to our log, its last line to the operator.
+                    logger.error(
+                        "parse job %s (data_source %s) ended %s: %s",
+                        job["job_key"],
+                        job["data_source_id"],
+                        saq_job.status.value,
+                        saq_job.error or "<no traceback recorded>",
+                    )
                     parse_jobs.append(
-                        {**job, "outcome": "rejected", "code": "job_" + saq_job.status.value}
+                        {
+                            **job,
+                            "outcome": "rejected",
+                            "code": "job_" + saq_job.status.value,
+                            # _comment_for_job already prefers `message` over its
+                            # own invented wording, so this alone replaces the
+                            # generic per-file comment with the real error.
+                            "message": _error_summary(saq_job.error),
+                        }
                     )
 
             timed_out = loop.time() >= deadline
