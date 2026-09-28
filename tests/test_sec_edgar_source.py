@@ -496,3 +496,56 @@ async def test_ebit_mismatch_is_no_signal_not_conflict():
         None, _claim(attribute="ebit", period_year=2026, normalized=145_000_000_000.0)
     )
     assert v is None
+
+
+async def test_capex_verifies_against_productive_assets_concept():
+    # NVIDIA (and similar filers) tag capex as PaymentsToAcquireProductiveAssets, not
+    # the narrower PaymentsToAcquirePropertyPlantAndEquipment we mapped before -- and a
+    # deck prints the outflow negative while EDGAR files it positive. Both the fallback
+    # concept AND the sign-convention |value| compare must fire for it to verify.
+    src = SecEdgarSource(
+        fetch=_fake_fetch(_facts("PaymentsToAcquireProductiveAssets", 2026, 6_042_000_000.0))
+    )
+    v = await src.check(
+        None, _claim(attribute="capex", period_year=2026, normalized=-6_042_000_000.0)
+    )
+    assert v is not None and v.agrees
+    assert v.result["concept"] == "PaymentsToAcquireProductiveAssets"
+
+
+async def test_capex_still_verifies_against_the_ppe_concept():
+    # The original, more common tag still resolves (tried first).
+    src = SecEdgarSource(
+        fetch=_fake_fetch(
+            _facts("PaymentsToAcquirePropertyPlantAndEquipment", 2026, 6_042_000_000.0)
+        )
+    )
+    v = await src.check(
+        None, _claim(attribute="capex", period_year=2026, normalized=-6_042_000_000.0)
+    )
+    assert v is not None and v.agrees
+    assert v.result["concept"] == "PaymentsToAcquirePropertyPlantAndEquipment"
+
+
+async def test_interest_expense_verifies_despite_sign_convention():
+    # The deck prints interest expense negative (-259M); EDGAR files it positive
+    # (+259M). Same magnitude -> verify on |value|.
+    src = SecEdgarSource(
+        fetch=_fake_fetch(_facts("InterestExpenseNonoperating", 2026, 259_000_000.0))
+    )
+    v = await src.check(
+        None, _claim(attribute="interest_expense", period_year=2026, normalized=-259_000_000.0)
+    )
+    assert v is not None and v.agrees
+
+
+async def test_capex_magnitude_mismatch_is_no_signal_not_a_conflict():
+    # |value| compare must not manufacture agreement across a real magnitude gap, and
+    # capex is confirm-only, so a genuine mismatch is a no-signal (never a conflict).
+    src = SecEdgarSource(
+        fetch=_fake_fetch(_facts("PaymentsToAcquireProductiveAssets", 2026, 6_042_000_000.0))
+    )
+    v = await src.check(
+        None, _claim(attribute="capex", period_year=2026, normalized=-9_000_000_000.0)
+    )
+    assert v is None
