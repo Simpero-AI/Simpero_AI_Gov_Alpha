@@ -95,7 +95,13 @@ _CONCEPTS: dict[str, tuple[str, ...]] = {
         "NetCashProvidedByUsedInOperatingActivities",
         "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations",
     ),
-    "capex": ("PaymentsToAcquirePropertyPlantAndEquipment",),
+    # PaymentsToAcquireProductiveAssets is the tag NVIDIA (and other filers who fold
+    # PP&E + intangibles into one capex line) use; PaymentsToAcquirePropertyPlantAndEquipment
+    # is the narrower, more common tag. Try the common one first, fall back to the broader.
+    "capex": (
+        "PaymentsToAcquirePropertyPlantAndEquipment",
+        "PaymentsToAcquireProductiveAssets",
+    ),
 }
 
 # Relative tolerance for "the same figure". Tight on purpose -- EDGAR XBRL is a
@@ -142,6 +148,18 @@ _CONFIRM_ONLY_ATTRIBUTES = frozenset(
         "ebit",
     }
 )
+
+# Attributes whose figure is a pure outflow/expense that a deck conventionally prints
+# NEGATIVE (a cash-flow use, an expense line) while EDGAR files the same magnitude as a
+# POSITIVE us-gaap fact -- capex (-6.04B vs PaymentsToAcquireProductiveAssets +6.04B) and
+# interest_expense (-259M vs InterestExpenseNonoperating +259M). For these we compare on
+# ABSOLUTE VALUE, so the presentation sign never blocks a genuine magnitude match. Safe
+# because both are also _CONFIRM_ONLY_ATTRIBUTES (a mismatch is no-signal, never a
+# conflict) and an absolute-value match can only occur at equal magnitude, i.e. the same
+# figure. Deliberately NARROW -- cogs/tax_expense are NOT here: for those a sign flip can
+# signal a real extraction error (a benefit booked as an expense, a cost mis-signed), so
+# they stay strict (sign mismatch -> no-signal) rather than being confirmed on |value|.
+_SIGN_CONVENTION_ATTRIBUTES = frozenset({"capex", "interest_expense"})
 
 Fetch = Callable[[str], Awaitable[Any]]
 
@@ -414,7 +432,14 @@ class SecEdgarSource:
             return None  # no reported fact for this concept/period -> no-signal
         concept, edgar_value = found
 
-        delta = abs(edgar_value - claim_value) / max(abs(edgar_value), 1.0)
+        # For a pure outflow/expense the deck prints negative but EDGAR files positive
+        # (capex, interest_expense), compare on absolute value so the presentation sign
+        # never blocks a genuine magnitude match -- see _SIGN_CONVENTION_ATTRIBUTES.
+        if claim.attribute in _SIGN_CONVENTION_ATTRIBUTES:
+            claim_cmp, edgar_cmp = abs(claim_value), abs(edgar_value)
+        else:
+            claim_cmp, edgar_cmp = claim_value, edgar_value
+        delta = abs(edgar_cmp - claim_cmp) / max(abs(edgar_cmp), 1.0)
         agrees = delta <= _REL_TOLERANCE
 
         # A mismatch on a sub-line-ambiguous flow (revenue / net_income) is almost
