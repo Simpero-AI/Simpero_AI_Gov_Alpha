@@ -59,7 +59,11 @@ from app.services.corroboration_sources import DEFAULT_SOURCES
 from app.services.entity_resolution.resolved import load_resolved_entity
 from app.services.intake_facts import build_intake_candidates, persist_intake_facts
 from app.services.status_rollup import roll_up_deal
-from app.services.web_search_collect import gather_web_facts, persist_web_facts
+from app.services.web_search_collect import (
+    gather_competitors,
+    gather_web_facts,
+    persist_web_facts,
+)
 from app.services.web_search_corroborate import corroborate_sizing_against_web
 
 logger = logging.getLogger(__name__)
@@ -200,6 +204,19 @@ async def _run_corroboration(*, screening_run_id: UUID, clerk_org_id: str) -> bo
         # claims regardless of the deck and is a no-op without an anthropic key.
         results = await gather_corroboration(session, claims, DEFAULT_SOURCES) if claims else []
         web_candidates = await gather_web_facts(
+            company=company,
+            sector=sector,
+            api_key=settings.anthropic_api_key,
+            model=settings.web_search_model,
+        )
+        # The competitive landscape runs as its OWN web-search pass (gather_competitors):
+        # the combined collect above reports sizing first and truncates on max_tokens
+        # before it reaches competitors, so the Competitor tab was always empty. A
+        # dedicated call with its own budget mints the full named competitor set as
+        # `competitive_position` web claims. Same fail-soft contract (no key -> []), so
+        # it never gates the pipeline; its candidates flow through persist_web_facts with
+        # the rest.
+        web_candidates += await gather_competitors(
             company=company,
             sector=sector,
             api_key=settings.anthropic_api_key,
