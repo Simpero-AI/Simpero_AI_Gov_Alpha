@@ -43,7 +43,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from saq.types import Context
-from sqlalchemy import select, text
+from sqlalchemy import literal_column, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.core.database import AsyncSessionLocal
@@ -81,6 +81,32 @@ _CHUNKS_CONTRACT_PATH = Path(__file__).parents[3] / "contracts" / "chunks.schema
 # location keys that map to their own flat column -- mirrors
 # scripts/ingest_claims.py's _LOCATION_COLUMNS exactly.
 _LOCATION_COLUMNS = ("page", "char_start", "char_end", "bbox", "sheet", "cell_ref", "paragraph")
+
+# Columns a re-ingest REFRESHES onto an already-present claim_ref (ON CONFLICT DO
+# UPDATE below). Everything the parser can re-derive for the same citation: the
+# value/scale, period, attribute, status, flags and location. Deliberately EXCLUDES
+# the identity/scope columns -- org_id, deal_id, data_source_id, claim_ref (the
+# conflict key) and the server-managed id/created_at -- so the row keeps its UUID
+# (corroboration_events' RESTRICT FK and write-once screening evidence_refs cite it)
+# while its content catches up to the current extractor. Every column here comes from
+# the SAME envelope claim as `status`, so status stays consistent with its location
+# and verification_method and the ck_claims_* constraints hold.
+_REINGEST_REFRESH_COLUMNS = (
+    "entity",
+    "attribute",
+    "attribute_raw",
+    "claim_type",
+    "value",
+    "period_year",
+    "period_kind",
+    "status",
+    "verification_method",
+    "section",
+    "flags",
+    "claim_kind",
+    "assertion_class",
+    "kind",
+) + _LOCATION_COLUMNS
 
 # Chunk the claim bulk-insert so a single INSERT stays under Postgres' 65535
 # bind-parameter ceiling (~24 columns/row -> 1000 rows leaves generous
@@ -364,19 +390,42 @@ async def _run_verification(
                 _claim_values(c, org_id=org_id, deal_id=deal_uuid, data_source_id=data_source_id)
                 for c in claims
             ]
+            # Re-ingest REFRESHES an existing claim_ref instead of discarding the
+            # incoming row. SIM-367 made this insert-only (ON CONFLICT DO NOTHING) to
+            # stop a re-analysis from failing on the deterministic claim_ref collision
+            # -- but that froze an already-analysed deal on its FIRST extraction: a
+            # later run re-ran the (now-fixed) parser, yet its corrected value/scale/
+            # period/flags collided with the stale row and were dropped, so no parser
+            # fix ever reached an existing deal and external corroboration kept
+            # declining the stale, uncomparable figures (empty Corroboration tab on
+            # every re-run). ON CONFLICT DO UPDATE writes the current parser's fields
+            # onto the SAME row (id preserved -> corroboration_events' RESTRICT FK and
+            # write-once screening evidence_refs stay valid), keyed on the unique index.
+            # status is refreshed to the parser's freshly-emitted value (`proposed` for
+            # a PDF/DOCX claim), so promote_exact_span -> roll_up -> corroboration
+            # re-decide it THIS run rather than trusting a prior generation's verdict on
+            # a value that may have changed. An unchanged re-ingest rewrites each column
+            # to its current value -- still idempotent.
             inserted_count = 0
+            refreshed_count = 0
             for start in range(0, len(claim_rows), _CLAIM_INSERT_CHUNK):
-                insert_claims = (
-                    pg_insert(Claim)
-                    .values(claim_rows[start : start + _CLAIM_INSERT_CHUNK])
-                    .on_conflict_do_nothing(
-                        index_elements=["org_id", "data_source_id", "claim_ref"]
-                    )
-                    .returning(Claim.id)
+                base_insert = pg_insert(Claim).values(
+                    claim_rows[start : start + _CLAIM_INSERT_CHUNK]
                 )
-                # RETURNING yields one row per row actually inserted (conflicts are
-                # skipped), so this counts what was added, not the whole envelope.
-                inserted_count += len((await session.scalars(insert_claims)).all())
+                upsert_claims = base_insert.on_conflict_do_update(
+                    index_elements=["org_id", "data_source_id", "claim_ref"],
+                    set_={col: base_insert.excluded[col] for col in _REINGEST_REFRESH_COLUMNS},
+                ).returning(Claim.id, literal_column("(xmax = 0)").label("was_insert"))
+                # xmax = 0 marks a freshly INSERTed tuple; a non-zero xmax marks the
+                # UPDATE arm of ON CONFLICT -- the standard one-statement way to tell
+                # the two apart. Splitting the count makes a re-analysis legible in the
+                # job comment as "0 ingested, N refreshed" (the visible proof the new
+                # extraction actually landed on the existing deal).
+                for _claim_id, was_insert in (await session.execute(upsert_claims)).all():
+                    if was_insert:
+                        inserted_count += 1
+                    else:
+                        refreshed_count += 1
 
             # Retrieval chunks (Epic 8, SIM-338): the same document's chunks ride
             # in envelope["chunks"] (added by the parser worker). Ingest them into
@@ -442,9 +491,10 @@ async def _run_verification(
                     "dataSourceId": str(data_source_id),
                     "fileName": job.get("filename"),
                     "status": "ingested",
-                    "comment": f"{inserted_count} claim(s) ingested "
-                    f"({len(claim_rows)} in envelope), {len(edge_rows)} edge(s) "
-                    f"from extraction, {len(skipped_edges)} edge(s) skipped.",
+                    "comment": f"{inserted_count} claim(s) ingested, "
+                    f"{refreshed_count} refreshed ({len(claim_rows)} in envelope), "
+                    f"{len(edge_rows)} edge(s) from extraction, "
+                    f"{len(skipped_edges)} edge(s) skipped.",
                 }
             )
 
