@@ -374,9 +374,10 @@ async def test_reingest_refreshes_a_changed_claims_value_preserving_id(
     parser's scale/period fixes stayed frozen, because insert-only re-ingest discarded
     the corrected row on its claim_ref collision -- so external corroboration kept
     declining the stale, uncomparable figures on every re-run. Re-ingest now DO-UPDATEs
-    the existing row, so a re-analysis whose parser resolved the scale (assumed_1x -> a
-    real multiplier) lands the corrected value on the SAME claim (id preserved), and the
-    refreshed claim is re-promoted out of `proposed` so corroboration can reach it."""
+    the existing row's CONTENT, so a re-analysis whose parser resolved the scale
+    (assumed_1x -> a real multiplier) lands the corrected value on the SAME claim (id
+    preserved). The verification lifecycle is left to the passes that run after ingest,
+    so the claim stays in an internally-checked status corroboration can reach."""
     org_pk = seeded_org["org_pk"]
     data_source_id = _seed_data_source(owner_conn, org_pk, seeded_deal, "cim.pdf")
 
@@ -458,9 +459,103 @@ async def test_reingest_refreshes_a_changed_claims_value_preserving_id(
     refreshed = _claim_probe_by_ref(owner_conn, org_pk, "c1")
     assert refreshed["normalized"] == 250000000.0
     assert refreshed["scale_source"] == "page_header"
-    # The refreshed claim was re-promoted out of `proposed`, so the corroboration pass
-    # (which only checks internally-cited claims) can now reach it.
+    # It sits in an internally-checked status (promotion ran, and re-ingest did not drag
+    # it back to `proposed`), so the corroboration pass can reach it with the new value.
     assert refreshed["status"] != "proposed"
+
+
+async def test_reingest_keeps_a_prior_external_conflict_not_silently_verified(
+    owner_conn, seeded_org, seeded_deal, monkeypatch, mocked_screening_enqueue
+):
+    """Data-integrity guard for the refresh: corroboration_events are append-only across
+    re-analysis generations, and status_rollup infers "an outside source ever disagreed"
+    from the sticky `status == 'conflicted'`, NOT from a per-event flag. So re-ingest must
+    NOT reset a conflicted claim's status -- doing so would orphan the prior run's
+    agrees=False event and make the roll-up read that stale disagreement as an agreement,
+    silently re-marking the claim `verified`. `status`/`verification_method` are excluded
+    from _REINGEST_REFRESH_COLUMNS precisely to prevent that."""
+    org_pk = seeded_org["org_pk"]
+    data_source_id = _seed_data_source(owner_conn, org_pk, seeded_deal, "cim.pdf")
+
+    def parse_jobs() -> list[dict]:
+        return [
+            {
+                "data_source_id": data_source_id,
+                "filename": "cim.pdf",
+                "storage_key": "org/cim.pdf",
+                "job_key": "job-1",
+                "outcome": "parsed",
+                "code": None,
+                "message": None,
+                "bucket": "test-bucket",
+                "key": "claims/cim.json",
+            }
+        ]
+
+    run1 = _seed_parsing_run(owner_conn, org_pk, seeded_deal, parse_jobs())
+    verify1 = _seed_verification_run(owner_conn, org_pk, seeded_deal)
+    monkeypatch.setattr(
+        job_module,
+        "get_json_object",
+        lambda bucket, key: {
+            "run_id": run1,
+            "sha256": "a" * 64,
+            "source_file": "cim.pdf",
+            "claims": [_claim_json("c1", page=1, normalized=100.0)],
+            "edges": [],
+        },
+    )
+    await job_module.start_deal_verification(
+        {}, analysis_run_id=verify1, parsing_run_id=run1, clerk_org_id=seeded_org["clerk_org_id"]
+    )
+    assert _fetch_run(owner_conn, verify1)["status"] == "successful"
+
+    # Simulate the first run's corroboration pass DISAGREEING: an append-only
+    # agrees=False event plus the sticky `conflicted` status it sets (SIM-252).
+    claim_id = _claim_ids_by_ref(owner_conn, org_pk)["c1"]
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO corroboration_events (org_id, claim_id, outside_source, result, agrees) "
+            "VALUES (%s, %s, 'sec_edgar', '{}'::jsonb, false)",
+            (org_pk, claim_id),
+        )
+        cur.execute("UPDATE claims SET status = 'conflicted' WHERE id = %s", (claim_id,))
+        cur.execute(
+            "UPDATE analysis_run SET status = 'successful' "
+            "WHERE deal_id = %s AND status IN ('queued', 'in_progress')",
+            (seeded_deal,),
+        )
+
+    # Re-analysis with a changed value for the SAME ref.
+    run2 = _seed_parsing_run(owner_conn, org_pk, seeded_deal, parse_jobs())
+    verify2 = _seed_verification_run(owner_conn, org_pk, seeded_deal)
+    monkeypatch.setattr(
+        job_module,
+        "get_json_object",
+        lambda bucket, key: {
+            "run_id": run2,
+            "sha256": "a" * 64,
+            "source_file": "cim.pdf",
+            "claims": [_claim_json("c1", page=1, normalized=175.0)],
+            "edges": [],
+        },
+    )
+    await job_module.start_deal_verification(
+        {}, analysis_run_id=verify2, parsing_run_id=run2, clerk_org_id=seeded_org["clerk_org_id"]
+    )
+    assert _fetch_run(owner_conn, verify2)["status"] == "successful"
+    probe = _claim_probe_by_ref(owner_conn, org_pk, "c1")
+
+    # Clean up the append-only event before the fixture teardown deletes claims (its
+    # RESTRICT FK would otherwise block the delete); done before asserting so a failed
+    # assertion can't leave a row that masks the real failure with a teardown error.
+    with owner_conn.cursor() as cur:
+        cur.execute("DELETE FROM corroboration_events WHERE org_id = %s", (org_pk,))
+
+    # The value refreshed, but the external conflict is NOT silently cleared to verified:
+    # status stays conflicted (the stale agrees=False event is not misread as agreement).
+    assert probe["normalized"] == 175.0
+    assert probe["status"] == "conflicted"
 
 
 async def test_reingest_edges_dedupe_within_batch_and_across_runs(

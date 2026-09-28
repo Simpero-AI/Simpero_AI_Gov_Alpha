@@ -83,14 +83,29 @@ _CHUNKS_CONTRACT_PATH = Path(__file__).parents[3] / "contracts" / "chunks.schema
 _LOCATION_COLUMNS = ("page", "char_start", "char_end", "bbox", "sheet", "cell_ref", "paragraph")
 
 # Columns a re-ingest REFRESHES onto an already-present claim_ref (ON CONFLICT DO
-# UPDATE below). Everything the parser can re-derive for the same citation: the
-# value/scale, period, attribute, status, flags and location. Deliberately EXCLUDES
-# the identity/scope columns -- org_id, deal_id, data_source_id, claim_ref (the
-# conflict key) and the server-managed id/created_at -- so the row keeps its UUID
-# (corroboration_events' RESTRICT FK and write-once screening evidence_refs cite it)
-# while its content catches up to the current extractor. Every column here comes from
-# the SAME envelope claim as `status`, so status stays consistent with its location
-# and verification_method and the ck_claims_* constraints hold.
+# UPDATE below): everything the PARSER re-derives for the same citation -- the
+# value/scale, period, attribute, flags and location. This is what makes a
+# re-analysis actually apply the current extractor to an existing deal (the whole
+# point of the change: a corrected value/scale is what lets external corroboration
+# compare the figure again).
+#
+# Deliberately EXCLUDED, and why:
+#   - Identity/scope: org_id, deal_id, data_source_id, claim_ref (the conflict key)
+#     and server-managed id/created_at -- so the row keeps its UUID and
+#     corroboration_events' RESTRICT FK + write-once screening evidence_refs stay
+#     valid.
+#   - The VERIFICATION LIFECYCLE: `status` and `verification_method`. Re-ingest owns
+#     the claim's CONTENT, not its verdict -- the passes that run right after
+#     (promote_exact_span, corroboration, roll_up_deal) own status and re-derive it
+#     over the refreshed value. Leaving status alone is also a data-integrity
+#     REQUIREMENT: status_rollup infers "an outside source ever disagreed" from the
+#     sticky `status == 'conflicted'` (SIM-252), NOT from a per-event flag, and
+#     corroboration_events are append-only across re-analysis generations. Resetting a
+#     `conflicted` claim back to the parser's `proposed` would leave the prior run's
+#     `agrees=False` event orphaned and make the roll-up read that stale disagreement
+#     as an agreement -- silently re-marking a conflicted claim `verified`. A stuck
+#     `proposed` claim is still re-promoted (promote_exact_span only touches
+#     `proposed`, and it stays `proposed` here), so the frozen-deal case is unaffected.
 _REINGEST_REFRESH_COLUMNS = (
     "entity",
     "attribute",
@@ -99,8 +114,6 @@ _REINGEST_REFRESH_COLUMNS = (
     "value",
     "period_year",
     "period_kind",
-    "status",
-    "verification_method",
     "section",
     "flags",
     "claim_kind",
@@ -398,14 +411,17 @@ async def _run_verification(
             # period/flags collided with the stale row and were dropped, so no parser
             # fix ever reached an existing deal and external corroboration kept
             # declining the stale, uncomparable figures (empty Corroboration tab on
-            # every re-run). ON CONFLICT DO UPDATE writes the current parser's fields
+            # every re-run). ON CONFLICT DO UPDATE writes the current parser's CONTENT
+            # (value/scale/period/attribute/flags/location -- _REINGEST_REFRESH_COLUMNS)
             # onto the SAME row (id preserved -> corroboration_events' RESTRICT FK and
             # write-once screening evidence_refs stay valid), keyed on the unique index.
-            # status is refreshed to the parser's freshly-emitted value (`proposed` for
-            # a PDF/DOCX claim), so promote_exact_span -> roll_up -> corroboration
-            # re-decide it THIS run rather than trusting a prior generation's verdict on
-            # a value that may have changed. An unchanged re-ingest rewrites each column
-            # to its current value -- still idempotent.
+            # The verification lifecycle (`status`, `verification_method`) is deliberately
+            # NOT refreshed -- promote_exact_span (which still lifts a stuck `proposed`
+            # claim), corroboration and roll_up_deal run right after and re-derive the
+            # verdict over the refreshed value; leaving `status` untouched also keeps the
+            # sticky-`conflicted` signal status_rollup relies on intact (see
+            # _REINGEST_REFRESH_COLUMNS). An unchanged re-ingest rewrites each content
+            # column to its current value -- still idempotent.
             inserted_count = 0
             refreshed_count = 0
             for start in range(0, len(claim_rows), _CLAIM_INSERT_CHUNK):
