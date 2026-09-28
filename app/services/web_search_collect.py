@@ -82,6 +82,15 @@ _LLM_TIMEOUT_S = 90.0
 _MAX_TEXT_CHARS = 600
 _MAX_FACTS = 40
 
+# The competitor pass runs SEPARATELY from the general collect above, and on its own
+# token budget, on purpose: the general call was reporting `sizing` first and hitting
+# max_tokens (4096) before it ever got to the competitive-landscape section, so the
+# Competitor tab was always empty even though the searches ran. A dedicated call with
+# a competitor-only prompt and a larger output budget lets the model report the full
+# 8-12 named competitors it finds (measured: 12 for NVIDIA, stop_reason=tool_use).
+_COMPETITOR_MAX_SEARCHES = 8
+_COMPETITOR_MAX_TOKENS = 8192
+
 # section (model-facing) -> assertion_class (claims spine). Kept in lockstep with
 # company_view/market_view's routing so a collected assertion lands in the right
 # tab section.
@@ -209,29 +218,53 @@ def _system_prompt() -> str:
         "You are a private-equity diligence analyst. Using web search, find factual, "
         "citable information about the target company and its market, then report it via "
         "report_web_facts.\n\n"
-        "Spend dedicated searches on the market and the competitive landscape -- "
-        "they are the priority, and the target's own filings rarely cover them well.\n\n"
+        "Spend dedicated searches on the market -- sizing, structure and growth -- "
+        "which the target's own filings rarely cover well. (The competitive landscape "
+        "is collected by a separate, dedicated pass, so you need not search for "
+        "competitors here.)\n\n"
         "Collect:\n"
         "- Market sizing: TAM/SAM/SOM, overall market size, and market CAGR.\n"
-        "- Competitive position: identify the top 5-10 NAMED competitors in this "
-        "market; for each, report its market share (% or rank) and how it is "
-        "positioned or differentiated, whenever publicly reported. One assertion "
-        "per competitor per fact, each with its own source URL.\n"
         "- Market definition: what the market is, its structure, its main segments "
         "and buyer/customer types, and its growth drivers.\n"
         "- Company overview: what the company does and how it operates.\n"
         "- Commercial terms: key customers, pricing, and contract/renewal terms.\n"
         "- Risks, related parties, and stated plans, when publicly reported.\n\n"
         "Suggested searches (adapt to the company and sector): "
-        "'<sector> market size and growth', '<sector> competitive landscape', "
-        "'<sector> market share leaders', '<company> competitors', "
-        "'<sector> market segmentation'.\n\n"
+        "'<sector> market size and growth', '<sector> market segmentation', "
+        "'<company> business model customers'.\n\n"
         "Hard rules:\n"
         "- Report ONLY facts that appear in a search result, each with the exact "
         "source URL it came from. Never estimate or invent a figure, name, or URL.\n"
         "- Prefer authoritative sources (market-research firms, regulators, major press).\n"
         "- If you find nothing citable for a category, omit it. Return empty "
         "arrays rather than padding."
+    )
+
+
+def _competitor_system_prompt() -> str:
+    """The DEDICATED competitor pass -- reuses report_web_facts, but the model spends
+    its whole budget on the competitive landscape (reported as `competitive_position`
+    assertions), so the tab is filled with the full named set rather than truncated."""
+    return (
+        "You are a private-equity diligence analyst mapping the TARGET company's "
+        "competitive landscape. Using web search, identify its direct and closest "
+        "competitors, then report them via report_web_facts.\n\n"
+        "Find the top 8-12 NAMED competitors. For EACH competitor, report ONE assertion "
+        "with section='competitive_position', subject=<the competitor's name>, and text = "
+        "one concrete sentence covering what it makes/does that competes with the target, "
+        "how it is positioned or differentiated, and its market share or rank when "
+        "publicly reported. Each assertion needs the exact source URL it came from.\n\n"
+        "Run several targeted searches, e.g. '<company> competitors', '<company> vs "
+        "<rival>', '<sector> market share leaders', '<sector> key players', "
+        "'<sector> competitive landscape'.\n\n"
+        "Hard rules:\n"
+        "- Report ONLY competitors that appear in a search result, each with its exact "
+        "source URL. Never invent a name or URL.\n"
+        "- One assertion per competitor; put every competitor in the `assertions` array "
+        "with section='competitive_position'. Leave `sizing` an empty array -- market "
+        "sizing is collected elsewhere.\n"
+        "- Prefer authoritative sources (market-research firms, major press, filings).\n"
+        "- Return an empty array rather than padding with weak or unnamed rivals."
     )
 
 
@@ -389,12 +422,22 @@ def _adjudicate(raw: dict[str, Any], allowed: frozenset[str]) -> list[WebFactCan
     return candidates[:_MAX_FACTS]
 
 
-def _call_web_search(
-    *, api_key: str, model: str, company: str, sector: str | None, allowed: tuple[str, ...]
+def _run_web_search(
+    *,
+    api_key: str,
+    model: str,
+    company: str,
+    sector: str | None,
+    allowed: tuple[str, ...],
+    system: str,
+    max_tokens: int,
+    max_uses: int,
 ) -> dict[str, Any]:
     """Blocking Anthropic call with the web_search server tool + the report tool.
     The model searches (server-side, bounded by max_uses + allowed_domains) then
-    calls report_web_facts; we return that tool input. Run via asyncio.to_thread."""
+    calls report_web_facts; we return that tool input. Run via asyncio.to_thread.
+    `system`/`max_tokens`/`max_uses` are passed so the general-collect and the
+    dedicated competitor pass can share this plumbing with different budgets."""
     import anthropic
 
     # max_retries=0: this is best-effort enrichment that already fails soft to [],
@@ -404,14 +447,14 @@ def _call_web_search(
     web_search_tool: dict[str, Any] = {
         "type": "web_search_20250305",
         "name": "web_search",
-        "max_uses": _MAX_SEARCHES,
+        "max_uses": max_uses,
         "allowed_domains": list(allowed),
     }
     user = f"Target company: {company}" + (f"\nSector: {sector}" if sector else "")
     message = client.messages.create(
         model=model,
-        max_tokens=4096,
-        system=_system_prompt(),
+        max_tokens=max_tokens,
+        system=system,
         # cast: the pinned SDK (1.2.0) has no typed param for the web_search
         # server tool, but the API accepts the raw tool dict -- it is passed
         # through verbatim. The report tool is a normal ToolParam.
@@ -437,6 +480,40 @@ def _call_web_search(
     return {}
 
 
+def _call_web_search(
+    *, api_key: str, model: str, company: str, sector: str | None, allowed: tuple[str, ...]
+) -> dict[str, Any]:
+    """General market/company collect: the 5-arg call shape gather_web_facts (and its
+    test injection) expect."""
+    return _run_web_search(
+        api_key=api_key,
+        model=model,
+        company=company,
+        sector=sector,
+        allowed=allowed,
+        system=_system_prompt(),
+        max_tokens=4096,
+        max_uses=_MAX_SEARCHES,
+    )
+
+
+def _call_competitor_search(
+    *, api_key: str, model: str, company: str, sector: str | None, allowed: tuple[str, ...]
+) -> dict[str, Any]:
+    """Dedicated competitor collect: same 5-arg shape, but the competitor prompt and a
+    larger output budget so the full named set is reported, not truncated."""
+    return _run_web_search(
+        api_key=api_key,
+        model=model,
+        company=company,
+        sector=sector,
+        allowed=allowed,
+        system=_competitor_system_prompt(),
+        max_tokens=_COMPETITOR_MAX_TOKENS,
+        max_uses=_COMPETITOR_MAX_SEARCHES,
+    )
+
+
 def _blocked_domains(err: Exception) -> tuple[str, ...]:
     """The allowed_domains named in a web_search "not accessible to our user agent"
     400, parsed from the error text; empty when the error is any other shape (so
@@ -450,27 +527,30 @@ def _blocked_domains(err: Exception) -> tuple[str, ...]:
     return tuple(dict.fromkeys(d.lower() for d in found))
 
 
-async def gather_web_facts(
+async def _gather(
     *,
     company: str,
     sector: str | None,
     api_key: str,
     model: str,
-    allowed_domains: Sequence[str] = DEFAULT_ALLOWED_DOMAINS,
-    _call: Any = None,
+    allowed_domains: Sequence[str],
+    call: Any,
+    label: str,
 ) -> list[WebFactCandidate]:
-    """Search the web for the deal's market/company facts and return adjudicated,
-    allowlist-passed candidates. Fails soft to [] on any error. `_call` is an
-    injection point for tests (defaults to the real Anthropic call)."""
+    """Shared collect core for both passes (general market/company facts and the
+    dedicated competitor pass): run the web-search call, recover from a crawler-blocked
+    allowlist 400 by dropping the named domains once, adjudicate, and fail soft to []
+    on any error. `call` is a 5-arg web-search call (the real one or a test injection);
+    `label` tags the log lines for the two passes."""
     if not api_key or not company:
         logger.info(
-            "web-collect skipped for %r: reason=%s -- no web facts minted this run",
+            "%s skipped for %r: reason=%s -- no web facts minted this run",
+            label,
             company,
             "no_api_key" if not api_key else "no_company",
         )
         return []
     allowed = tuple(allowed_domains)
-    call = _call or _call_web_search
     try:
         try:
             raw = await asyncio.to_thread(
@@ -488,7 +568,8 @@ async def gather_web_facts(
             if not blocked or not reduced or len(reduced) == len(allowed):
                 raise
             logger.warning(
-                "web-collect for %r: dropping %d crawler-inaccessible domain(s) %s and retrying",
+                "%s for %r: dropping %d crawler-inaccessible domain(s) %s and retrying",
+                label,
                 company,
                 len(allowed) - len(reduced),
                 list(blocked),
@@ -498,7 +579,7 @@ async def gather_web_facts(
                 call, api_key=api_key, model=model, company=company, sector=sector, allowed=allowed
             )
         if not isinstance(raw, dict):
-            logger.info("web-collect for %r: model returned no structured facts", company)
+            logger.info("%s for %r: model returned no structured facts", label, company)
             return []
         # _adjudicate is inside the try too: an adjudication bug must also fail
         # soft to [] and never escape into the corroboration job's phase B.
@@ -514,15 +595,16 @@ async def gather_web_facts(
         n_assertions = len(raw.get("assertions") or [])
         if (n_sizing or n_assertions) and not candidates:
             logger.warning(
-                "web-collect for %r: model reported %d facts but 0 passed the allowlist -- "
+                "%s for %r: model reported %d facts but 0 passed the allowlist -- "
                 "review DEFAULT_ALLOWED_DOMAINS (a blocked domain can also 400 the whole search)",
+                label,
                 company,
                 n_sizing + n_assertions,
             )
         else:
             logger.info(
-                "web-collect for %r: model reported %d sizing + %d assertions; "
-                "%d passed the allowlist",
+                "%s for %r: model reported %d sizing + %d assertions; %d passed the allowlist",
+                label,
                 company,
                 n_sizing,
                 n_assertions,
@@ -530,10 +612,55 @@ async def gather_web_facts(
             )
         return candidates
     except Exception:
-        logger.warning(
-            "web-search collect failed for %r; returning no facts", company, exc_info=True
-        )
+        logger.warning("%s failed for %r; returning no facts", label, company, exc_info=True)
         return []
+
+
+async def gather_web_facts(
+    *,
+    company: str,
+    sector: str | None,
+    api_key: str,
+    model: str,
+    allowed_domains: Sequence[str] = DEFAULT_ALLOWED_DOMAINS,
+    _call: Any = None,
+) -> list[WebFactCandidate]:
+    """Search the web for the deal's market/company facts and return adjudicated,
+    allowlist-passed candidates. Fails soft to [] on any error. `_call` is an
+    injection point for tests (defaults to the real Anthropic call)."""
+    return await _gather(
+        company=company,
+        sector=sector,
+        api_key=api_key,
+        model=model,
+        allowed_domains=allowed_domains,
+        call=_call or _call_web_search,
+        label="web-collect",
+    )
+
+
+async def gather_competitors(
+    *,
+    company: str,
+    sector: str | None,
+    api_key: str,
+    model: str,
+    allowed_domains: Sequence[str] = DEFAULT_ALLOWED_DOMAINS,
+    _call: Any = None,
+) -> list[WebFactCandidate]:
+    """The DEDICATED competitor pass: a separate web-search call whose whole output
+    budget goes to the competitive landscape, so the Competitor tab is filled with the
+    full named set instead of being truncated by the general collect's sizing section.
+    Returns `competitive_position` candidates (one per competitor); fails soft to []."""
+    return await _gather(
+        company=company,
+        sector=sector,
+        api_key=api_key,
+        model=model,
+        allowed_domains=allowed_domains,
+        call=_call or _call_competitor_search,
+        label="competitor-collect",
+    )
 
 
 def _claim_ref(candidate: WebFactCandidate) -> str:

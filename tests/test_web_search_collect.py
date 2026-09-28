@@ -17,6 +17,7 @@ from app.services.web_search_collect import (
     _adjudicate,
     _claim_ref,
     _url_allowed,
+    gather_competitors,
     gather_web_facts,
     persist_web_facts,
 )
@@ -253,6 +254,39 @@ async def test_gather_fails_soft_when_the_retry_also_fails():
     )
     assert cands == []
     assert len(calls) == 2
+
+
+# --- dedicated competitor pass ------------------------------------------------
+
+
+async def test_gather_competitors_returns_competitive_position_candidates():
+    # The competitor pass runs its own call and reports competitors as
+    # competitive_position assertions; each becomes a subject-scoped web claim.
+    def fake_call(**_kwargs):
+        return {
+            "sizing": [],
+            "assertions": [
+                {**_ASSERTION_ITEM, "subject": "AMD", "text": "AMD sells Instinct GPUs."},
+                {**_ASSERTION_ITEM, "subject": "Intel", "text": "Intel sells Gaudi accelerators."},
+            ],
+        }
+
+    cands = await gather_competitors(
+        company="NVIDIA", sector="Semiconductors", api_key="k", model="m", _call=fake_call
+    )
+    assert len(cands) == 2
+    assert {c.entity for c in cands} == {"AMD", "Intel"}
+    assert all(c.assertion_class == "competitive_position" for c in cands)
+
+
+async def test_gather_competitors_is_a_noop_without_an_api_key():
+    def fake_call(**_kwargs):
+        raise AssertionError("must not call the model without a key")
+
+    cands = await gather_competitors(
+        company="NVIDIA", sector=None, api_key="", model="m", _call=fake_call
+    )
+    assert cands == []
 
 
 # --- claim_ref idempotency key ------------------------------------------------
