@@ -10,6 +10,7 @@ import uuid
 from app.models.claim import Claim
 from app.services.financials_view import (
     FinancialFact,
+    build_financials_projections,
     build_financials_trend,
     build_financials_view,
 )
@@ -431,3 +432,50 @@ def test_trend_drops_a_competitors_series():
 
 def test_trend_is_empty_for_a_claimless_deal():
     assert build_financials_trend([], company="AcmeCo") == []
+
+
+def test_projections_builds_a_year_by_year_grid_with_kind_markers():
+    claims = [
+        _claim(attribute="revenue", normalized=400_000_000, period_year=2023, period_kind="A"),
+        _claim(attribute="revenue", normalized=465_600_000, period_year=2024, period_kind="E"),
+        _claim(attribute="net_income", normalized=50_000_000, period_year=2023, period_kind="A"),
+    ]
+
+    proj = build_financials_projections(claims, company="AcmeCo")
+
+    assert proj is not None
+    # Columns ascending by year, each marked Actual / Estimate from period_kind.
+    assert [(c.year, c.kind) for c in proj.columns] == [(2023, "A"), (2024, "E")]
+    rev = next(r for r in proj.rows if r.label == "Revenue")
+    assert rev.values == ["$400.00M", "$465.60M"]  # verbatim, never re-derived
+    # A metric absent for a period is a None cell -- never interpolated.
+    gap_row = next(r for r in proj.rows if None in r.values)
+    assert gap_row.values.count(None) == 1
+
+
+def test_projections_none_for_a_single_period():
+    # One period is the headline figure set (shown above), not a projection grid.
+    claims = [
+        _claim(attribute="revenue", normalized=497_200_000, period_year=2023, period_kind="A")
+    ]
+    assert build_financials_projections(claims, company="AcmeCo") is None
+
+
+def test_projections_none_for_a_claimless_deal():
+    assert build_financials_projections([], company="AcmeCo") is None
+
+
+def test_projections_marks_a_year_forward_if_any_figure_is():
+    # A year carrying a projected figure is marked Projected for the whole column,
+    # so a forward period is never mislabelled Actual.
+    claims = [
+        _claim(attribute="revenue", normalized=400_000_000, period_year=2023, period_kind="A"),
+        _claim(attribute="revenue", normalized=500_000_000, period_year=2025, period_kind="A"),
+        _claim(attribute="ebit", normalized=90_000_000, period_year=2025, period_kind="P"),
+    ]
+
+    proj = build_financials_projections(claims, company="AcmeCo")
+
+    assert proj is not None
+    kinds = {c.year: c.kind for c in proj.columns}
+    assert kinds == {2023: "A", 2025: "P"}

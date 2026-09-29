@@ -95,6 +95,30 @@ class FinancialTrendMetric:
     points: list[TrendPoint]  # ascending by year; only metrics with >= 2 years appear
 
 
+@dataclass(frozen=True)
+class ProjectionColumn:
+    year: int
+    kind: str  # "A" (actual) | "E" (management estimate) | "P" (projected)
+
+
+@dataclass(frozen=True)
+class ProjectionRow:
+    label: str
+    values: list[str | None]  # aligned to the columns; _fmt_value verbatim, None when absent
+
+
+@dataclass(frozen=True)
+class FinancialProjections:
+    columns: list[ProjectionColumn]
+    rows: list[ProjectionRow]
+
+
+# period_kind severity for choosing a column's overall marker: a year is shown as
+# Projected/Estimate if ANY of its figures carry that kind, so a forward column is
+# never quietly labelled Actual.
+_KIND_SEVERITY = {"A": 0, "E": 1, "P": 2}
+
+
 # The headline lines a multi-year trend is worth drawing, in display order. The
 # same canonical metric keys build_financials_view uses; a metric appears only
 # when the deal actually reports it across two or more periods.
@@ -386,3 +410,75 @@ def build_financials_trend(
             )
         )
     return trend
+
+
+def build_financials_projections(
+    claims: Sequence[Claim],
+    *,
+    dashboard_structure: dict[str, Any] | None = None,
+    company: str | None = None,
+) -> FinancialProjections | None:
+    """The Financial Projections grid -- year-by-year actuals, management estimates
+    and projections -- from the SAME claims spine the statement sections and the
+    3-Year Trend use, replacing the unwritten memo_json the FE card read before.
+
+    Metrics are rows (income statement -> profitability -> balance sheet -> cash flow
+    -> operating, via _SECTION_ORDER); periods are columns, each marked Actual /
+    Estimate / Projected from the claims' period_kind (a column is marked forward if
+    ANY of its figures are). Values are copied verbatim (_fmt_value), never
+    re-derived or modelled -- an absent (metric, period) cell is None, not an
+    interpolation. Returns None when the deal reports fewer than two periods: a single
+    period is the headline figure set (already shown above), not a projection grid."""
+    rows, _canonical_rank = _headline_claims(
+        claims,
+        dashboard_structure=dashboard_structure,
+        company=company,
+        include_web=True,
+    )
+    labels = _labels_by_key(rows)
+
+    # Best claim per (metric, year) -- the same _prefer rule the trend uses, so the
+    # grid and the trend never disagree on which figure a cell shows.
+    best: dict[tuple[str, int], Claim] = {}
+    for claim, metric_key, _label in rows:
+        if claim.period_year is None or metric_key not in _SECTION_ORDER:
+            continue
+        key = (metric_key, claim.period_year)
+        current = best.get(key)
+        if current is None or _prefer(claim, current):
+            best[key] = claim
+    if not best:
+        return None
+
+    years = sorted({year for _metric, year in best})
+    if len(years) < 2:
+        return None
+
+    # A column's kind is the most-forward period_kind of any figure in that year, so a
+    # year carrying a projected figure is never mislabelled Actual.
+    col_kind: dict[int, str] = {}
+    for (_metric, year), claim in best.items():
+        kind = claim.period_kind if claim.period_kind in _KIND_SEVERITY else "A"
+        if year not in col_kind or _KIND_SEVERITY[kind] > _KIND_SEVERITY[col_kind[year]]:
+            col_kind[year] = kind
+    columns = [ProjectionColumn(year=year, kind=col_kind[year]) for year in years]
+
+    by_metric: dict[str, dict[int, Claim]] = defaultdict(dict)
+    for (metric_key, year), claim in best.items():
+        by_metric[metric_key][year] = claim
+
+    projection_rows = [
+        ProjectionRow(
+            label=labels.get(metric_key, metric_key),
+            values=[
+                _fmt_value(by_metric[metric_key][year].value)
+                if year in by_metric[metric_key]
+                else None
+                for year in years
+            ],
+        )
+        for metric_key in sorted(
+            by_metric, key=lambda m: _SECTION_ORDER.get(m, len(_SECTION_ORDER))
+        )
+    ]
+    return FinancialProjections(columns=columns, rows=projection_rows)

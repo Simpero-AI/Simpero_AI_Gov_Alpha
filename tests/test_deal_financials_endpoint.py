@@ -98,7 +98,43 @@ def test_empty_lists_when_no_financial_claims(client, seeded_org, seeded_deal):
         "cashFlow": [],
         "operating": [],
         "trend": [],
+        "projections": None,
     }
+
+
+def test_projections_grid_serializes_across_periods(client, owner_conn, seeded_org, seeded_deal):
+    """A deal reporting a metric across >= 2 periods returns a `projections` grid:
+    period columns marked A/E, and a metric row of verbatim figure strings."""
+    org_pk = seeded_org["org_pk"]
+
+    def _seed(year: int, kind: str, normalized: int) -> None:
+        value = {
+            "raw": f"${normalized / 1e6:.1f}M",
+            "normalized": normalized,
+            "unit": "USD",
+            "value_type": "currency",
+        }
+        with owner_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO claims (org_id, deal_id, entity, attribute, attribute_raw, value, kind, "
+                "page, char_start, char_end, status, verification_method, period_year, period_kind) "
+                "VALUES (%s, %s, 'Acme', 'revenue', 'Revenue', %s::jsonb, 'pdf', 3, %s, %s, 'cited', "
+                "'exact_span', %s, %s)",
+                (org_pk, seeded_deal, json.dumps(value), 100 + year, 120 + year, year, kind),
+            )
+
+    _seed(2023, "A", 400_000_000)
+    _seed(2024, "E", 465_600_000)
+    _authed(seeded_org["clerk_org_id"], "user-1")
+
+    resp = client.get(f"/deals/{seeded_deal}/financials")
+
+    assert resp.status_code == 200
+    proj = resp.json()["projections"]
+    assert proj is not None
+    assert [(c["year"], c["kind"]) for c in proj["columns"]] == [(2023, "A"), (2024, "E")]
+    rev = next(r for r in proj["rows"] if r["label"] == "Revenue")
+    assert rev["values"] == ["$400.00M", "$465.60M"]
 
 
 def test_returns_income_statement_with_camelcase_wire_keys(
@@ -119,6 +155,7 @@ def test_returns_income_statement_with_camelcase_wire_keys(
         "cashFlow",
         "operating",
         "trend",
+        "projections",
     }
     (fact,) = body["incomeStatement"]
     # Every fact field on the wire, sourceUrl INCLUDED (serialized even when null).
