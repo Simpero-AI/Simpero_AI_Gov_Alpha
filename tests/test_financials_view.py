@@ -524,6 +524,38 @@ def test_trend_is_empty_for_a_claimless_deal():
     assert build_financials_trend([], company="AcmeCo") == []
 
 
+def test_trend_points_carry_per_year_trust_status_and_citation():
+    # Each trend point mirrors the statement rows' provenance so the FE can badge a
+    # corroborated year: a prior-year figure that reached `verified` (its EDGAR
+    # corroboration agreed) reads as verified on the trend, not an un-badged number.
+    ds = uuid.uuid4()
+    claims = [
+        _claim(
+            attribute="revenue",
+            normalized=400_000_000,
+            period_year=2022,
+            period_kind="A",
+            status="cited",
+            data_source_id=ds,
+        ),
+        _claim(
+            attribute="revenue",
+            normalized=497_200_000,
+            period_year=2023,
+            period_kind="A",
+            status="verified",
+            data_source_id=ds,
+        ),
+    ]
+
+    (rev,) = build_financials_trend(claims, filenames={ds: "CIM.pdf"}, company="AcmeCo")
+
+    by_year = {p.year: p for p in rev.points}
+    assert by_year[2022].status == "cited"
+    assert by_year[2023].status == "verified"
+    assert by_year[2023].citation is not None and "CIM.pdf" in by_year[2023].citation
+
+
 def test_projections_builds_a_year_by_year_grid_with_kind_markers():
     claims = [
         _claim(attribute="revenue", normalized=400_000_000, period_year=2023, period_kind="A"),
@@ -541,6 +573,52 @@ def test_projections_builds_a_year_by_year_grid_with_kind_markers():
     # A metric absent for a period is a None cell -- never interpolated.
     gap_row = next(r for r in proj.rows if None in r.values)
     assert gap_row.values.count(None) == 1
+
+
+def test_projection_cells_carry_status_aligned_to_values():
+    # Each grid cell carries its figure's trust status, aligned by index to `values`,
+    # so the FE badges a corroborated actual distinctly from a forward projection; an
+    # absent (metric, period) cell carries status=None (its value is None too).
+    claims = [
+        _claim(
+            attribute="revenue",
+            normalized=400_000_000,
+            period_year=2023,
+            period_kind="A",
+            status="verified",
+        ),
+        _claim(
+            attribute="revenue",
+            normalized=520_000_000,
+            period_year=2024,
+            period_kind="P",
+            status="cited",
+        ),
+        # net_income only in 2023 -> its 2024 cell is an absent (None) cell.
+        _claim(
+            attribute="net_income",
+            normalized=50_000_000,
+            period_year=2023,
+            period_kind="A",
+            status="verified",
+        ),
+    ]
+
+    proj = build_financials_projections(claims, company="AcmeCo")
+
+    assert proj is not None
+    years = [c.year for c in proj.columns]
+    rev = next(r for r in proj.rows if r.label == "Revenue")
+    assert len(rev.cells) == len(rev.values) == len(years)
+    by_year = dict(zip(years, rev.cells, strict=True))
+    assert by_year[2023].status == "verified"
+    assert by_year[2024].status == "cited"
+
+    ni = next(r for r in proj.rows if r.label == "Net Income")
+    ni_by_year = dict(zip(years, ni.cells, strict=True))
+    # The absent 2024 net-income cell is status=None, aligned to a None value.
+    assert ni_by_year[2024].status is None
+    assert ni.values[years.index(2024)] is None
 
 
 def test_projections_none_for_a_single_period():

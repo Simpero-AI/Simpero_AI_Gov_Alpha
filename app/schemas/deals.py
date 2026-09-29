@@ -454,11 +454,19 @@ class FinancialFactResponse(CamelModel):
 class FinancialTrendPointResponse(CamelModel):
     """One (period, value) point in a metric's multi-year series. `value` is
     PRE-FORMATTED ("$497.2M", "42%"), `period` is the rendered label ("FY23",
-    "FY24E"), and `year` is the raw period year for x-axis ordering."""
+    "FY24E"), and `year` is the raw period year for x-axis ordering. `status` is the
+    trust status (verified/partially_verified/cited/conflicted/inconclusive) — which
+    already reflects the per-year external corroboration verdict — so the trend can
+    badge a corroborated year; `citation` is the human "file · p.N" (or web URL);
+    `reconciliationMismatch` flags a figure that failed the arithmetic check."""
 
     period: str
     value: str
     year: int
+    status: str = "cited"
+    citation: str | None = None
+    source_url: str | None = None
+    reconciliation_mismatch: bool = False
 
 
 class FinancialTrendMetricResponse(CamelModel):
@@ -478,13 +486,28 @@ class FinancialProjectionColumnResponse(CamelModel):
     kind: str
 
 
+class FinancialProjectionCellResponse(CamelModel):
+    """Per-cell provenance for one figure in a projection row, aligned by index to
+    `values`. `status` is null for an absent cell (its value is null too); otherwise
+    the trust status so the grid can badge a corroborated actual distinctly from a
+    forward projection; `citation` is the human "file · p.N" (or web URL);
+    `reconciliationMismatch` flags a figure that failed the arithmetic check."""
+
+    status: str | None = None
+    citation: str | None = None
+    source_url: str | None = None
+    reconciliation_mismatch: bool = False
+
+
 class FinancialProjectionRowResponse(CamelModel):
     """One metric row of the Financial Projections grid: the metric label and its
     values aligned to the columns (a pre-formatted figure string, or null when the
-    deal reports no figure for that metric in that period — never an interpolation)."""
+    deal reports no figure for that metric in that period — never an interpolation).
+    `cells` carries each value's per-cell provenance, aligned by index to `values`."""
 
     label: str
     values: list[str | None]
+    cells: list[FinancialProjectionCellResponse] = []
 
 
 class FinancialProjectionsResponse(CamelModel):

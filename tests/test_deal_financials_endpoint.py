@@ -135,6 +135,16 @@ def test_projections_grid_serializes_across_periods(client, owner_conn, seeded_o
     assert [(c["year"], c["kind"]) for c in proj["columns"]] == [(2023, "A"), (2024, "E")]
     rev = next(r for r in proj["rows"] if r["label"] == "Revenue")
     assert rev["values"] == ["$400.00M", "$465.60M"]
+    # Per-cell provenance rides alongside, aligned to `values`, in camelCase — so the
+    # grid can badge each figure's trust status (both seeded `cited` here).
+    assert len(rev["cells"]) == len(rev["values"])
+    assert [c["status"] for c in rev["cells"]] == ["cited", "cited"]
+    assert set(rev["cells"][0].keys()) == {
+        "status",
+        "citation",
+        "sourceUrl",
+        "reconciliationMismatch",
+    }
 
 
 def test_returns_income_statement_with_camelcase_wire_keys(

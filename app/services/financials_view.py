@@ -87,6 +87,16 @@ class TrendPoint:
     period: str  # "FY2023" (or "FY2024E") -- _fmt_period carries the actual/est marker
     value: str  # formatted verbatim by _fmt_value, never re-derived
     year: int  # the raw period_year, for x-axis ordering on the FE
+    # Per-point provenance, mirroring FinancialFact so the FE can badge a trend
+    # figure with the SAME signal the statement rows show: `status` is the claim's
+    # rolled-up trust (verified/partially_verified/cited/conflicted/inconclusive),
+    # which already reflects the per-year EDGAR corroboration verdict; `citation`
+    # is the human "file · p.N" (or web URL). A prior-year revenue that EDGAR
+    # confirmed thus reads as `verified` on the trend, not just an un-badged number.
+    status: str = "cited"
+    citation: str | None = None
+    source_url: str | None = None
+    reconciliation_mismatch: bool = False
 
 
 @dataclass(frozen=True)
@@ -102,9 +112,24 @@ class ProjectionColumn:
 
 
 @dataclass(frozen=True)
+class ProjectionCell:
+    """Per-cell provenance for one (metric, period) figure in the projections grid,
+    aligned by index to ProjectionRow.values. `status` is None for an ABSENT cell
+    (its value is None too); otherwise the claim's rolled-up trust status, so the
+    grid can badge a corroborated ACTUAL column distinctly from a forward E/P
+    projection that no historical registry can confirm."""
+
+    status: str | None
+    citation: str | None = None
+    source_url: str | None = None
+    reconciliation_mismatch: bool = False
+
+
+@dataclass(frozen=True)
 class ProjectionRow:
     label: str
     values: list[str | None]  # aligned to the columns; _fmt_value verbatim, None when absent
+    cells: list[ProjectionCell]  # aligned to `values`; ProjectionCell(status=None) where absent
 
 
 @dataclass(frozen=True)
@@ -395,6 +420,8 @@ def build_financials_view(
 def build_financials_trend(
     claims: Sequence[Claim],
     *,
+    filenames: Mapping[uuid.UUID, str] | None = None,
+    source_urls: Mapping[uuid.UUID, str] | None = None,
     dashboard_structure: dict[str, Any] | None = None,
     company: str | None = None,
 ) -> list[FinancialTrendMetric]:
@@ -446,6 +473,10 @@ def build_financials_trend(
                         period=_fmt_period(claim.period_year, claim.period_kind),
                         value=_fmt_value(claim.value),
                         year=year,
+                        status=claim.status,
+                        citation=_citation(claim, filenames or {}),
+                        source_url=_source_url(claim, source_urls),
+                        reconciliation_mismatch=_reconciliation_mismatch(claim),
                     )
                     for year, claim in points
                 ],
@@ -457,6 +488,8 @@ def build_financials_trend(
 def build_financials_projections(
     claims: Sequence[Claim],
     *,
+    filenames: Mapping[uuid.UUID, str] | None = None,
+    source_urls: Mapping[uuid.UUID, str] | None = None,
     dashboard_structure: dict[str, Any] | None = None,
     company: str | None = None,
 ) -> FinancialProjections | None:
@@ -516,6 +549,20 @@ def build_financials_projections(
                 _fmt_value(by_metric[metric_key][year].value)
                 if year in by_metric[metric_key]
                 else None
+                for year in years
+            ],
+            # Per-cell provenance aligned to `values`, so the FE badges each figure
+            # with its trust status (a corroborated actual vs an un-confirmable
+            # forward projection). An absent (metric, year) cell carries status=None.
+            cells=[
+                ProjectionCell(
+                    status=by_metric[metric_key][year].status,
+                    citation=_citation(by_metric[metric_key][year], filenames or {}),
+                    source_url=_source_url(by_metric[metric_key][year], source_urls),
+                    reconciliation_mismatch=_reconciliation_mismatch(by_metric[metric_key][year]),
+                )
+                if year in by_metric[metric_key]
+                else ProjectionCell(status=None)
                 for year in years
             ],
         )
