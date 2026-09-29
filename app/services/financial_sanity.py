@@ -82,13 +82,56 @@ def _exceeds(smaller: float, larger: float) -> bool:
     return smaller - larger > _REL_SLACK * max(abs(smaller), abs(larger), 1.0)
 
 
+def individually_implausible(figures: Mapping[str, tuple[float, str]]) -> set[str]:
+    """The subset of implausible keys whose flag pins a SPECIFIC figure as wrong with
+    high confidence -- a negative balance-sheet stock, a margin that contradicts its
+    own ratio, or a net income mislabelled from a cash-flow line. Unlike the
+    accounting IDENTITIES/ordering and the 4-order magnitude heuristic in
+    flag_implausible (which say "this relationship doesn't reconcile" / "this scale
+    looks off", with an ambiguous culprit), these name the wrong line, so a consumer
+    can DROP it rather than badge the whole statement. `figures` is ONE
+    (entity, period) statement."""
+    val = {k: v for k, (v, _t) in figures.items()}
+    flagged: set[str] = set()
+
+    # Sign: a balance-sheet stock is never negative. A negative one is a cash-flow
+    # delta or another line mis-canonicalised onto the stock -- the figure shown is
+    # not the stock at all.
+    flagged |= {k for k in _NON_NEGATIVE_STOCKS if k in val and val[k] < 0}
+
+    # A materially-negative net income while operating income (EBIT) is strongly
+    # positive is almost always a cash-flow "net change in cash" line mis-labelled as
+    # net income: a genuine loss would EXCEED operating income (net_income < -ebit).
+    if (
+        "net_income" in val
+        and "ebit" in val
+        and val["ebit"] > 0
+        and -val["ebit"] < val["net_income"] < 0
+    ):
+        flagged.add("net_income")
+
+    # A stated margin must agree with its own ratio (a 2.3% "gross margin" beside a
+    # 71% gross_profit/revenue is a wrong cell / common-size %). Normalise the stored
+    # margin to a fraction first, since the percent convention varies.
+    for margin_key, (num_key, den_key) in _MARGIN_RATIO.items():
+        if all(k in val for k in (margin_key, num_key, den_key)) and val[den_key] != 0:
+            stored = val[margin_key]
+            stored_fraction = stored / 100 if abs(stored) > 1.5 else stored
+            if abs(stored_fraction - val[num_key] / val[den_key]) > _MARGIN_SLACK:
+                flagged.add(margin_key)
+
+    return flagged
+
+
 def flag_implausible(figures: Mapping[str, tuple[float, str]]) -> set[str]:
     """The canonical metric keys among `figures` that cannot be internally
     consistent. `figures` is ONE statement -- a single (entity, period) -- mapping
     a canonical metric key to (normalized_value, value_type). Returns the keys
     implicated in a failed accounting identity, an impossible income-statement
-    ordering, or an implausible magnitude; empty when everything reconciles or too
-    little is present to judge. Deterministic and side-effect-free."""
+    ordering, an implausible magnitude, a wrong sign, or a margin that contradicts
+    its ratio; empty when everything reconciles or too little is present to judge.
+    Deterministic and side-effect-free. Superset of individually_implausible (which
+    is the specific-figure subset; the extra flags here are ambiguous relations)."""
     val = {k: v for k, (v, _t) in figures.items()}
     flagged: set[str] = set()
 
@@ -132,33 +175,14 @@ def flag_implausible(figures: Mapping[str, tuple[float, str]]) -> set[str]:
         flagged |= {"ebit", "ebitda"}
 
     # --- Magnitude outliers: a currency figure >= 4 orders below the statement's
-    # largest currency figure is a scale mis-detection, not a real line item.
+    # largest currency figure is a scale mis-detection. Kept a BADGE (not an
+    # individually_implausible drop): the 4-order heuristic is not certain enough to
+    # silently remove a line, unlike the sign/margin/net-income flags below.
     currency = {k: abs(v) for k, (v, t) in figures.items() if t in _CURRENCY_TYPES and v != 0}
     if len(currency) >= 2:
         ref = max(currency.values())
         if ref >= _MAGNITUDE_FLOOR:
             flagged |= {k for k, mag in currency.items() if mag * _MAGNITUDE_RATIO < ref}
 
-    # --- Sign: a balance-sheet stock is never negative. A negative one is a
-    # cash-flow delta or another line mis-canonicalised onto the stock, so the
-    # figure shown/narrated is not the stock at all -- flag it.
-    flagged |= {k for k in _NON_NEGATIVE_STOCKS if k in val and val[k] < 0}
-
-    # --- A materially-negative net income while operating income (EBIT) is strongly
-    # positive is almost always a cash-flow "net change in cash" line mis-labelled as
-    # net income: a genuine loss would have to EXCEED operating income (net_income <
-    # -ebit). A shallower negative beside a positive EBIT is the mislabel -- flag it.
-    if has("net_income", "ebit") and val["ebit"] > 0 and -val["ebit"] < val["net_income"] < 0:
-        flagged.add("net_income")
-
-    # --- A stated margin must agree with its own ratio (a 2.3% "gross margin" beside
-    # a 71% gross_profit/revenue is a wrong cell / common-size %). Normalise the
-    # stored margin to a fraction first, since the percent convention varies.
-    for margin_key, (num_key, den_key) in _MARGIN_RATIO.items():
-        if has(margin_key, num_key, den_key) and val[den_key] != 0:
-            stored = val[margin_key]
-            stored_fraction = stored / 100 if abs(stored) > 1.5 else stored
-            if abs(stored_fraction - val[num_key] / val[den_key]) > _MARGIN_SLACK:
-                flagged.add(margin_key)
-
-    return flagged
+    # --- Specific-figure flags (sign, net-income mislabel, margin) -- the DROP set.
+    return flagged | individually_implausible(figures)

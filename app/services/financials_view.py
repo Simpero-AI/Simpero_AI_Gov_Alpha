@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.models.claim import Claim
-from app.services.financial_sanity import flag_implausible
+from app.services.financial_sanity import flag_implausible, individually_implausible
 from app.services.screening_materials import (
     _HEADLINE_LABELS,
     _citation,
@@ -281,10 +281,18 @@ def build_financials_view(
                 float(normalized),
                 value.get("value_type") or "",
             )
+    # `implausible` (all flags) badges a shaky figure; `individually_wrong` (the
+    # specific-figure subset -- wrong sign, margin-vs-ratio, magnitude, mislabelled
+    # net income) is DROPPED entirely, since the wrong line is known. An accounting
+    # IDENTITY/ordering failure is only in `implausible` (ambiguous which operand),
+    # so it is badged, not dropped -- dropping all its operands would lose the data.
     implausible: set[tuple[str | None, int | None, str]] = set()
+    individually_wrong: set[tuple[str | None, int | None, str]] = set()
     for (entity, period_year), figures in sanity_groups.items():
         for flagged_key in flag_implausible(figures):
             implausible.add((entity, period_year, flagged_key))
+        for wrong_key in individually_implausible(figures):
+            individually_wrong.add((entity, period_year, wrong_key))
 
     partitioned: dict[str, list[tuple[str, Claim]]] = {name: [] for name in _SECTIONS}
     for metric_key, claim in best.items():
@@ -315,6 +323,7 @@ def build_financials_view(
                 ),
             )
             for metric_key, claim in sorted(items, key=_sort_key)
+            if (claim.entity, claim.period_year, metric_key) not in individually_wrong
         ]
 
     return FinancialsView(
