@@ -470,13 +470,41 @@ class FinancialTrendMetricResponse(CamelModel):
     points: list[FinancialTrendPointResponse]
 
 
+class FinancialProjectionColumnResponse(CamelModel):
+    """One period column of the Financial Projections grid: the fiscal year and its
+    kind marker — A (actual), E (management estimate) or P (projected)."""
+
+    year: int
+    kind: str
+
+
+class FinancialProjectionRowResponse(CamelModel):
+    """One metric row of the Financial Projections grid: the metric label and its
+    values aligned to the columns (a pre-formatted figure string, or null when the
+    deal reports no figure for that metric in that period — never an interpolation)."""
+
+    label: str
+    values: list[str | None]
+
+
+class FinancialProjectionsResponse(CamelModel):
+    """GET /deals/{id}/financials `projections` — the year-by-year statement grid
+    (actuals + management estimates + projections) from the claims spine. Null when
+    the deal reports fewer than two periods (a single period is the headline figure
+    set, not a projection grid)."""
+
+    columns: list[FinancialProjectionColumnResponse]
+    rows: list[FinancialProjectionRowResponse]
+
+
 class FinancialsViewResponse(CamelModel):
     """GET /deals/{id}/financials — the Financials tab's claims-driven content:
     the deal's trusted headline metrics partitioned into five statement sections
     (income statement, profitability, balance sheet, cash flow, operating), plus a
-    multi-year `trend` per headline P&L metric. Each list is empty when the deal
-    has no backing claims (the tab then renders "information not available"); never
-    404s for a claim-less deal. Claims-only and LLM-free, the same curation the
+    multi-year `trend` per headline P&L metric and a `projections` grid (year-by-year
+    actuals/estimates/projections). Each list is empty (and `projections` null) when
+    the deal has no backing claims (the tab then renders "information not available");
+    never 404s for a claim-less deal. Claims-only and LLM-free, the same curation the
     screening extracted panel runs, re-partitioned."""
 
     income_statement: list[FinancialFactResponse]
@@ -485,6 +513,7 @@ class FinancialsViewResponse(CamelModel):
     cash_flow: list[FinancialFactResponse]
     operating: list[FinancialFactResponse]
     trend: list[FinancialTrendMetricResponse] = []
+    projections: FinancialProjectionsResponse | None = None
 
 
 class CompanyViewResponse(CamelModel):

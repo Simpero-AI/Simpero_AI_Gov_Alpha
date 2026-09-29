@@ -68,6 +68,9 @@ from app.schemas.deals import (
     DealWithLatestMemoResponse,
     EntityResolutionResponse,
     FinancialFactResponse,
+    FinancialProjectionColumnResponse,
+    FinancialProjectionRowResponse,
+    FinancialProjectionsResponse,
     FinancialsViewResponse,
     FinancialTrendMetricResponse,
     FormerNameResponse,
@@ -127,7 +130,11 @@ from app.services.entity_resolution import get_resolver
 from app.services.entity_resolution.types import EntityResolutionError
 from app.services.failure_reasons import error_code_for_message
 from app.services.field_synthesis import SectionSynthesis, SynthCitation, sections_from_json
-from app.services.financials_view import build_financials_trend, build_financials_view
+from app.services.financials_view import (
+    build_financials_projections,
+    build_financials_trend,
+    build_financials_view,
+)
 from app.services.findings_view import (
     FINDING_EVENT_TYPES,
     FINDING_LOGGED,
@@ -810,6 +817,11 @@ async def get_deal_financials(
         dashboard_structure=deal.dashboard_structure,
         company=deal.name,
     )
+    projections = build_financials_projections(
+        claims,
+        dashboard_structure=deal.dashboard_structure,
+        company=deal.name,
+    )
 
     return FinancialsViewResponse(
         income_statement=_to_responses(view.income_statement, FinancialFactResponse),
@@ -818,6 +830,20 @@ async def get_deal_financials(
         cash_flow=_to_responses(view.cash_flow, FinancialFactResponse),
         operating=_to_responses(view.operating, FinancialFactResponse),
         trend=_to_responses(trend, FinancialTrendMetricResponse),
+        projections=(
+            FinancialProjectionsResponse(
+                columns=[
+                    FinancialProjectionColumnResponse(year=c.year, kind=c.kind)
+                    for c in projections.columns
+                ],
+                rows=[
+                    FinancialProjectionRowResponse(label=r.label, values=r.values)
+                    for r in projections.rows
+                ],
+            )
+            if projections is not None
+            else None
+        ),
     )
 
 
