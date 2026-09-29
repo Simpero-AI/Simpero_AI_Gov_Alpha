@@ -68,6 +68,7 @@ from app.schemas.deals import (
     DealWithLatestMemoResponse,
     EntityResolutionResponse,
     FinancialFactResponse,
+    FinancialProjectionCellResponse,
     FinancialProjectionColumnResponse,
     FinancialProjectionRowResponse,
     FinancialProjectionsResponse,
@@ -814,11 +815,15 @@ async def get_deal_financials(
     )
     trend = build_financials_trend(
         claims,
+        filenames=filenames,
+        source_urls=source_urls,
         dashboard_structure=deal.dashboard_structure,
         company=deal.name,
     )
     projections = build_financials_projections(
         claims,
+        filenames=filenames,
+        source_urls=source_urls,
         dashboard_structure=deal.dashboard_structure,
         company=deal.name,
     )
@@ -837,7 +842,19 @@ async def get_deal_financials(
                     for c in projections.columns
                 ],
                 rows=[
-                    FinancialProjectionRowResponse(label=r.label, values=r.values)
+                    FinancialProjectionRowResponse(
+                        label=r.label,
+                        values=r.values,
+                        cells=[
+                            FinancialProjectionCellResponse(
+                                status=c.status,
+                                citation=c.citation,
+                                source_url=c.source_url,
+                                reconciliation_mismatch=c.reconciliation_mismatch,
+                            )
+                            for c in r.cells
+                        ],
+                    )
                     for r in projections.rows
                 ],
             )
