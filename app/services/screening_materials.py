@@ -29,12 +29,14 @@ judgment call handled by a separate LLM pass, not invented deterministically.
 
 import math
 import uuid
+from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from app.models.claim import Claim
 from app.services.entity_resolution.resolved import normalize_name
+from app.services.financial_sanity import flag_implausible
 from app.services.subject_fold import _TRUSTED, fold_subjects, subject_of
 
 # The two E2 catch-all buckets the parser assigns when a fact does not map to a
@@ -644,6 +646,24 @@ def render_claim_facts(
         current = best.get(kp)
         if current is None or _prefer(claim, current):
             best[kp] = claim
+
+    # Sanity gate: drop a figure that fails an accounting-identity / sign / margin
+    # check for its (period) statement, so the LLM insights pass (Risk Assessment)
+    # and the extracted panel never cite an internally-impossible number -- a
+    # negative "net income" that is really a cash-flow line, a 2.3% "gross margin"
+    # beside a 71% ratio, a balance sheet that doesn't reconcile. Grouped per period
+    # (flag_implausible judges ONE statement at a time).
+    by_period: dict[int | None, dict[str, tuple[float, str]]] = defaultdict(dict)
+    for (metric_key, period), claim in best.items():
+        value = claim.value or {}
+        normalized = value.get("normalized")
+        if isinstance(normalized, (int, float)) and not isinstance(normalized, bool):
+            by_period[period][metric_key] = (float(normalized), value.get("value_type") or "")
+    flagged_figures: set[tuple[str, int | None]] = set()
+    for period, figures in by_period.items():
+        for metric_key in flag_implausible(figures):
+            flagged_figures.add((metric_key, period))
+    best = {kp: claim for kp, claim in best.items() if kp not in flagged_figures}
 
     labels = _labels_by_key(rows)
     ordered = sorted(

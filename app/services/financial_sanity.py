@@ -44,6 +44,33 @@ _MAGNITUDE_RATIO = 1e4
 # (a genuine micro-cap), so it is skipped rather than risk a false flag.
 _MAGNITUDE_FLOOR = 1e6
 
+# Balance-sheet STOCKS that are never negative on a real statement: a negative one
+# is a cash-flow delta ("changes in inventory") or another line mis-canonicalised
+# onto the stock. total_equity/net_debt/working_capital are deliberately EXCLUDED --
+# each can legitimately be negative (an insolvent balance sheet, a net-cash company).
+_NON_NEGATIVE_STOCKS = frozenset(
+    {
+        "total_assets",
+        "current_assets",
+        "cash_and_equivalents",
+        "accounts_receivable",
+        "accounts_payable",
+        "inventory",
+        "current_liabilities",
+        "total_liabilities",
+    }
+)
+
+# A stated margin must agree with its own ratio (gross_margin ~= gross_profit /
+# revenue, ...). Percent conventions vary (0.71 vs 71.1), so the stored margin is
+# normalised to a fraction before comparing, within this absolute (fraction) slack.
+_MARGIN_RATIO: dict[str, tuple[str, str]] = {
+    "gross_margin": ("gross_profit", "revenue"),
+    "net_margin": ("net_income", "revenue"),
+    "ebitda_margin": ("ebitda", "revenue"),
+}
+_MARGIN_SLACK = 0.03  # 3 percentage points
+
 
 def _violates_equality(lhs: float, rhs: float) -> bool:
     scale = max(abs(lhs), abs(rhs))
@@ -111,5 +138,27 @@ def flag_implausible(figures: Mapping[str, tuple[float, str]]) -> set[str]:
         ref = max(currency.values())
         if ref >= _MAGNITUDE_FLOOR:
             flagged |= {k for k, mag in currency.items() if mag * _MAGNITUDE_RATIO < ref}
+
+    # --- Sign: a balance-sheet stock is never negative. A negative one is a
+    # cash-flow delta or another line mis-canonicalised onto the stock, so the
+    # figure shown/narrated is not the stock at all -- flag it.
+    flagged |= {k for k in _NON_NEGATIVE_STOCKS if k in val and val[k] < 0}
+
+    # --- A materially-negative net income while operating income (EBIT) is strongly
+    # positive is almost always a cash-flow "net change in cash" line mis-labelled as
+    # net income: a genuine loss would have to EXCEED operating income (net_income <
+    # -ebit). A shallower negative beside a positive EBIT is the mislabel -- flag it.
+    if has("net_income", "ebit") and val["ebit"] > 0 and -val["ebit"] < val["net_income"] < 0:
+        flagged.add("net_income")
+
+    # --- A stated margin must agree with its own ratio (a 2.3% "gross margin" beside
+    # a 71% gross_profit/revenue is a wrong cell / common-size %). Normalise the
+    # stored margin to a fraction first, since the percent convention varies.
+    for margin_key, (num_key, den_key) in _MARGIN_RATIO.items():
+        if has(margin_key, num_key, den_key) and val[den_key] != 0:
+            stored = val[margin_key]
+            stored_fraction = stored / 100 if abs(stored) > 1.5 else stored
+            if abs(stored_fraction - val[num_key] / val[den_key]) > _MARGIN_SLACK:
+                flagged.add(margin_key)
 
     return flagged

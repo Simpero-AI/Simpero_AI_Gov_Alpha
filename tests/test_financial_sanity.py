@@ -103,3 +103,54 @@ def test_equal_gross_profit_and_revenue_within_slack_is_not_flagged():
 def test_too_few_figures_to_judge():
     assert flag_implausible(_cur(revenue=416.0 * B)) == set()
     assert flag_implausible({}) == set()
+
+
+def test_negative_balance_sheet_stock_is_flagged():
+    # A negative inventory/AR/current-assets is a cash-flow delta mis-canonicalised
+    # onto the stock, never a real balance-sheet figure.
+    assert "inventory" in flag_implausible(_cur(inventory=-11.324 * B, total_assets=206.8 * B))
+    assert "current_assets" in flag_implausible(
+        _cur(current_assets=-1.5 * B, total_assets=206.8 * B)
+    )
+
+
+def test_total_equity_may_be_negative_without_a_blanket_sign_flag():
+    # Insolvent equity is legitimate, so a bare negative equity is not sign-flagged.
+    assert "total_equity" not in flag_implausible(_cur(total_equity=-2.0 * B))
+
+
+def test_negative_net_income_beside_positive_ebit_is_flagged():
+    # -8.92B "net income" while EBIT is +130B is a cash-flow line mislabelled: a
+    # genuine loss would have to exceed operating income.
+    assert "net_income" in flag_implausible(_cur(net_income=-8.92 * B, ebit=130.0 * B))
+
+
+def test_a_real_loss_exceeding_operating_income_is_not_flagged():
+    assert "net_income" not in flag_implausible(_cur(net_income=-200.0 * B, ebit=130.0 * B))
+    assert "net_income" not in flag_implausible(_cur(net_income=120.0 * B, ebit=130.0 * B))
+
+
+def test_gross_margin_that_contradicts_its_ratio_is_flagged():
+    # A 2.3% gross margin beside GP/revenue = 71% is a wrong cell / common-size %.
+    figs = {
+        "gross_margin": (0.023, "percent"),
+        "gross_profit": (153.0 * B, "currency"),
+        "revenue": (216.0 * B, "currency"),
+    }
+    assert "gross_margin" in flag_implausible(figs)
+
+
+def test_a_correct_margin_is_not_flagged_in_either_percent_convention():
+    gp, rev = 153.0 * B, 216.0 * B
+    frac = {
+        "gross_margin": (gp / rev, "percent"),
+        "gross_profit": (gp, "currency"),
+        "revenue": (rev, "currency"),
+    }
+    pct = {
+        "gross_margin": (100 * gp / rev, "percent"),
+        "gross_profit": (gp, "currency"),
+        "revenue": (rev, "currency"),
+    }
+    assert "gross_margin" not in flag_implausible(frac)
+    assert "gross_margin" not in flag_implausible(pct)

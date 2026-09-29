@@ -655,6 +655,24 @@ def test_grounding_dedupes_conflicting_values_for_the_same_metric_and_period():
     assert "$328.00M" in revenue_lines[0]
 
 
+def test_render_gates_out_an_internally_impossible_figure():
+    # A -8.92B "net income" beside a +130B EBIT for the same period is an
+    # internally-impossible mislabel (a cash-flow line). The sanity gate drops it,
+    # so the LLM insights pass (Risk Assessment) never cites it; the clean figures
+    # still render.
+    claims = [
+        _claim(attribute="net_income", normalized=-8_920_000_000, period_year=2026),
+        _claim(attribute="ebit", normalized=130_000_000_000, period_year=2026),
+        _claim(attribute="revenue", normalized=216_000_000_000, period_year=2026),
+    ]
+
+    lines = render_claim_facts(claims, dashboard_structure=None)
+
+    assert not any("8.92" in ln for ln in lines)  # the mislabelled net income is gone
+    assert any("$130.00B" in ln for ln in lines)  # EBIT still shown
+    assert any("$216.00B" in ln for ln in lines)  # revenue still shown
+
+
 def test_canonical_attributes_match_the_contract_enum():
     # _is_canonical is an ALLOWLIST against the real canonicalAttribute vocabulary
     # (contracts/claims.schema.json, minus the two catch-alls), not "not a catch-
