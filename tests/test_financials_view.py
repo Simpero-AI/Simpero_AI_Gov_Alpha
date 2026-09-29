@@ -94,6 +94,96 @@ def _all_facts(view) -> dict[str, FinancialFact]:
     return facts
 
 
+def test_financials_view_drops_an_individually_wrong_figure():
+    # A negative inventory is a cash-flow delta mis-canonicalised onto the stock --
+    # the wrong line is KNOWN, so the tab DROPS it rather than badge it; the valid
+    # figure alongside it stays.
+    claims = [
+        _claim(
+            attribute="inventory", normalized=-11_324_000_000, period_year=2026, period_kind="A"
+        ),
+        _claim(
+            attribute="total_assets", normalized=206_800_000_000, period_year=2026, period_kind="A"
+        ),
+    ]
+
+    facts = _all_facts(build_financials_view(claims, filenames={}, company="AcmeCo"))
+
+    assert "Inventory" not in facts  # individually-wrong figure dropped
+    assert "Total Assets" in facts
+
+
+def test_financials_view_badges_but_keeps_an_ambiguous_identity_failure():
+    # Assets != Liabilities + Equity: which operand is wrong is ambiguous, so all
+    # three are BADGED and still shown -- dropping them would lose the statement.
+    claims = [
+        _claim(
+            attribute="total_assets", normalized=206_800_000_000, period_year=2026, period_kind="A"
+        ),
+        _claim(
+            attribute="total_liabilities",
+            normalized=49_510_000_000,
+            period_year=2026,
+            period_kind="A",
+        ),
+        _claim(
+            attribute="total_equity", normalized=206_800_000_000, period_year=2026, period_kind="A"
+        ),
+    ]
+
+    facts = _all_facts(build_financials_view(claims, filenames={}, company="AcmeCo"))
+
+    assert {"Total Assets", "Total Liabilities", "Total Equity"} <= set(facts)
+    assert facts["Total Assets"].reconciliation_mismatch is True
+    assert facts["Total Equity"].reconciliation_mismatch is True
+
+
+def test_gross_margin_is_derived_when_no_valid_extracted_one_exists():
+    # No gross_margin claim, but GP + revenue present -> a derived Gross Margin
+    # (GP / revenue) fills the profitability section so the Financials tab and the
+    # Summary KPI tile both show a consistent figure instead of "Not available".
+    claims = [
+        _claim(
+            attribute="gross_profit",
+            normalized=153_000_000_000,
+            period_year=2026,
+            period_kind="A",
+        ),
+        _claim(attribute="revenue", normalized=216_000_000_000, period_year=2026, period_kind="A"),
+    ]
+
+    view = build_financials_view(claims, filenames={}, company="AcmeCo")
+
+    gm = next(f for f in view.profitability if f.label == "Gross Margin")
+    assert gm.value == "70.8%"
+    assert gm.citation == "Derived from Revenue and Gross Profit"
+
+
+def test_a_valid_extracted_gross_margin_is_not_replaced_by_a_derived_one():
+    claims = [
+        _claim(
+            attribute="gross_margin",
+            normalized=0.71,
+            value_type="percent",
+            period_year=2026,
+            period_kind="A",
+        ),
+        _claim(
+            attribute="gross_profit",
+            normalized=153_000_000_000,
+            period_year=2026,
+            period_kind="A",
+        ),
+        _claim(attribute="revenue", normalized=216_000_000_000, period_year=2026, period_kind="A"),
+    ]
+
+    view = build_financials_view(claims, filenames={}, company="AcmeCo")
+
+    gms = [f for f in view.profitability if f.label == "Gross Margin"]
+    assert len(gms) == 1
+    assert gms[0].citation != "Derived from Revenue and Gross Profit"
+
+
 def test_read_time_sanity_flags_a_mis_scaled_figure_without_a_stored_flag():
     """The deterministic read-time check lights up reconciliation_mismatch on an
     already-stored deal with NO formula_mismatch flag: a balance-sheet total

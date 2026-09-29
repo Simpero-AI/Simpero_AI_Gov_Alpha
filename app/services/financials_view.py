@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.models.claim import Claim
-from app.services.financial_sanity import flag_implausible
+from app.services.financial_sanity import flag_implausible, individually_implausible
 from app.services.screening_materials import (
     _HEADLINE_LABELS,
     _citation,
@@ -305,10 +305,18 @@ def build_financials_view(
                 float(normalized),
                 value.get("value_type") or "",
             )
+    # `implausible` (all flags) badges a shaky figure; `individually_wrong` (the
+    # specific-figure subset -- wrong sign, margin-vs-ratio, magnitude, mislabelled
+    # net income) is DROPPED entirely, since the wrong line is known. An accounting
+    # IDENTITY/ordering failure is only in `implausible` (ambiguous which operand),
+    # so it is badged, not dropped -- dropping all its operands would lose the data.
     implausible: set[tuple[str | None, int | None, str]] = set()
+    individually_wrong: set[tuple[str | None, int | None, str]] = set()
     for (entity, period_year), figures in sanity_groups.items():
         for flagged_key in flag_implausible(figures):
             implausible.add((entity, period_year, flagged_key))
+        for wrong_key in individually_implausible(figures):
+            individually_wrong.add((entity, period_year, wrong_key))
 
     partitioned: dict[str, list[tuple[str, Claim]]] = {name: [] for name in _SECTIONS}
     for metric_key, claim in best.items():
@@ -339,7 +347,41 @@ def build_financials_view(
                 ),
             )
             for metric_key, claim in sorted(items, key=_sort_key)
+            if (claim.entity, claim.period_year, metric_key) not in individually_wrong
         ]
+
+    # Derive gross margin from gross_profit / revenue when the deal reports no valid
+    # extracted one -- none was extracted, or the extracted figure was dropped as
+    # individually-wrong (the QA "2.3% gross margin" case). Gross margin IS
+    # gross_profit / revenue by definition, so this is a labelled derivation, never a
+    # guess; it feeds both the Financials tab AND the Summary KPI tile, which read the
+    # SAME profitability section -- so a single, consistent margin replaces the old
+    # 71.1% / 2.3% / "Not available" split.
+    gm_label = labels.get("gross_margin", "Gross Margin")
+    if not any(f.label == gm_label for f in built["profitability"]):
+        gp, rev = best.get("gross_profit"), best.get("revenue")
+        if (
+            gp is not None
+            and rev is not None
+            and gp.period_year == rev.period_year
+            and (gp.entity, gp.period_year, "gross_profit") not in individually_wrong
+            and (rev.entity, rev.period_year, "revenue") not in individually_wrong
+        ):
+            gp_val = (gp.value or {}).get("normalized")
+            rev_val = (rev.value or {}).get("normalized")
+            if isinstance(gp_val, (int, float)) and isinstance(rev_val, (int, float)) and rev_val:
+                both_verified = gp.status == "verified" and rev.status == "verified"
+                built["profitability"].append(
+                    FinancialFact(
+                        label="Gross Margin",
+                        value=f"{gp_val / rev_val * 100:.1f}%",
+                        period=_fmt_period(rev.period_year, rev.period_kind),
+                        citation="Derived from Revenue and Gross Profit",
+                        status="verified" if both_verified else "cited",
+                        entity=rev.entity,
+                        source_url=None,
+                    )
+                )
 
     return FinancialsView(
         income_statement=built["income_statement"],
