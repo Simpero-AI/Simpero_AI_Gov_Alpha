@@ -476,5 +476,6 @@ def test_projections_marks_a_year_forward_if_any_figure_is():
 
     proj = build_financials_projections(claims, company="AcmeCo")
 
+    assert proj is not None
     kinds = {c.year: c.kind for c in proj.columns}
     assert kinds == {2023: "A", 2025: "P"}
