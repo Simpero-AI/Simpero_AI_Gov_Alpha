@@ -65,6 +65,35 @@ class FinancialFact:
     reconciliation_mismatch: bool = False
 
 
+# Period kinds that are FORWARD-looking (a management estimate / projection), as
+# opposed to "A" (a reported actual). A forecast is not a filed fact, so no
+# historical registry (EDGAR) can corroborate it.
+_FORWARD_PERIOD_KINDS = frozenset({"E", "P"})
+# Statuses that assert an EXTERNAL-source verdict: `verified` = corroborated by an
+# independent source, `conflicted` = an independent source disagrees. Neither can
+# legitimately apply to a forecast.
+_EXTERNAL_VERDICT_STATUSES = frozenset({"verified", "conflicted"})
+
+
+def _display_status(claim: Claim) -> str:
+    """A figure's trust status for display, with the forward-figure guarantee
+    ENFORCED IN CODE rather than left to EDGAR's data horizon: an estimate/projected
+    period can never carry an external verdict (`verified`/`conflicted`), because no
+    historical registry can corroborate -- or contradict -- a forecast.
+
+    A forward figure that reached `verified` is shown as `partially_verified`
+    (reaching `verified` always implies it was first internally verified, so this
+    only strips the external-corroboration layer, never invents trust); a spurious
+    external `conflict` on a forecast is dropped to `partially_verified` the same
+    way. This decouples the honesty property from whether EDGAR happens to hold a
+    fact for that year -- so a near-current estimate whose year is already filed, or
+    a forecast with a mis-resolved period_year, is never badged externally
+    corroborated. Actuals (`A`/None) pass through unchanged."""
+    if claim.period_kind in _FORWARD_PERIOD_KINDS and claim.status in _EXTERNAL_VERDICT_STATUSES:
+        return "partially_verified"
+    return claim.status
+
+
 def _reconciliation_mismatch(claim: Claim) -> bool:
     """Whether the SIM-372 consistency pass flagged this claim's arithmetic as
     inconsistent. `formula_mismatch` is the flag that pass sets on the derived
@@ -473,7 +502,7 @@ def build_financials_trend(
                         period=_fmt_period(claim.period_year, claim.period_kind),
                         value=_fmt_value(claim.value),
                         year=year,
-                        status=claim.status,
+                        status=_display_status(claim),
                         citation=_citation(claim, filenames or {}),
                         source_url=_source_url(claim, source_urls),
                         reconciliation_mismatch=_reconciliation_mismatch(claim),
@@ -542,30 +571,37 @@ def build_financials_projections(
     for (metric_key, year), claim in best.items():
         by_metric[metric_key][year] = claim
 
-    projection_rows = [
-        ProjectionRow(
-            label=labels.get(metric_key, metric_key),
-            values=[
-                _fmt_value(by_metric[metric_key][year].value)
-                if year in by_metric[metric_key]
-                else None
-                for year in years
-            ],
-            # Per-cell provenance aligned to `values`, so the FE badges each figure
-            # with its trust status (a corroborated actual vs an un-confirmable
-            # forward projection). An absent (metric, year) cell carries status=None.
-            cells=[
-                ProjectionCell(
-                    status=by_metric[metric_key][year].status,
-                    citation=_citation(by_metric[metric_key][year], filenames or {}),
-                    source_url=_source_url(by_metric[metric_key][year], source_urls),
-                    reconciliation_mismatch=_reconciliation_mismatch(by_metric[metric_key][year]),
-                )
-                if year in by_metric[metric_key]
-                else ProjectionCell(status=None)
-                for year in years
-            ],
+    def _cell(claim: Claim) -> ProjectionCell:
+        # Per-cell provenance so the FE badges each figure with its trust status (a
+        # corroborated actual vs an un-confirmable forward projection). _display_status
+        # enforces the forward-figure guarantee: an E/P cell never shows an external
+        # verdict, whatever EDGAR happened to hold for that year.
+        return ProjectionCell(
+            status=_display_status(claim),
+            citation=_citation(claim, filenames or {}),
+            source_url=_source_url(claim, source_urls),
+            reconciliation_mismatch=_reconciliation_mismatch(claim),
         )
+
+    def _row(metric_key: str) -> ProjectionRow:
+        # Build each (value, cell) together from ONE per-year pass, then split, so the
+        # value and its badge cannot drift out of alignment across future edits. An
+        # absent (metric, year) is a None value paired with a status=None cell.
+        per_year = by_metric[metric_key]
+        pairs: list[tuple[str | None, ProjectionCell]] = [
+            (_fmt_value(per_year[year].value), _cell(per_year[year]))
+            if year in per_year
+            else (None, ProjectionCell(status=None))
+            for year in years
+        ]
+        return ProjectionRow(
+            label=labels.get(metric_key, metric_key),
+            values=[value for value, _cell_obj in pairs],
+            cells=[cell for _value, cell in pairs],
+        )
+
+    projection_rows = [
+        _row(metric_key)
         for metric_key in sorted(
             by_metric, key=lambda m: _SECTION_ORDER.get(m, len(_SECTION_ORDER))
         )

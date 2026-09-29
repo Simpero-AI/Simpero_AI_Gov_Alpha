@@ -145,6 +145,19 @@ def test_projections_grid_serializes_across_periods(client, owner_conn, seeded_o
         "sourceUrl",
         "reconciliationMismatch",
     }
+    # The same two-period revenue also feeds the trend; its points serialize the
+    # provenance fields in camelCase (locks in _to_responses' name-matched mapping).
+    trend_rev = next(m for m in resp.json()["trend"] if m["label"] == "Revenue")
+    assert set(trend_rev["points"][0].keys()) == {
+        "period",
+        "value",
+        "year",
+        "status",
+        "citation",
+        "sourceUrl",
+        "reconciliationMismatch",
+    }
+    assert trend_rev["points"][0]["status"] == "cited"
 
 
 def test_returns_income_statement_with_camelcase_wire_keys(

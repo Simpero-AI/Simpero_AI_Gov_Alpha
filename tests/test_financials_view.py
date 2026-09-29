@@ -621,6 +621,80 @@ def test_projection_cells_carry_status_aligned_to_values():
     assert ni.values[years.index(2024)] is None
 
 
+def test_forward_projection_figure_never_shows_an_external_verdict():
+    # Enforced in code, not left to EDGAR's data horizon: an estimate/projected cell
+    # can never read `verified`/`conflicted` (no registry corroborates a forecast),
+    # even if the figure's claim carries that status (e.g. an FY-est whose year is
+    # already filed, or a mis-resolved period_year). The actual column is untouched.
+    claims = [
+        _claim(
+            attribute="revenue",
+            normalized=400_000_000,
+            period_year=2023,
+            period_kind="A",
+            status="verified",
+        ),
+        _claim(
+            attribute="revenue",
+            normalized=620_000_000,
+            period_year=2025,
+            period_kind="P",
+            status="verified",
+        ),
+    ]
+
+    proj = build_financials_projections(claims, company="AcmeCo")
+
+    assert proj is not None
+    years = [c.year for c in proj.columns]
+    rev = next(r for r in proj.rows if r.label == "Revenue")
+    by_year = dict(zip(years, rev.cells, strict=True))
+    assert by_year[2023].status == "verified"  # actual, untouched
+    assert by_year[2025].status == "partially_verified"  # forecast, external verdict stripped
+
+
+def test_forward_trend_point_never_shows_an_external_verdict():
+    claims = [
+        _claim(
+            attribute="revenue",
+            normalized=400_000_000,
+            period_year=2024,
+            period_kind="A",
+            status="verified",
+        ),
+        _claim(
+            attribute="revenue",
+            normalized=520_000_000,
+            period_year=2026,
+            period_kind="E",
+            status="verified",
+        ),
+    ]
+
+    (rev,) = build_financials_trend(claims, company="AcmeCo")
+
+    by_year = {p.year: p.status for p in rev.points}
+    assert by_year[2024] == "verified"  # actual, untouched
+    assert by_year[2026] == "partially_verified"  # estimate, external verdict stripped
+
+
+def test_display_status_strips_external_verdicts_only_for_forward_periods():
+    # Directly cover _display_status: an external verdict (verified/conflicted) on an
+    # E/P period is downgraded to partially_verified; actuals and non-external
+    # statuses pass through unchanged.
+    from app.services.financials_view import _display_status
+
+    def _s(status: str, period_kind: str | None) -> str:
+        return _display_status(_claim(attribute="revenue", period_kind=period_kind, status=status))
+
+    assert _s("verified", "P") == "partially_verified"
+    assert _s("conflicted", "E") == "partially_verified"
+    assert _s("verified", "A") == "verified"  # actual untouched
+    assert _s("verified", None) == "verified"  # unmarked treated as actual
+    assert _s("cited", "P") == "cited"  # not an external verdict, unchanged
+    assert _s("partially_verified", "E") == "partially_verified"
+
+
 def test_projections_none_for_a_single_period():
     # One period is the headline figure set (shown above), not a projection grid.
     claims = [
