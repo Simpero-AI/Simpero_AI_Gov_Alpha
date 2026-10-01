@@ -26,6 +26,7 @@ pooler.
 """
 
 import asyncio
+import logging
 from uuid import UUID, uuid4
 
 from saq.job import TERMINAL_STATUSES, Status
@@ -43,6 +44,8 @@ from app.services.failure_reasons import CREDIT_EXHAUSTED_MESSAGE, PARSER_CREDIT
 from app.services.screening.mandate_rules import selected_rule_ids
 from app.services.screening.rulebook import load_rulebook
 from app.services.screening.workspace_config import load_workspace_config
+
+logger = logging.getLogger(__name__)
 
 # The backend must wait at least as long as the parser can legitimately take,
 # or a slow-but-succeeding parse trips this deadline mid-run and the whole
@@ -90,18 +93,49 @@ async def _set_org(session, clerk_org_id: str) -> None:
     )
 
 
-# Parser rejection codes that demote a verified data_source. Each target must be
-# an edge the one-way trigger allows (92fda2e2a5db, e3a7c5b19d42). pdf_too_large
-# -> quarantined keeps an over-length document out of the "verified" set the
-# documents endpoint and document_count read.
-_REJECTION_STATUS = {"no_extractable_text": "ocr_needed", "pdf_too_large": "quarantined"}
+# A parser rejection means the document is unusable, so by default it demotes a
+# verified data_source to `quarantined` -- otherwise it stays "verified" forever
+# and shows up in GET /deals/{id}/documents and document_count like a success.
+# Defaulting to quarantine means a new parser code is excluded from analysis
+# rather than silently counted. Exceptions:
+#   - no_extractable_text -> ocr_needed (SIM-350 Option A; a distinct, actionable
+#     state rather than a generic quarantine).
+#   - Codes in _NON_DOCUMENT_REJECTIONS mean nothing about the document was
+#     proven bad, so status is left alone and the document stays retryable.
+# SAQ-level failures (job_failed / job_aborted) never reach _apply_outcome --
+# the poll loop records them inline -- so they never demote either.
+# Every target must be an edge the one-way trigger allows (92fda2e2a5db,
+# e3a7c5b19d42).
+_REJECTION_STATUS_OVERRIDES = {"no_extractable_text": "ocr_needed"}
+_NON_DOCUMENT_REJECTIONS = frozenset(
+    {
+        # AI-provider billing/quota block: an account issue, fails every
+        # document alike, recoverable by topping up and re-running.
+        PARSER_CREDIT_REJECTION_CODE,
+        # The Spaces object vanished between verification (which fetched it to
+        # fingerprint it) and parsing -- a storage/config problem, not a bad
+        # document. A misconfigured parser bucket would otherwise quarantine
+        # every document permanently.
+        "source_not_found",
+    }
+)
+
+
+def _demoted_status(result: dict) -> str | None:
+    """The status a verified data_source moves to for this parse result, or
+    None to leave it alone."""
+    if result.get("status") != "rejected":
+        return None
+    code = result.get("code")
+    if code in _NON_DOCUMENT_REJECTIONS:
+        return None
+    return _REJECTION_STATUS_OVERRIDES.get(code or "", "quarantined")
 
 
 async def _apply_outcome(ds_repo: DataSourceRepo, job: dict, result: dict) -> dict:
     """Returns a NEW parse_jobs entry with this job's terminal outcome
-    applied, and — for the rejections in _REJECTION_STATUS — writes
-    data_source.status (SIM-350 Option A: verified -> ocr_needed;
-    pdf_too_large: verified -> quarantined).
+    applied, and -- for a parser rejection -- demotes data_source.status
+    out of "verified" per _demoted_status.
 
     Deliberately builds a new dict rather than mutating `job` in place:
     `job` is one element of the list loaded from run.parse_jobs earlier in
@@ -124,19 +158,30 @@ async def _apply_outcome(ds_repo: DataSourceRepo, job: dict, result: dict) -> di
         "key": result.get("key"),
     }
 
-    new_status = None
-    if result.get("status") == "rejected":
-        new_status = _REJECTION_STATUS.get(result.get("code") or "")
+    new_status = _demoted_status(result)
     if new_status is not None:
         data_source = await ds_repo.get_by_id(UUID(job["data_source_id"]))
         if data_source is not None and data_source.status == "verified":
             # Implementer trap (see the plan's "Blocking prerequisite"):
             # update_status writes fingerprint unconditionally -- pass the
             # row's existing fingerprint, never None, or this wipes the
-            # already-verified hash.
-            await ds_repo.update_status(
-                data_source.id, status=new_status, fingerprint=data_source.fingerprint
+            # already-verified hash. expected_status re-checks "verified" at
+            # write time: if another writer moved the row since the read
+            # above, the update is skipped rather than tripping the one-way
+            # trigger and aborting this whole polling transaction (every
+            # other job's outcome in this batch with it).
+            updated = await ds_repo.update_status(
+                data_source.id,
+                status=new_status,
+                fingerprint=data_source.fingerprint,
+                expected_status="verified",
             )
+            if updated is None:
+                logger.warning(
+                    "data_source %s left verified before it could be demoted to %s; skipped",
+                    data_source.id,
+                    new_status,
+                )
 
     return job
 

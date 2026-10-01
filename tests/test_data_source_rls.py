@@ -354,6 +354,84 @@ async def test_trigger_allows_verified_to_quarantined_then_terminal(
         await repo.update_status(row.id, status="verified", fingerprint=_FINGERPRINT_HASH)
 
 
+async def test_update_status_expected_status_skips_instead_of_raising(
+    db_session, org_a_id, org_a_deal_id
+):
+    """Compare-and-set: a stale "verified" read must lose quietly (None, row
+    untouched) rather than trip the one-way trigger and abort the caller's
+    transaction."""
+    repo = DataSourceRepo(db_session)
+    row = await repo.create(
+        {
+            "org_id": org_a_id,
+            "deal_id": org_a_deal_id,
+            "storage_key": "org-a/key12.pdf",
+            "filename": "a12.pdf",
+            "declared_sha256": _DECLARED_HASH,
+        }
+    )
+    await db_session.flush()
+    await repo.update_status(row.id, status="verified", fingerprint=_FINGERPRINT_HASH)
+    await repo.update_status(row.id, status="ocr_needed", fingerprint=_FINGERPRINT_HASH)
+    await db_session.flush()
+
+    skipped = await repo.update_status(
+        row.id, status="quarantined", fingerprint=_FINGERPRINT_HASH, expected_status="verified"
+    )
+    assert skipped is None
+    status = await db_session.scalar(
+        text("SELECT status FROM data_source WHERE id = :id"), {"id": row.id}
+    )
+    assert status == "ocr_needed"
+
+
+async def test_apply_outcome_survives_status_changed_since_read(
+    db_session, org_a_id, org_a_deal_id
+):
+    """Another writer moves the row after _apply_outcome's read: the
+    demotion is skipped and nothing raises out of _apply_outcome (which
+    would otherwise abort the whole polling batch)."""
+    from types import SimpleNamespace
+
+    from app.jobs.tasks.start_deal_analysis import _apply_outcome
+
+    repo = DataSourceRepo(db_session)
+    row = await repo.create(
+        {
+            "org_id": org_a_id,
+            "deal_id": org_a_deal_id,
+            "storage_key": "org-a/key13.pdf",
+            "filename": "a13.pdf",
+            "declared_sha256": _DECLARED_HASH,
+        }
+    )
+    await db_session.flush()
+    await repo.update_status(row.id, status="verified", fingerprint=_FINGERPRINT_HASH)
+    await db_session.flush()
+    row_id = row.id
+
+    async def stale_get_by_id(id):
+        # The read sees "verified"; a concurrent writer then moves the row
+        # before _apply_outcome gets to its write.
+        await repo.update_status(row_id, status="ocr_needed", fingerprint=_FINGERPRINT_HASH)
+        await db_session.flush()
+        return SimpleNamespace(id=row_id, status="verified", fingerprint=_FINGERPRINT_HASH)
+
+    repo.get_by_id = stale_get_by_id  # type: ignore[method-assign]
+
+    job = await _apply_outcome(
+        repo,
+        {"data_source_id": str(row_id), "outcome": None},
+        {"status": "rejected", "code": "unsupported_format", "message": "Unsupported."},
+    )
+
+    assert job["outcome"] == "rejected"
+    status = await db_session.scalar(
+        text("SELECT status FROM data_source WHERE id = :id"), {"id": row_id}
+    )
+    assert status == "ocr_needed"
+
+
 async def test_trigger_still_blocks_verified_to_mismatch(db_session, org_a_id, org_a_deal_id):
     """The carve-out is specifically verified->ocr_needed -- every other
     post-verified transition is still rejected."""
