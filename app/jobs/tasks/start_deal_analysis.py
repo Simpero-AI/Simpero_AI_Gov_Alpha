@@ -95,7 +95,7 @@ async def _set_org(session, clerk_org_id: str) -> None:
 
 # A parser rejection means the document is unusable, so by default it demotes a
 # verified data_source to `quarantined` -- otherwise it stays "verified" forever
-# and shows up in GET /deals/{id}/documents and document_count like a success.
+# and shows up in GET /deals/{id}/documents like a success.
 # Defaulting to quarantine means a new parser code is excluded from analysis
 # rather than silently counted. Exceptions:
 #   - no_extractable_text -> ocr_needed (SIM-350 Option A; a distinct, actionable

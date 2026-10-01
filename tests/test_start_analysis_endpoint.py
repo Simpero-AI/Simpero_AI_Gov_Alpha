@@ -252,7 +252,7 @@ def test_start_analysis_happy_path(client, owner_conn, seeded_org, seeded_deal, 
         )
         audit_row = cur.fetchone()
         assert audit_row is not None
-        assert audit_row[1]["document_count"] == 1
+        assert audit_row[1]["documents_attempted"] == 1
 
     assert len(mocked_queue) == 1
     job_name, kwargs = mocked_queue[0]

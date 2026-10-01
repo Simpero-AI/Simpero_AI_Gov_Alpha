@@ -421,7 +421,7 @@ async def test_parser_rejection_demotes_data_source_unless_not_a_document_fault(
     expected_status,
 ):
     """A parser rejection must take the document out of the "verified" set,
-    or it keeps showing up in GET /deals/{id}/documents and document_count
+    or it keeps showing up in GET /deals/{id}/documents
     like a real success -- except for rejections that prove nothing about
     the document itself."""
     data_source_id = _seed_verified_data_source(
