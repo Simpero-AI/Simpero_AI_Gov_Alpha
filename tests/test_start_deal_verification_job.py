@@ -166,6 +166,18 @@ def _claim_ids_by_ref(owner_conn, org_pk: int) -> dict[str, str]:
         return {ref: str(cid) for ref, cid in cur.fetchall()}
 
 
+def _claim_probe_by_ref(owner_conn, org_pk: int, claim_ref: str) -> dict[str, Any]:
+    """The value/status fields a re-ingest is meant to refresh, for one claim_ref."""
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "SELECT value->>'normalized', value->>'scale_source', status "
+            "FROM claims WHERE org_id = %s AND claim_ref = %s",
+            (org_pk, claim_ref),
+        )
+        normalized, scale_source, status = cur.fetchone()
+    return {"normalized": float(normalized), "scale_source": scale_source, "status": status}
+
+
 async def test_ingests_claims_and_reconciles_same_page_fact(
     owner_conn, seeded_org, seeded_deal, monkeypatch, mocked_screening_enqueue
 ):
@@ -262,11 +274,13 @@ async def test_reingest_appends_new_claims_preserving_ids_idempotently(
 ):
     """SIM-367: a re-analysis re-extracts the same document, so its deterministic
     claim_refs collide with the first run's on uq_claims_org_data_source_claim_ref.
-    Re-ingest is APPEND-ONLY: the second verification keeps the prior claims AND
-    their UUIDs (write-once screening_result evidence_refs cite claim.id) and inserts
-    only the newly-recovered ref -- rather than fail on the collision (which froze the
-    deal's claim count and halted the chain before screening) OR churn ids by
-    deleting and re-inserting."""
+    Re-ingest REFRESHES-in-place: the second verification keeps every prior claim's
+    UUID (write-once screening_result evidence_refs cite claim.id), rewrites its
+    fields from the new envelope, and inserts the newly-recovered ref -- rather than
+    fail on the collision (which froze the deal's claim count and halted the chain
+    before screening) OR churn ids by deleting and re-inserting. This case re-ingests
+    the two prior refs UNCHANGED (so the row count and ids are stable); the companion
+    test below covers a re-ingest whose value actually changed."""
     org_pk = seeded_org["org_pk"]
     data_source_id = _seed_data_source(owner_conn, org_pk, seeded_deal, "cim.pdf")
 
@@ -353,6 +367,197 @@ async def test_reingest_appends_new_claims_preserving_ids_idempotently(
     assert "c3" in ids_after
 
 
+async def test_reingest_refreshes_a_changed_claims_value_preserving_id(
+    owner_conn, seeded_org, seeded_deal, monkeypatch, mocked_screening_enqueue
+):
+    """The bug behind the empty Corroboration tab: a deal first analysed BEFORE the
+    parser's scale/period fixes stayed frozen, because insert-only re-ingest discarded
+    the corrected row on its claim_ref collision -- so external corroboration kept
+    declining the stale, uncomparable figures on every re-run. Re-ingest now DO-UPDATEs
+    the existing row's CONTENT, so a re-analysis whose parser resolved the scale
+    (assumed_1x -> a real multiplier) lands the corrected value on the SAME claim (id
+    preserved). The verification lifecycle is left to the passes that run after ingest,
+    so the claim stays in an internally-checked status corroboration can reach."""
+    org_pk = seeded_org["org_pk"]
+    data_source_id = _seed_data_source(owner_conn, org_pk, seeded_deal, "cim.pdf")
+
+    def parse_jobs() -> list[dict]:
+        return [
+            {
+                "data_source_id": data_source_id,
+                "filename": "cim.pdf",
+                "storage_key": "org/cim.pdf",
+                "job_key": "job-1",
+                "outcome": "parsed",
+                "code": None,
+                "message": None,
+                "bucket": "test-bucket",
+                "key": "claims/cim.json",
+            }
+        ]
+
+    # First analysis: the pre-fix extraction -- unresolved scale (assumed_1x), so the
+    # magnitude is wrong and EDGAR would decline it (value_not_comparable).
+    stale = _claim_json("c1", page=1, normalized=100.0)
+    assert stale["value"]["scale_source"] == "assumed_1x"
+    run1 = _seed_parsing_run(owner_conn, org_pk, seeded_deal, parse_jobs())
+    verify1 = _seed_verification_run(owner_conn, org_pk, seeded_deal)
+    monkeypatch.setattr(
+        job_module,
+        "get_json_object",
+        lambda bucket, key: {
+            "run_id": run1,
+            "sha256": "a" * 64,
+            "source_file": "cim.pdf",
+            "claims": [stale],
+            "edges": [],
+        },
+    )
+    await job_module.start_deal_verification(
+        {}, analysis_run_id=verify1, parsing_run_id=run1, clerk_org_id=seeded_org["clerk_org_id"]
+    )
+    assert _fetch_run(owner_conn, verify1)["status"] == "successful"
+    id_before = _claim_ids_by_ref(owner_conn, org_pk)["c1"]
+    assert _claim_probe_by_ref(owner_conn, org_pk, "c1")["normalized"] == 100.0
+
+    # Terminalize the queued screening run so the re-analysis's own runs are legal
+    # (uq_analysis_run_active permits one active run per deal), as the prior chain would.
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "UPDATE analysis_run SET status = 'successful' "
+            "WHERE deal_id = %s AND status IN ('queued', 'in_progress')",
+            (seeded_deal,),
+        )
+
+    # Re-analysis: the FIXED extraction -- SAME deterministic ref, resolved scale and
+    # the corrected value.
+    fixed = _claim_json("c1", page=1, normalized=250000000.0)
+    fixed["value"]["scale_source"] = "page_header"
+    fixed["value"]["scale_multiplier"] = 1000000.0
+    run2 = _seed_parsing_run(owner_conn, org_pk, seeded_deal, parse_jobs())
+    verify2 = _seed_verification_run(owner_conn, org_pk, seeded_deal)
+    monkeypatch.setattr(
+        job_module,
+        "get_json_object",
+        lambda bucket, key: {
+            "run_id": run2,
+            "sha256": "a" * 64,
+            "source_file": "cim.pdf",
+            "claims": [fixed],
+            "edges": [],
+        },
+    )
+    await job_module.start_deal_verification(
+        {}, analysis_run_id=verify2, parsing_run_id=run2, clerk_org_id=seeded_org["clerk_org_id"]
+    )
+    assert _fetch_run(owner_conn, verify2)["status"] == "successful"
+
+    # One row, SAME UUID (evidence_refs / corroboration_events FKs stay valid), but its
+    # value and scale caught up to the fixed extraction -- not frozen at the stale 100.
+    assert _count_claims(owner_conn, org_pk) == 1
+    assert _claim_ids_by_ref(owner_conn, org_pk)["c1"] == id_before
+    refreshed = _claim_probe_by_ref(owner_conn, org_pk, "c1")
+    assert refreshed["normalized"] == 250000000.0
+    assert refreshed["scale_source"] == "page_header"
+    # It sits in an internally-checked status (promotion ran, and re-ingest did not drag
+    # it back to `proposed`), so the corroboration pass can reach it with the new value.
+    assert refreshed["status"] != "proposed"
+
+
+async def test_reingest_keeps_a_prior_external_conflict_not_silently_verified(
+    owner_conn, seeded_org, seeded_deal, monkeypatch, mocked_screening_enqueue
+):
+    """Data-integrity guard for the refresh: corroboration_events are append-only across
+    re-analysis generations, and status_rollup infers "an outside source ever disagreed"
+    from the sticky `status == 'conflicted'`, NOT from a per-event flag. So re-ingest must
+    NOT reset a conflicted claim's status -- doing so would orphan the prior run's
+    agrees=False event and make the roll-up read that stale disagreement as an agreement,
+    silently re-marking the claim `verified`. `status`/`verification_method` are excluded
+    from _REINGEST_REFRESH_COLUMNS precisely to prevent that."""
+    org_pk = seeded_org["org_pk"]
+    data_source_id = _seed_data_source(owner_conn, org_pk, seeded_deal, "cim.pdf")
+
+    def parse_jobs() -> list[dict]:
+        return [
+            {
+                "data_source_id": data_source_id,
+                "filename": "cim.pdf",
+                "storage_key": "org/cim.pdf",
+                "job_key": "job-1",
+                "outcome": "parsed",
+                "code": None,
+                "message": None,
+                "bucket": "test-bucket",
+                "key": "claims/cim.json",
+            }
+        ]
+
+    run1 = _seed_parsing_run(owner_conn, org_pk, seeded_deal, parse_jobs())
+    verify1 = _seed_verification_run(owner_conn, org_pk, seeded_deal)
+    monkeypatch.setattr(
+        job_module,
+        "get_json_object",
+        lambda bucket, key: {
+            "run_id": run1,
+            "sha256": "a" * 64,
+            "source_file": "cim.pdf",
+            "claims": [_claim_json("c1", page=1, normalized=100.0)],
+            "edges": [],
+        },
+    )
+    await job_module.start_deal_verification(
+        {}, analysis_run_id=verify1, parsing_run_id=run1, clerk_org_id=seeded_org["clerk_org_id"]
+    )
+    assert _fetch_run(owner_conn, verify1)["status"] == "successful"
+
+    # Simulate the first run's corroboration pass DISAGREEING: an append-only
+    # agrees=False event plus the sticky `conflicted` status it sets (SIM-252).
+    claim_id = _claim_ids_by_ref(owner_conn, org_pk)["c1"]
+    with owner_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO corroboration_events (org_id, claim_id, outside_source, result, agrees) "
+            "VALUES (%s, %s, 'sec_edgar', '{}'::jsonb, false)",
+            (org_pk, claim_id),
+        )
+        cur.execute("UPDATE claims SET status = 'conflicted' WHERE id = %s", (claim_id,))
+        cur.execute(
+            "UPDATE analysis_run SET status = 'successful' "
+            "WHERE deal_id = %s AND status IN ('queued', 'in_progress')",
+            (seeded_deal,),
+        )
+
+    # Re-analysis with a changed value for the SAME ref.
+    run2 = _seed_parsing_run(owner_conn, org_pk, seeded_deal, parse_jobs())
+    verify2 = _seed_verification_run(owner_conn, org_pk, seeded_deal)
+    monkeypatch.setattr(
+        job_module,
+        "get_json_object",
+        lambda bucket, key: {
+            "run_id": run2,
+            "sha256": "a" * 64,
+            "source_file": "cim.pdf",
+            "claims": [_claim_json("c1", page=1, normalized=175.0)],
+            "edges": [],
+        },
+    )
+    await job_module.start_deal_verification(
+        {}, analysis_run_id=verify2, parsing_run_id=run2, clerk_org_id=seeded_org["clerk_org_id"]
+    )
+    assert _fetch_run(owner_conn, verify2)["status"] == "successful"
+    probe = _claim_probe_by_ref(owner_conn, org_pk, "c1")
+
+    # Clean up the append-only event before the fixture teardown deletes claims (its
+    # RESTRICT FK would otherwise block the delete); done before asserting so a failed
+    # assertion can't leave a row that masks the real failure with a teardown error.
+    with owner_conn.cursor() as cur:
+        cur.execute("DELETE FROM corroboration_events WHERE org_id = %s", (org_pk,))
+
+    # The value refreshed, but the external conflict is NOT silently cleared to verified:
+    # status stays conflicted (the stale agrees=False event is not misread as agreement).
+    assert probe["normalized"] == 175.0
+    assert probe["status"] == "conflicted"
+
+
 async def test_reingest_edges_dedupe_within_batch_and_across_runs(
     owner_conn, seeded_org, seeded_deal, monkeypatch, mocked_screening_enqueue
 ):
@@ -411,10 +616,10 @@ async def test_reingest_edges_dedupe_within_batch_and_across_runs(
     # aborting on the unique constraint.
     assert _fetch_run(owner_conn, verify1)["status"] == "successful"
     assert _fetch_edges(owner_conn, org_pk) == [("same_fact", "extraction_reducer")]
-    # Finding 3: the audit count is the number actually inserted, stated next to
-    # the envelope total.
+    # Finding 3: the audit count is the number actually inserted (vs refreshed),
+    # stated next to the envelope total.
     assert (
-        "2 claim(s) ingested (2 in envelope)"
+        "2 claim(s) ingested, 0 refreshed (2 in envelope)"
         in _fetch_run(owner_conn, verify1)["job_comments"][0]["comment"]
     )
 
@@ -438,9 +643,10 @@ async def test_reingest_edges_dedupe_within_batch_and_across_runs(
     assert _fetch_run(owner_conn, verify2)["status"] == "successful"
     assert _fetch_edges(owner_conn, org_pk) == [("same_fact", "extraction_reducer")]
     assert _count_claims(owner_conn, org_pk) == 2
-    # Finding 3 on re-analysis: both refs already exist, so zero newly ingested.
+    # Finding 3 on re-analysis: both refs already exist, so zero newly ingested and
+    # both refreshed in place.
     assert (
-        "0 claim(s) ingested (2 in envelope)"
+        "0 claim(s) ingested, 2 refreshed (2 in envelope)"
         in _fetch_run(owner_conn, verify2)["job_comments"][0]["comment"]
     )
 
