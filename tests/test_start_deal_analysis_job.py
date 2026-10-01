@@ -395,6 +395,37 @@ async def test_all_documents_rejected_no_extractable_text_marks_ocr_needed_and_r
     assert not mocked_verification_enqueue
 
 
+async def test_pdf_too_large_rejection_marks_data_source_quarantined(
+    owner_conn, seeded_org, seeded_deal, monkeypatch, mocked_verification_enqueue
+):
+    """An over-length PDF rejected by the parser's page-count preflight must
+    leave the "verified" set (verified -> quarantined), or it keeps showing up
+    in GET /deals/{id}/documents and document_count like a real success."""
+    data_source_id = _seed_verified_data_source(
+        owner_conn, seeded_org["org_pk"], seeded_deal, "org/long.pdf"
+    )
+    run_id = _seed_run(owner_conn, seeded_org["org_pk"], seeded_deal)
+
+    async def fake_enqueue(storage_key: str, **kwargs) -> str:
+        return "job-key-too-large"
+
+    async def fake_get_job(job_key: str) -> _FakeSaqJob:
+        return _FakeSaqJob(
+            Status.COMPLETE,
+            {"status": "rejected", "code": "pdf_too_large", "message": "PDF has too many pages."},
+        )
+
+    monkeypatch.setattr(job_module, "enqueue_process_document_job", fake_enqueue)
+    monkeypatch.setattr(job_module, "get_parse_job", fake_get_job)
+
+    await job_module.start_deal_analysis(
+        {}, analysis_run_id=run_id, deal_id=seeded_deal, clerk_org_id=seeded_org["clerk_org_id"]
+    )
+
+    assert _fetch_run(owner_conn, run_id)["status"] == "failed"
+    assert _fetch_data_source_status(owner_conn, data_source_id) == "quarantined"
+
+
 async def test_mixed_outcomes_mark_run_successful_not_failed(
     owner_conn, seeded_org, seeded_deal, monkeypatch, mocked_verification_enqueue
 ):

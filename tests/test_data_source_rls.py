@@ -325,6 +325,35 @@ async def test_trigger_still_blocks_ocr_needed_as_a_dead_end(db_session, org_a_i
         await repo.update_status(row.id, status="verified", fingerprint=_FINGERPRINT_HASH)
 
 
+async def test_trigger_allows_verified_to_quarantined_then_terminal(
+    db_session, org_a_id, org_a_deal_id
+):
+    """e3a7c5b19d42: the parser's pdf_too_large rejection lands as
+    verified -> quarantined, and quarantined stays a dead end."""
+    repo = DataSourceRepo(db_session)
+    row = await repo.create(
+        {
+            "org_id": org_a_id,
+            "deal_id": org_a_deal_id,
+            "storage_key": "org-a/key11.pdf",
+            "filename": "a11.pdf",
+            "declared_sha256": _DECLARED_HASH,
+        }
+    )
+    await db_session.flush()
+    await repo.update_status(row.id, status="verified", fingerprint=_FINGERPRINT_HASH)
+    await db_session.flush()
+
+    updated = await repo.update_status(row.id, status="quarantined", fingerprint=_FINGERPRINT_HASH)
+    assert updated is not None
+    assert updated.status == "quarantined"
+    assert updated.fingerprint == _FINGERPRINT_HASH
+    await db_session.flush()
+
+    with pytest.raises(DBAPIError, match="status is final once left pending"):
+        await repo.update_status(row.id, status="verified", fingerprint=_FINGERPRINT_HASH)
+
+
 async def test_trigger_still_blocks_verified_to_mismatch(db_session, org_a_id, org_a_deal_id):
     """The carve-out is specifically verified->ocr_needed -- every other
     post-verified transition is still rejected."""

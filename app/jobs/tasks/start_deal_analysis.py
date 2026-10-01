@@ -90,11 +90,18 @@ async def _set_org(session, clerk_org_id: str) -> None:
     )
 
 
+# Parser rejection codes that demote a verified data_source. Each target must be
+# an edge the one-way trigger allows (92fda2e2a5db, e3a7c5b19d42). pdf_too_large
+# -> quarantined keeps an over-length document out of the "verified" set the
+# documents endpoint and document_count read.
+_REJECTION_STATUS = {"no_extractable_text": "ocr_needed", "pdf_too_large": "quarantined"}
+
+
 async def _apply_outcome(ds_repo: DataSourceRepo, job: dict, result: dict) -> dict:
     """Returns a NEW parse_jobs entry with this job's terminal outcome
-    applied, and — for the no_extractable_text rejection — writes
-    data_source.status (SIM-350, Option A: verified -> ocr_needed is now a
-    legal transition).
+    applied, and — for the rejections in _REJECTION_STATUS — writes
+    data_source.status (SIM-350 Option A: verified -> ocr_needed;
+    pdf_too_large: verified -> quarantined).
 
     Deliberately builds a new dict rather than mutating `job` in place:
     `job` is one element of the list loaded from run.parse_jobs earlier in
@@ -117,7 +124,10 @@ async def _apply_outcome(ds_repo: DataSourceRepo, job: dict, result: dict) -> di
         "key": result.get("key"),
     }
 
-    if result.get("status") == "rejected" and result.get("code") == "no_extractable_text":
+    new_status = None
+    if result.get("status") == "rejected":
+        new_status = _REJECTION_STATUS.get(result.get("code") or "")
+    if new_status is not None:
         data_source = await ds_repo.get_by_id(UUID(job["data_source_id"]))
         if data_source is not None and data_source.status == "verified":
             # Implementer trap (see the plan's "Blocking prerequisite"):
@@ -125,7 +135,7 @@ async def _apply_outcome(ds_repo: DataSourceRepo, job: dict, result: dict) -> di
             # row's existing fingerprint, never None, or this wipes the
             # already-verified hash.
             await ds_repo.update_status(
-                data_source.id, status="ocr_needed", fingerprint=data_source.fingerprint
+                data_source.id, status=new_status, fingerprint=data_source.fingerprint
             )
 
     return job
