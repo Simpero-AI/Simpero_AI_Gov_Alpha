@@ -395,6 +395,70 @@ async def test_all_documents_rejected_no_extractable_text_marks_ocr_needed_and_r
     assert not mocked_verification_enqueue
 
 
+@pytest.mark.parametrize(
+    ("code", "expected_status"),
+    [
+        # The QA-reported case: over the parser's page cap.
+        ("pdf_too_large", "quarantined"),
+        # Guaranteed for every .csv/.pptx upload (Alpha's allow-list accepts
+        # them; the parser's dispatch doesn't).
+        ("unsupported_format", "quarantined"),
+        # A code this app has never seen still quarantines by default.
+        ("some_future_parser_code", "quarantined"),
+        # Account-level billing block, not a bad document: stays retryable.
+        ("anthropic_credit_exhausted", "verified"),
+        # Storage/config problem, not a bad document.
+        ("source_not_found", "verified"),
+    ],
+)
+async def test_parser_rejection_demotes_data_source_unless_not_a_document_fault(
+    owner_conn,
+    seeded_org,
+    seeded_deal,
+    monkeypatch,
+    mocked_verification_enqueue,
+    code,
+    expected_status,
+):
+    """A parser rejection must take the document out of the "verified" set,
+    or it keeps showing up in GET /deals/{id}/documents
+    like a real success -- except for rejections that prove nothing about
+    the document itself."""
+    data_source_id = _seed_verified_data_source(
+        owner_conn, seeded_org["org_pk"], seeded_deal, "org/rejected.pdf"
+    )
+    run_id = _seed_run(owner_conn, seeded_org["org_pk"], seeded_deal)
+
+    async def fake_enqueue(storage_key: str, **kwargs) -> str:
+        return "job-key-rejected"
+
+    async def fake_get_job(job_key: str) -> _FakeSaqJob:
+        return _FakeSaqJob(
+            Status.COMPLETE, {"status": "rejected", "code": code, "message": "Rejected."}
+        )
+
+    monkeypatch.setattr(job_module, "enqueue_process_document_job", fake_enqueue)
+    monkeypatch.setattr(job_module, "get_parse_job", fake_get_job)
+
+    await job_module.start_deal_analysis(
+        {}, analysis_run_id=run_id, deal_id=seeded_deal, clerk_org_id=seeded_org["clerk_org_id"]
+    )
+
+    assert _fetch_run(owner_conn, run_id)["status"] == "failed"
+    assert _fetch_data_source_status(owner_conn, data_source_id) == expected_status
+
+
+def test_demoted_status_mapping():
+    """DB-free pin of the policy the parametrized test above exercises end to end."""
+    demote = job_module._demoted_status
+    assert demote({"status": "parsed"}) is None
+    assert demote({"status": "rejected", "code": "no_extractable_text"}) == "ocr_needed"
+    for code in ("pdf_too_large", "unsupported_format", "corrupt_docx", "zero_byte_xlsx", None):
+        assert demote({"status": "rejected", "code": code}) == "quarantined"
+    assert demote({"status": "rejected", "code": "anthropic_credit_exhausted"}) is None
+    assert demote({"status": "rejected", "code": "source_not_found"}) is None
+
+
 async def test_mixed_outcomes_mark_run_successful_not_failed(
     owner_conn, seeded_org, seeded_deal, monkeypatch, mocked_verification_enqueue
 ):

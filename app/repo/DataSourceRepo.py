@@ -108,7 +108,12 @@ class DataSourceRepo(BaseRepo[DataSource, dict]):
         return result.scalar_one()
 
     async def update_status(
-        self, id: uuid.UUID, status: str, fingerprint: str | None
+        self,
+        id: uuid.UUID,
+        status: str,
+        fingerprint: str | None,
+        *,
+        expected_status: str | None = None,
     ) -> DataSource | None:
         """Sole write path to the mutable columns (status, fingerprint,
         status_updated_at) -- mirrors HumanAuditRepo.append()'s "sole write
@@ -117,11 +122,18 @@ class DataSourceRepo(BaseRepo[DataSource, dict]):
         there is exactly one legitimate transition per row, enforced by
         trg_data_source_one_way_status, so there is never a case where a
         caller needs to supply a different timestamp.
+
+        `expected_status`, when given, makes the transition conditional at
+        write time (compare-and-set): if the row's status no longer matches,
+        nothing is written and None is returned -- instead of the trigger
+        raising and aborting the caller's whole transaction.
         """
+        stmt = update(DataSource).where(DataSource.id == id)
+        if expected_status is not None:
+            stmt = stmt.where(DataSource.status == expected_status)
         result = await self.session.execute(
-            update(DataSource)
-            .where(DataSource.id == id)
-            .values(status=status, fingerprint=fingerprint, status_updated_at=func.now())
-            .returning(DataSource)
+            stmt.values(
+                status=status, fingerprint=fingerprint, status_updated_at=func.now()
+            ).returning(DataSource)
         )
         return result.scalar_one_or_none()

@@ -2056,6 +2056,11 @@ async def start_analysis(
         ttl=max(86400, _MAX_PARSE_WAIT_SECONDS + 3600),
     )
 
+    # documents_attempted is a pre-parse snapshot of the verified documents
+    # sent for parsing, NOT a final tally: the parser may still reject (and the
+    # job quarantine) some of them. The real per-document outcome is in the
+    # later "analysis_parsing_completed" entry's parse_jobs/job_comments.
+    # Entries written before this rename carry the same value as "document_count".
     await HumanAuditRepo(db).append(
         {
             "org_id": org_id,
@@ -2063,7 +2068,7 @@ async def start_analysis(
             "actor_email": actor_email,
             "event_type": "analysis_requested",
             "deal_id": deal_id,
-            "payload": {"analysis_run_id": str(run.id), "document_count": len(usable)},
+            "payload": {"analysis_run_id": str(run.id), "documents_attempted": len(usable)},
         }
     )
 
