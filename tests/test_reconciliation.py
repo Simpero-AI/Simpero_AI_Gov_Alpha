@@ -65,7 +65,7 @@ def _claim(
     *,
     entity: str = "TestCo",
     attribute: str = "revenue",
-    period_year: int = 2024,
+    period_year: int | None = 2024,
     period_kind: str = "A",
     normalized: float,
     page: int | None,
@@ -206,6 +206,67 @@ async def test_cross_page_disagreement_flags_never_merges() -> None:
         assert set(claims) == {ids["table"], ids["prose"]}
         assert not claims[ids["table"]].flags
         assert not claims[ids["prose"]].flags
+    finally:
+        _delete_org(ORG)
+
+
+@requires_db
+async def test_cross_page_none_period_disagreement_is_not_a_contradicts() -> None:
+    """SIM-387: the group key forces period equality when both claims HAVE a
+    period, but a None period_year groups every unknown-period claim
+    together too -- that is "unknown", not "the same period". A value
+    disagreement across such a pair must not become a contradicts edge; the
+    pass has no basis to claim they conflict."""
+    _delete_org(ORG)
+    try:
+        ids = await _seed(
+            ORG,
+            {
+                "table": _claim(
+                    normalized=15_000_000, page=3, table_group_id=uuid.uuid4(), period_year=None
+                ),
+                "prose": _claim(normalized=12_000_000, page=11, period_year=None),
+            },
+        )
+        summary = await _run_reconciliation(ORG, "run-1")
+        assert summary.same_fact_edges == 0
+        assert summary.contradicts_edges == 0
+
+        edges, claims = await _edges_and_claims(ORG)
+        assert edges == []
+        assert set(claims) == {ids["table"], ids["prose"]}
+    finally:
+        _delete_org(ORG)
+
+
+@requires_db
+async def test_cross_page_known_period_disagreement_still_contradicts() -> None:
+    """Same period on both sides (not None) must still produce a contradicts
+    edge -- SIM-387 narrows the gate to None-period pairs only, it must not
+    regress the genuine cross-period-known case SIM-383 relies on."""
+    _delete_org(ORG)
+    try:
+        ids = await _seed(
+            ORG,
+            {
+                "table": _claim(
+                    normalized=15_000_000, page=3, table_group_id=uuid.uuid4(), period_year=2024
+                ),
+                "prose": _claim(normalized=12_000_000, page=11, period_year=2024),
+            },
+        )
+        summary = await _run_reconciliation(ORG, "run-1")
+        assert summary.contradicts_edges == 1
+
+        edges, _ = await _edges_and_claims(ORG)
+        contradicts = [e for e in edges if e.type == "contradicts"]
+        assert len(contradicts) == 1
+        assert contradicts[0].metadata_ is not None
+        assert contradicts[0].metadata_["period_year"] == 2024
+        assert {c.from_claim_id for c in contradicts} | {c.to_claim_id for c in contradicts} == {
+            ids["table"],
+            ids["prose"],
+        }
     finally:
         _delete_org(ORG)
 
